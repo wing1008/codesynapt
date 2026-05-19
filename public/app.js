@@ -834,7 +834,9 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
 
 const scene = new THREE.Scene()
 scene.background = new THREE.Color('#03050C')
-scene.fog = new THREE.FogExp2('#03050C', 0.0022)
+// Fog disabled — colors stay vivid at distance instead of fading
+// into the background. Perspective (size attenuation) still works.
+scene.fog = null
 
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 6000)
 
@@ -1796,6 +1798,21 @@ function stepCPU(dt) {
       v.x += (c.x - node.p.x) * FOLDER_PULL
       v.y += (c.y - node.p.y) * FOLDER_PULL
       v.z += (c.z - node.p.z) * FOLDER_PULL
+      // Outlier clamp: gentle inward nudge for nodes outside their
+      // folder's bubble. Soft — strong pull caused oscillation against
+      // cross-folder spring forces.
+      const dx = node.p.x - c.x, dy = node.p.y - c.y, dz = node.p.z - c.z
+      const dr2 = dx*dx + dy*dy + dz*dz
+      const bubR = folderBubbleRadius(c.count || 1)
+      const bubR2 = bubR * bubR
+      if (dr2 > bubR2) {
+        const dr = Math.sqrt(dr2)
+        const over = (dr - bubR) / bubR
+        const k = 0.02 * over   // gentle linear pull
+        v.x -= dx * k
+        v.y -= dy * k
+        v.z -= dz * k
+      }
     }
   }
 
@@ -3248,7 +3265,18 @@ function render() {
     const searchPop = node.matched ? 1.2 : 1.0
     const starPop = state.activeFiles.has(node.id) ? 1.15 : 1.0
     const tracePop = 1.0 + traceBoost * 1.4 + rippleSize
-    nodeSizes[i] = r * 3 * (state.nodeSizeScale || 1) * grow * (0.7 + 0.6 * node.emit + GLOBAL_HEARTBEAT * 0.06) * focusPop * searchPop * starPop * tracePop
+    let baseSize = r * 3 * (state.nodeSizeScale || 1) * grow * (0.7 + 0.6 * node.emit + GLOBAL_HEARTBEAT * 0.06) * focusPop * searchPop * starPop * tracePop
+    // When this node is being traced (read/write/etc), enforce a
+    // minimum size so it's visible even from a far camera. 11k-node
+    // graphs viewed at ~1700-unit distance otherwise compress traced
+    // nodes to a single pixel — invisible.
+    if (trace) {
+      // Boost increases with traceBoost (peak ~1.0 right after the event)
+      // and ripple (the burst in first 700ms).
+      const traceMinSize = 30 + traceBoost * 60 + rippleSize * 60
+      if (baseSize < traceMinSize) baseSize = traceMinSize
+    }
+    nodeSizes[i] = baseSize
     nodeAlphas[i] = activeVisible ? Math.min(1, node.haloA + traceBoost * 0.85) : 0
 
     const boost = 0.55 + 0.5 * node.emit
@@ -3580,6 +3608,50 @@ function zoomStep(direction) {
 }
 document.getElementById('zoomInBtn')?.addEventListener('click',  () => zoomStep('in'))
 document.getElementById('zoomOutBtn')?.addEventListener('click', () => zoomStep('out'))
+
+// ─── Vertical zoom slider ────────────────────────────────────
+// Maps slider value 0-1000 to camera distance 5500-10 (log scale).
+// Value 1000 = top = closest (small radius). Value 0 = bottom = farthest.
+const _zoomMin = 10, _zoomMax = 5500
+function zoomSliderFromRadius(r) {
+  const clamped = Math.max(_zoomMin, Math.min(_zoomMax, r))
+  const t = Math.log(clamped / _zoomMin) / Math.log(_zoomMax / _zoomMin)
+  return Math.round(1000 - t * 1000)
+}
+function zoomRadiusFromSlider(v) {
+  const t = (1000 - v) / 1000
+  return _zoomMin * Math.pow(_zoomMax / _zoomMin, t)
+}
+const zoomSliderEl = document.getElementById('zoomSlider')
+let _zoomSliderSyncing = false
+if (zoomSliderEl) {
+  zoomSliderEl.addEventListener('input', () => {
+    if (_zoomSliderSyncing) return  // ignore programmatic syncs
+    markUserInteraction?.()
+    cam.targetRadius = zoomRadiusFromSlider(parseInt(zoomSliderEl.value, 10))
+  })
+  document.getElementById('zoomSliderIn')?.addEventListener('click', () => zoomStep('in'))
+  document.getElementById('zoomSliderOut')?.addEventListener('click', () => zoomStep('out'))
+  // Sync slider position to current cam radius — runs from animation
+  // loop (cheap). Skips if user is currently dragging the slider.
+  function syncZoomSliderToCam() {
+    if (document.activeElement === zoomSliderEl) return
+    _zoomSliderSyncing = true
+    zoomSliderEl.value = zoomSliderFromRadius(cam.targetRadius)
+    _zoomSliderSyncing = false
+  }
+  // Throttle: every ~10 frames
+  let _zsFrameCount = 0
+  function _zsTick() {
+    _zsFrameCount++
+    if (_zsFrameCount >= 10) {
+      _zsFrameCount = 0
+      syncZoomSliderToCam()
+    }
+    requestAnimationFrame(_zsTick)
+  }
+  _zsTick()
+}
 
 canvas.addEventListener('click', (e) => {
   const dx = e.clientX - downX, dy = e.clientY - downY

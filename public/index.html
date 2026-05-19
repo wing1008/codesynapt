@@ -40,6 +40,13 @@
   <!-- View cube — small 3D widget showing current viewing angle, syncs with main camera -->
   <canvas id="viewCubeCanvas" width="120" height="120"></canvas>
 
+  <!-- Vertical zoom slider (left edge of canvas, next to file tree) -->
+  <div id="zoomSliderWrap" data-i18n-title="zoom.slider.title" title="줌 조절 (위: 가까이, 아래: 멀리)">
+    <button id="zoomSliderIn" class="zoom-slider-btn" title="줌 인">+</button>
+    <input type="range" id="zoomSlider" min="0" max="1000" value="700" orient="vertical">
+    <button id="zoomSliderOut" class="zoom-slider-btn" title="줌 아웃">−</button>
+  </div>
+
   <!-- Search bar -->
   <div id="searchbar">
     <div class="search-input-wrap">
@@ -50,8 +57,6 @@
     <button id="searchModeBtn" class="micro-btn" data-i18n-title="search.mode.title">◐</button>
     <button id="pause" data-i18n-title="search.pause.title">❚❚</button>
     <button id="recenter" data-i18n-title="search.recenter.title">⊕</button>
-    <button id="zoomOutBtn" class="micro-btn" data-i18n-title="search.zoom_out.title">−</button>
-    <button id="zoomInBtn" class="micro-btn" data-i18n-title="search.zoom_in.title">+</button>
     <button id="statsBtn" class="micro-btn" data-i18n-title="search.stats.title">📊</button>
     <button id="rightRailBtn" class="micro-btn" data-i18n-title="search.rightrail.title">◀</button>
     <button id="langToggle" data-i18n-title="lang.toggle.title">EN</button>
