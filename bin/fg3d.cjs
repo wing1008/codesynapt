@@ -1,0 +1,497 @@
+#!/usr/bin/env node
+// filegraph3d CLI — thin wrapper around the running Electron app's
+// localhost:7707 control API. Run filegraph3d in the background; then
+// use `fg3d <cmd>` from any terminal to inspect / control it.
+
+const http = require('http')
+
+const PORT = parseInt(process.env.FG3D_PORT || '7707', 10)
+const HOST = '127.0.0.1'
+
+function req(method, pathStr, query, body) {
+  return new Promise((resolve, reject) => {
+    let qs = ''
+    if (query) {
+      const parts = []
+      for (const [k, v] of Object.entries(query)) {
+        if (v !== undefined && v !== null) parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      }
+      if (parts.length) qs = '?' + parts.join('&')
+    }
+    const headers = {}
+    let payload = null
+    if (body !== undefined && body !== null) {
+      payload = typeof body === 'string' ? body : JSON.stringify(body)
+      headers['Content-Type']   = 'application/json'
+      headers['Content-Length'] = Buffer.byteLength(payload)
+    }
+    const r = http.request({ host: HOST, port: PORT, path: pathStr + qs, method, headers }, (res) => {
+      let chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        try { resolve({ status: res.statusCode, json: JSON.parse(text) }) }
+        catch { resolve({ status: res.statusCode, text }) }
+      })
+    })
+    r.on('error', (err) => {
+      if (err.code === 'ECONNREFUSED') {
+        reject(new Error(`filegraph3d app is not running at ${HOST}:${PORT}. Start the desktop app first (npm start, or open the installed app). Override port with FG3D_PORT=...`))
+      } else reject(err)
+    })
+    if (payload) r.write(payload)
+    r.end()
+  })
+}
+
+function encId(id) { return id.split('/').map(encodeURIComponent).join('/') }
+
+function printJson(x) { process.stdout.write(JSON.stringify(x, null, 2) + '\n') }
+function die(msg) { process.stderr.write(`error: ${msg}\n`); process.exit(1) }
+
+const USAGE = `filegraph3d CLI — usage:
+  fg3d health
+  fg3d summary                # cheap project overview (Layer 1)
+  fg3d refresh <id>           # force re-scan of one file (defeats staleness)
+  fg3d ls [--limit N] [--ext X] [--min-mass N] [--sort KEY:DIR]
+                              #   sort = mass:desc (default) | size:desc | loc:desc
+                              #          id:asc | insertion
+  fg3d show <id>              # node detail + imports + importedBy
+  fg3d read <id>              # file content
+  fg3d write <id> <path-or-->  # write file from local path or stdin (-)
+  fg3d edit <id> <find> <replace> [--all]
+                              # precise edit: find string is replaced with new string
+                              #   --all → replace all occurrences (default: must be unique)
+  fg3d deps <id>              # outgoing edges (this -> X)
+  fg3d users <id>             # incoming edges (X -> this)
+  fg3d find <substring>       # search node ids
+  fg3d focus <id>             # move app camera to node
+  fg3d open <id>              # open inspector for node
+  fg3d history <id>           # list auto-history snapshots
+  fg3d restore <id> <ts>      # restore file to a history snapshot
+  fg3d external               # list external websites this project calls
+  fg3d packages               # list packages in a monorepo
+  fg3d package <name>         # package detail: files, cross-pkg edges, declared deps
+  fg3d package-graph          # package-to-package edges
+  fg3d legacy [--type T] [--min-conf N]
+                              # cleanup audit: T = orphan|path|filename|duplicate
+                              #   --min-conf 0.85 → only high-confidence candidates
+  fg3d trace [--limit N] [--tool T]
+                              # current session's AI/CLI/MCP trace events (chronological)
+  fg3d trace stats            # top files / tool breakdown / duration for current session
+  fg3d trace sessions         # past sessions in .filegraph3d/traces/
+  fg3d trace export <path>    # write current session to JSON
+  fg3d trace clear            # start a fresh session (old one preserved on disk)
+  fg3d blast <id> [n] [dir]   # impact of editing <id>: dependents within n hops
+                              #   n   = BFS depth (default 3)
+                              #   dir = users|deps (default users)
+  fg3d timeline               # git history → when each file first appeared
+  fg3d tour                   # suggested guided tour of the project
+  fg3d changes                # files modified this session
+  fg3d diff <id>              # show first-seen vs current diff for one file
+
+Env: FG3D_PORT (default 7707)`
+
+async function main() {
+  const [cmd, ...args] = process.argv.slice(2)
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
+    process.stdout.write(USAGE + '\n'); return
+  }
+  try {
+    switch (cmd) {
+      case 'health': {
+        const r = await req('GET', '/health')
+        printJson(r.json); break
+      }
+      case 'summary': {
+        const r = await req('GET', '/summary')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        printJson(r.json); break
+      }
+      case 'refresh': {
+        if (!args[0]) return die('usage: fg3d refresh <id>')
+        const r = await req('POST', '/refresh/' + encId(args[0]))
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        printJson(r.json); break
+      }
+      case 'ls': {
+        // optional: --limit N --ext X --min-mass N
+        const q = {}
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '--limit'    && args[i+1]) { q.limit    = args[++i] }
+          else if (args[i] === '--ext'      && args[i+1]) { q.ext      = args[++i] }
+          else if (args[i] === '--min-mass' && args[i+1]) { q.minMass  = args[++i] }
+          else if (args[i] === '--sort'     && args[i+1]) { q.sort     = args[++i] }
+        }
+        const r = await req('GET', '/graph', q)
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        for (const f of r.json.files) process.stdout.write(f.id + '\n')
+        if (r.json.meta?.truncated) {
+          process.stderr.write(`\n(showing ${r.json.meta.returned} of ${r.json.meta.totalAvailable} — pass --limit higher or filter)\n`)
+        }
+        break
+      }
+      case 'show': {
+        if (!args[0]) return die('usage: fg3d show <id>')
+        const r = await req('GET', '/node/' + encId(args[0]))
+        if (r.status !== 200) return die(r.json?.error || 'not found')
+        printJson(r.json); break
+      }
+      case 'read': {
+        if (!args[0]) return die('usage: fg3d read <id>')
+        const r = await req('GET', '/file/' + encId(args[0]))
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        process.stdout.write(r.json.content); break
+      }
+      case 'deps': {
+        if (!args[0]) return die('usage: fg3d deps <id>')
+        const r = await req('GET', '/deps/' + encId(args[0]))
+        for (const e of r.json) process.stdout.write(`${e.k}\t${e.t}\n`); break
+      }
+      case 'users': {
+        if (!args[0]) return die('usage: fg3d users <id>')
+        const r = await req('GET', '/users/' + encId(args[0]))
+        for (const e of r.json) process.stdout.write(`${e.k}\t${e.s}\n`); break
+      }
+      case 'find': {
+        if (!args[0]) return die('usage: fg3d find <substring>')
+        const r = await req('GET', '/find', { q: args[0] })
+        for (const id of r.json) process.stdout.write(id + '\n'); break
+      }
+      case 'focus': {
+        if (!args[0]) return die('usage: fg3d focus <id>')
+        const r = await req('POST', '/focus/' + encId(args[0]))
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        process.stdout.write('focused: ' + args[0] + '\n'); break
+      }
+      case 'open': {
+        if (!args[0]) return die('usage: fg3d open <id>')
+        const r = await req('POST', '/open/' + encId(args[0]))
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        process.stdout.write('opened: ' + args[0] + '\n'); break
+      }
+      case 'history': {
+        if (!args[0]) return die('usage: fg3d history <id>')
+        const r = await req('GET', '/history/' + encId(args[0]))
+        for (const v of r.json) {
+          const d = new Date(v.ts).toISOString()
+          process.stdout.write(`${v.ts}\t${d}\t${v.size}B\n`)
+        }
+        break
+      }
+      case 'restore': {
+        if (!args[0] || !args[1]) return die('usage: fg3d restore <id> <ts>')
+        const r = await req('POST', '/restore/' + encId(args[0]), { ts: args[1] })
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        process.stdout.write('restored\n'); break
+      }
+      case 'blast': {
+        if (!args[0]) return die('usage: fg3d blast <id> [depth] [dir]')
+        const depth = args[1] && /^\d+$/.test(args[1]) ? args[1] : '3'
+        const dir = args[2] === 'deps' ? 'deps' : 'users'
+        const r = await req('GET', '/blast/' + encId(args[0]), { depth, dir })
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        process.stdout.write(`seed: ${j.seed}\n`)
+        process.stdout.write(`direction: ${j.direction === 'users' ? 'who imports this (blast radius)' : 'what this imports (closure)'}\n`)
+        process.stdout.write(`depth: ${j.depth} hops\n`)
+        process.stdout.write(`impact: ${j.totalFiles} files, ${j.totalLoc} LOC, ${(j.totalSize/1024).toFixed(1)} KB\n`)
+        process.stdout.write(`est. tokens to read all: ~${j.tokenEstimate.toLocaleString()}\n`)
+        process.stdout.write(`categories: source=${j.categories.source} tests=${j.categories.tests} config=${j.categories.config} docs=${j.categories.docs} other=${j.categories.other}\n\n`)
+        for (const d of j.byDepth) {
+          process.stdout.write(`  hop ${d.depth} (${d.ids.length} files):\n`)
+          for (const id of d.ids.slice(0, 50)) process.stdout.write(`    ${id}\n`)
+          if (d.ids.length > 50) process.stdout.write(`    … +${d.ids.length - 50} more\n`)
+        }
+        break
+      }
+      case 'changes': {
+        const r = await req('GET', '/changes')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        if (!r.json.length) { process.stdout.write('no files modified this session\n'); break }
+        process.stdout.write(`${r.json.length} files modified this session:\n\n`)
+        for (const c of r.json) {
+          const stamp = new Date(c.lastAt).toISOString().replace('T', ' ').slice(5, 19)
+          const sd = c.sizeDelta >= 0 ? `+${c.sizeDelta}B` : `${c.sizeDelta}B`
+          const ld = c.locDelta >= 0 ? `+${c.locDelta}` : `${c.locDelta}`
+          process.stdout.write(`${stamp}  ×${c.count}  loc:${ld}  size:${sd}  ${c.id}\n`)
+        }
+        break
+      }
+      case 'diff': {
+        if (!args[0]) return die('usage: fg3d diff <id>')
+        const r = await req('GET', '/changes/' + encId(args[0]))
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        process.stdout.write(`--- ${j.id} (first seen ${new Date(j.firstAt).toISOString()})\n`)
+        process.stdout.write(`+++ ${j.id} (now)\n`)
+        for (const ln of j.lines) {
+          if (ln.tag === 'eq')   process.stdout.write(`  ${ln.text}\n`)
+          else if (ln.tag === 'add') process.stdout.write(`+ ${ln.text}\n`)
+          else if (ln.tag === 'del') process.stdout.write(`- ${ln.text}\n`)
+        }
+        break
+      }
+      case 'tour': {
+        const r = await req('GET', '/tour')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        process.stdout.write(`guided tour through ${j.stops.length} stops (project has ${j.totalFiles} files):\n\n`)
+        for (let i = 0; i < j.stops.length; i++) {
+          const s = j.stops[i]
+          process.stdout.write(`${i + 1}. [${s.kind.toUpperCase()}] ${s.id}\n   ${s.hint}\n\n`)
+        }
+        break
+      }
+      case 'timeline': {
+        const r = await req('GET', '/timeline')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (!j.isGit) return die(j.error || 'not a git repo')
+        process.stdout.write(`git timeline: ${j.commitCount} commits, ${new Date(j.firstAt).toISOString().slice(0,10)} → ${new Date(j.lastAt).toISOString().slice(0,10)}\n\n`)
+        for (const p of j.points.slice(0, 30)) {
+          const d = new Date(p.ts).toISOString().slice(0, 10)
+          process.stdout.write(`${d}  ${p.hash.slice(0, 8)}  +${p.addedFiles.length} files  ${p.subject.slice(0, 60)}\n`)
+        }
+        if (j.points.length > 30) process.stdout.write(`… +${j.points.length - 30} more commits\n`)
+        break
+      }
+      case 'external': {
+        const r = await req('GET', '/external')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const { domains, totalCalls } = r.json
+        process.stdout.write(`총 ${totalCalls}개 호출, ${domains.length}개 도메인\n\n`)
+        for (const d of domains) {
+          process.stdout.write(`${d.domain} (${d.callers.length})\n`)
+          for (const c of d.callers) process.stdout.write(`  ${c.method.padEnd(6)} ${c.url}\n    from ${c.file}\n`)
+          process.stdout.write('\n')
+        }
+        break
+      }
+      case 'packages': {
+        const r = await req('GET', '/packages')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (!j.packages.length) {
+          process.stdout.write(`not a monorepo (kind: ${j.kind})\n`)
+          break
+        }
+        process.stdout.write(`monorepo type: ${j.kind} (${j.packages.length} packages)\n\n`)
+        const nameW = Math.max(8, ...j.packages.map((p) => p.name.length))
+        process.stdout.write(`${'name'.padEnd(nameW)}  files   loc     in→  →out  path\n`)
+        for (const p of j.packages) {
+          process.stdout.write(
+            `${p.name.padEnd(nameW)}  ` +
+            `${String(p.fileCount).padStart(5)}  ` +
+            `${String(p.loc).padStart(6)}  ` +
+            `${String(p.crossPackageDependents).padStart(3)}  ` +
+            `${String(p.crossPackageImports).padStart(4)}  ` +
+            `${p.relRoot}\n`
+          )
+        }
+        break
+      }
+      case 'package': {
+        if (!args[0]) return die('usage: fg3d package <name>')
+        const r = await req('GET', '/package/' + encodeURIComponent(args[0]))
+        if (r.status !== 200) return die(r.json?.error || 'not found')
+        const j = r.json
+        process.stdout.write(`package: ${j.name} (${j.language}, ${j.fileCount} files)\n`)
+        process.stdout.write(`root:    ${j.relRoot}\n`)
+        process.stdout.write(`kind:    ${j.kind}\n\n`)
+        if (j.declared.length) {
+          process.stdout.write(`declared deps (${j.declared.length}):\n`)
+          for (const d of j.declared.slice(0, 20)) {
+            process.stdout.write(`  ${d.kind.padEnd(16)}  ${d.name}@${d.spec}\n`)
+          }
+          if (j.declared.length > 20) process.stdout.write(`  … +${j.declared.length - 20} more\n`)
+          process.stdout.write('\n')
+        }
+        if (j.outgoingEdges.length) {
+          process.stdout.write(`cross-package imports (→ other packages, ${j.outgoingEdges.length}):\n`)
+          for (const e of j.outgoingEdges.slice(0, 20)) {
+            process.stdout.write(`  ${e.s} → [${e.toPkg}] ${e.t}\n`)
+          }
+          if (j.outgoingEdges.length > 20) process.stdout.write(`  … +${j.outgoingEdges.length - 20} more\n`)
+          process.stdout.write('\n')
+        }
+        if (j.incomingEdges.length) {
+          process.stdout.write(`cross-package dependents (← from other packages, ${j.incomingEdges.length}):\n`)
+          for (const e of j.incomingEdges.slice(0, 20)) {
+            process.stdout.write(`  [${e.fromPkg}] ${e.s} → ${e.t}\n`)
+          }
+          if (j.incomingEdges.length > 20) process.stdout.write(`  … +${j.incomingEdges.length - 20} more\n`)
+          process.stdout.write('\n')
+        }
+        process.stdout.write(`top files by mass:\n`)
+        for (const f of j.files.slice(0, 10)) {
+          process.stdout.write(`  m=${String(f.mass).padStart(3)}  ${f.id}\n`)
+        }
+        break
+      }
+      case 'write': {
+        if (!args[0] || !args[1]) return die('usage: fg3d write <id> <path-or-->\n  use "-" to read content from stdin')
+        const srcPath = args[1]
+        let content
+        if (srcPath === '-') {
+          // Read from stdin
+          content = await new Promise((resolve) => {
+            let buf = ''
+            process.stdin.setEncoding('utf8')
+            process.stdin.on('data', (c) => buf += c)
+            process.stdin.on('end', () => resolve(buf))
+          })
+        } else {
+          try { content = require('fs').readFileSync(srcPath, 'utf8') }
+          catch (e) { return die(`failed to read ${srcPath}: ${e.message}`) }
+        }
+        const r = await req('POST', '/write/' + encId(args[0]), null, { content })
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        process.stdout.write(`wrote ${r.json.size}B to ${args[0]}\n`)
+        break
+      }
+      case 'edit': {
+        if (!args[0] || args[1] === undefined || args[2] === undefined) {
+          return die('usage: fg3d edit <id> <find> <replace> [--all]')
+        }
+        const all = args.includes('--all')
+        const body = { find: args[1], replace: args[2], replaceAll: all }
+        const r = await req('POST', '/edit/' + encId(args[0]), null, body)
+        if (r.status !== 200) {
+          if (r.status === 409) return die(`${r.json.error} (${r.json.occurrences} occurrences — pass --all or refine find string)`)
+          if (r.status === 404) return die(`find string not found: ${r.json.find}`)
+          return die(r.json?.error || 'failed')
+        }
+        process.stdout.write(`edited ${args[0]} (${r.json.replacements} replacement${r.json.replacements > 1 ? 's' : ''})\n`)
+        break
+      }
+      case 'trace': {
+        const sub = args[0]
+        if (sub === 'stats') {
+          const r = await req('GET', '/trace/stats')
+          if (r.status !== 200) return die(r.json?.error || 'failed')
+          const j = r.json
+          const dur = j.durationMs ? (j.durationMs / 1000).toFixed(1) + 's' : '—'
+          process.stdout.write(`session ${j.sessionId}\n`)
+          process.stdout.write(`events: ${j.eventCount} on ${j.fileCount} files · duration ${dur}\n\n`)
+          process.stdout.write(`tool breakdown:\n`)
+          for (const [tool, n] of Object.entries(j.byTool).sort((a, b) => b[1] - a[1])) {
+            process.stdout.write(`  ${tool.padEnd(12)} ${n}\n`)
+          }
+          process.stdout.write(`\ntop files:\n`)
+          for (const f of j.topFiles.slice(0, 15)) {
+            process.stdout.write(`  ×${String(f.count).padStart(3)}  ${f.id}\n`)
+          }
+          break
+        }
+        if (sub === 'sessions') {
+          const r = await req('GET', '/trace/sessions')
+          if (r.status !== 200) return die(r.json?.error || 'failed')
+          const j = r.json
+          if (!j.sessions.length) { process.stdout.write('no past sessions\n'); break }
+          process.stdout.write(`${j.sessions.length} session(s):\n\n`)
+          for (const s of j.sessions) {
+            const stamp = new Date(s.startedAt).toISOString().replace('T', ' ').slice(0, 19)
+            const cur = s.isCurrent ? ' (current)' : ''
+            process.stdout.write(`  ${stamp}  ${s.eventCount} events  ${(s.size/1024).toFixed(1)}KB  id=${s.sessionId}${cur}\n`)
+          }
+          break
+        }
+        if (sub === 'export') {
+          if (!args[1]) return die('usage: fg3d trace export <path>')
+          const r = await req('POST', '/trace/export', { path: args[1] })
+          if (r.status !== 200) return die(r.json?.error || 'failed')
+          process.stdout.write(`exported ${r.json.eventCount} events → ${r.json.path}\n`)
+          break
+        }
+        if (sub === 'clear') {
+          const r = await req('POST', '/trace/clear')
+          if (r.status !== 200) return die(r.json?.error || 'failed')
+          process.stdout.write(`new session: ${r.json.newSessionId}\n`)
+          break
+        }
+        // default: recent log
+        const q = {}
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '--limit' && args[i+1]) q.limit = args[++i]
+          else if (args[i] === '--tool' && args[i+1]) q.tool = args[++i]
+        }
+        const r = await req('GET', '/trace', q)
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (!j.events.length) { process.stdout.write('no trace events in current session\n'); break }
+        for (const e of j.events) {
+          const stamp = new Date(e.ts).toISOString().replace('T', ' ').slice(11, 23)
+          process.stdout.write(`${stamp}  ${e.tool.padEnd(10)}  ${e.id}\n`)
+        }
+        if (j.meta?.totalAvailable > j.events.length) {
+          process.stderr.write(`\n(showing ${j.events.length} of ${j.meta.totalAvailable})\n`)
+        }
+        break
+      }
+      case 'legacy': {
+        const q = {}
+        let minConf = 0
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '--type'     && args[i+1]) q.type = args[++i]
+          else if (args[i] === '--min-conf' && args[i+1]) minConf = parseFloat(args[++i])
+        }
+        const r = await req('GET', '/legacy', q)
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        const s = j.summary
+        process.stdout.write(`migration audit: ${s.candidateCount}/${s.totalFiles} files flagged (${s.totalLoc} loc)\n`)
+        process.stdout.write(`  orphan ${s.byCategory.orphan}  path ${s.byCategory.path}  filename ${s.byCategory.filename}  duplicate ${s.byCategory.duplicate}\n\n`)
+        const fmt = (x, cat) => {
+          const c = x.confidence.toFixed(2)
+          process.stdout.write(`  [${c}] ${cat.padEnd(8)} ${x.id}\n         ${x.reason}\n`)
+        }
+        const ofMin = (arr) => arr.filter((x) => x.confidence >= minConf)
+        if (j.orphans && ofMin(j.orphans).length) {
+          process.stdout.write(`orphans (${ofMin(j.orphans).length}):\n`)
+          for (const x of ofMin(j.orphans).slice(0, 50)) fmt(x, 'orphan')
+          if (j.orphans.length > 50) process.stdout.write(`  … +${j.orphans.length - 50} more\n`)
+          process.stdout.write('\n')
+        }
+        if (j.pathPatterns && ofMin(j.pathPatterns).length) {
+          process.stdout.write(`path-pattern (${ofMin(j.pathPatterns).length}):\n`)
+          for (const x of ofMin(j.pathPatterns).slice(0, 50)) fmt(x, x.pattern)
+          process.stdout.write('\n')
+        }
+        if (j.filenamePatterns && ofMin(j.filenamePatterns).length) {
+          process.stdout.write(`filename-pattern (${ofMin(j.filenamePatterns).length}):\n`)
+          for (const x of ofMin(j.filenamePatterns).slice(0, 50)) fmt(x, x.marker)
+          process.stdout.write('\n')
+        }
+        if (j.duplicates && j.duplicates.length) {
+          process.stdout.write(`duplicate logical names (${j.duplicates.length}):\n`)
+          for (const d of j.duplicates.slice(0, 30)) {
+            process.stdout.write(`  ${d.basename}\n`)
+            for (const f of d.files) {
+              const tag = f.isCurrent ? ' (current?)' : f.hasLegacyMarker ? ' (legacy?)' : ''
+              process.stdout.write(`    m=${String(f.mass).padStart(3)}  ${f.id}${tag}\n`)
+            }
+          }
+        }
+        break
+      }
+      case 'package-graph': {
+        const r = await req('GET', '/package-graph')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (!j.edges.length) { process.stdout.write('no cross-package edges\n'); break }
+        process.stdout.write(`${j.edges.length} cross-package edges:\n\n`)
+        for (const e of j.edges) {
+          process.stdout.write(`  ${e.s.padEnd(24)} → ${e.t.padEnd(24)}  (×${e.count}, ${e.kinds.join(',')})\n`)
+        }
+        break
+      }
+      default:
+        die(`unknown command: ${cmd}\n\n${USAGE}`)
+    }
+  } catch (err) {
+    die(err.message)
+  }
+}
+
+main()

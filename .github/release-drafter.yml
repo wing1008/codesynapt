@@ -1,0 +1,174 @@
+# release-drafter configuration
+# https://github.com/release-drafter/release-drafter
+#
+# How this works:
+#   - Every merged PR is matched against the categories below by its labels
+#   - The drafter maintains a running "next release" draft on GitHub
+#   - When a release is cut, the maintainer reviews the draft and publishes
+#   - Version is auto-resolved from PR labels (major/minor/patch)
+#
+# To exclude a PR from the changelog (e.g., a typo fix or internal-only
+# refactor), tag it with the `skip-changelog` label.
+
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+# ─── Categories (in display order) ──────────────────────
+# A PR appears under the FIRST category whose labels match.
+categories:
+  - title: '💥 Breaking changes'
+    labels:
+      - breaking-change
+      - major
+
+  - title: '✨ New features'
+    labels:
+      - feature
+      - enhancement
+
+  - title: '🐛 Bug fixes'
+    labels:
+      - bug
+      - bugfix
+      - fix
+
+  - title: '🔌 Plugin system'
+    labels:
+      - plugin-api
+      - plugin
+
+  - title: '🎨 UI & themes'
+    labels:
+      - ui
+      - theme
+      - design
+
+  - title: '⚡ Performance'
+    labels:
+      - performance
+      - perf
+
+  - title: '🔒 Security'
+    labels:
+      - security
+
+  - title: '📚 Documentation'
+    labels:
+      - documentation
+      - docs
+
+  - title: '🧰 Maintenance'
+    labels:
+      - chore
+      - refactor
+      - cleanup
+      - ci
+
+  - title: '📦 Dependencies'
+    labels:
+      - dependencies
+
+# ─── PR line format ─────────────────────────────────────
+# $TITLE       — PR title
+# $NUMBER      — PR number (becomes a link)
+# $AUTHOR      — PR author (becomes a @mention)
+# $URL         — PR URL
+# $BODY        — PR description (verbose; usually skipped)
+# $BASE_REF_NAME — base branch
+# $HEAD_REF_NAME — head branch
+change-template: '- $TITLE by @$AUTHOR in #$NUMBER'
+change-title-escapes: '\<*_&#@'
+
+# ─── Version resolution ─────────────────────────────────
+# Determines what the next version should be based on the PRs since
+# the last release.
+#   - Any PR labeled `breaking-change` → major
+#   - Any PR labeled `feature` or `enhancement` → minor
+#   - Otherwise → patch
+# This is then applied to the previous tag's version.
+version-resolver:
+  major:
+    labels:
+      - breaking-change
+      - major
+  minor:
+    labels:
+      - feature
+      - enhancement
+      - minor
+  patch:
+    labels:
+      - bug
+      - bugfix
+      - fix
+      - patch
+      - chore
+      - dependencies
+      - documentation
+      - docs
+      - security
+  default: patch
+
+# ─── PR exclusion ───────────────────────────────────────
+exclude-labels:
+  - skip-changelog
+  - duplicate
+  - invalid
+  - wontfix
+  - question
+
+# ─── Author exclusion ───────────────────────────────────
+# Dependabot's own PRs still appear, but you may want to deduplicate
+# them. Leave empty for now — we group them via the "Dependencies"
+# category instead.
+exclude-contributors: []
+
+# ─── No-contributions handling ──────────────────────────
+# If no PRs match any category, the resulting section is omitted.
+# This avoids empty "🐛 Bug fixes (none this release)" sections.
+
+# ─── Release note template ──────────────────────────────
+template: |
+  ## filegraph3d $RESOLVED_VERSION
+
+  $CHANGES
+
+  ---
+
+  **Full changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
+
+  ## Install
+
+  Pre-built binaries for this release:
+
+  - **macOS** (Apple Silicon + Intel) — `filegraph3d-$RESOLVED_VERSION-mac.dmg`
+  - **Windows** — `filegraph3d-$RESOLVED_VERSION-win.exe` (installer) or portable build
+  - **Linux** — `filegraph3d-$RESOLVED_VERSION-linux.AppImage`, `.deb`, or `.tar.gz`
+
+  Verify downloads with the `SHA256SUMS-<os>.txt` files attached below.
+
+  ## Build from source
+
+  ```sh
+  git clone https://github.com/$OWNER/$REPOSITORY.git
+  cd $REPOSITORY
+  git checkout v$RESOLVED_VERSION
+  npm ci
+  npm start
+  ```
+
+  See [installation guide](https://github.com/$OWNER/$REPOSITORY/blob/main/docs/installation.md) for OS-specific notes.
+
+  ## Links
+
+  - [Documentation](https://github.com/$OWNER/$REPOSITORY/blob/main/docs/README.md)
+  - [Plugin development](https://github.com/$OWNER/$REPOSITORY/blob/main/plugin-api/README.md)
+  - [Changelog](https://github.com/$OWNER/$REPOSITORY/blob/main/CHANGELOG.md)
+  - [Report a bug](https://github.com/$OWNER/$REPOSITORY/issues/new?template=bug_report.md)
+
+# ─── Footer (optional) ──────────────────────────────────
+footer: |
+  ---
+  _Thanks to everyone who contributed to this release._
+
+  Found a bug or have a feature idea? [Open an issue](https://github.com/$OWNER/$REPOSITORY/issues/new/choose).

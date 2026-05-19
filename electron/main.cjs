@@ -1,0 +1,1681 @@
+// Electron main process — desktop app shell for filegraph3d
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron')
+const path = require('path')
+const fs = require('fs')
+const http = require('http')
+const { execFile } = require('child_process')
+const { promisify } = require('util')
+const pExecFile = promisify(execFile)
+
+// ─── Persistent state (window bounds, recent folders) ──────────
+const STORE_PATH = path.join(app.getPath('userData'), 'state.json')
+let store = {
+  windowBounds: null,
+  lastFolder: null,
+  recentFolders: [],        // auto-tracked, capped at 8
+  pinnedProjects: [],       // user-pinned: [{ path, name, pinnedAt, color? }]
+}
+try {
+  store = { ...store, ...JSON.parse(fs.readFileSync(STORE_PATH, 'utf8')) }
+} catch {}
+function saveStore() {
+  try { fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2)) } catch {}
+}
+function addRecent(folder) {
+  store.recentFolders = [folder, ...store.recentFolders.filter((f) => f !== folder)]
+    .slice(0, 8)
+  store.lastFolder = folder
+  saveStore()
+  rebuildMenu()
+}
+
+// ─── Scanner (loaded dynamically because it's ESM) ─────────────
+let Scanner = null
+let scanner = null
+let mainWindow = null
+let currentRoot = null
+
+async function loadScannerModule() {
+  if (Scanner) return Scanner
+  const mod = await import('../scanner.js')
+  Scanner = mod.Scanner
+  return Scanner
+}
+
+// Legacy audit module — lazy-loaded ESM. Cached by snapshotVersion.
+let _legacyAudit = null
+let _legacyCache = { version: -1, data: null }
+async function loadLegacyAudit() {
+  if (_legacyAudit) return _legacyAudit
+  const mod = await import('../legacy.js')
+  _legacyAudit = mod.auditLegacy
+  return _legacyAudit
+}
+async function buildLegacyCached() {
+  if (!scanner) return null
+  const v = scanner.snapshotVersion || 0
+  if (_legacyCache.version === v && _legacyCache.data) return _legacyCache.data
+  const fn = await loadLegacyAudit()
+  const data = fn(scanner)
+  if (scanner.snapshotVersion === v) _legacyCache = { version: v, data }
+  return data
+}
+
+async function startScanner(root) {
+  if (scanner) { scanner.stop(); scanner = null }
+  await loadScannerModule()
+
+  if (!fs.existsSync(root)) {
+    mainWindow?.webContents.send('error', { message: `Path does not exist: ${root}` })
+    return
+  }
+  // If a file was dropped instead of a folder, automatically use its
+  // parent directory. This is a common interaction — users drag a
+  // representative source file rather than a whole folder.
+  const stat = fs.statSync(root)
+  if (!stat.isDirectory()) {
+    if (stat.isFile()) {
+      const parent = path.dirname(root)
+      mainWindow?.webContents.send('error', {
+        message: `Opened parent folder: ${path.basename(parent)}/`,
+      })
+      root = parent
+    } else {
+      mainWindow?.webContents.send('error', { message: `Not a directory: ${root}` })
+      return
+    }
+  }
+
+  // Stop any in-flight scanner cleanly before installing a new one
+  currentRoot = root
+  timelineCache = { root: null, data: null, building: false }   // invalidate
+  addRecent(root)
+  scanner = new Scanner(root)
+
+  scanner.on('snapshot', (data) => {
+    mainWindow?.webContents.send('snapshot', { ...data, root })
+  })
+  scanner.on('stats', (s) => {
+    mainWindow?.webContents.send('stats', s)
+  })
+  scanner.on('scan-progress', (p) => {
+    mainWindow?.webContents.send('scan-progress', p)
+  })
+  scanner.on('file-changed', ({ id, absPath }) => {
+    try {
+      const stat = fs.statSync(absPath)
+      if (stat.size > 2_000_000) return
+      const content = fs.readFileSync(absPath, 'utf8')
+      snapshotHistory(currentRoot, id, content)
+      trackChange(id, content)
+    } catch {}
+  })
+
+  mainWindow?.webContents.send('folder-loaded', { root })
+  startTraceSession()
+  try {
+    scanner.start()
+  } catch (err) {
+    mainWindow?.webContents.send('error', { message: `Failed to start scanner: ${err.message}` })
+    scanner = null
+    currentRoot = null
+  }
+}
+
+function stopScanner() {
+  if (scanner) { scanner.stop(); scanner = null }
+  closeTraceWriteStream()
+  currentRoot = null
+}
+
+// ─── Window ─────────────────────────────────────────────────────
+function createWindow() {
+  const bounds = store.windowBounds || { width: 1280, height: 820 }
+  mainWindow = new BrowserWindow({
+    ...bounds,
+    minWidth: 720,
+    minHeight: 480,
+    backgroundColor: '#07090F',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    title: 'FileGraph 3D',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  })
+
+  mainWindow.loadFile(path.join(__dirname, '..', 'public', 'index.html'))
+
+  mainWindow.on('close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      store.windowBounds = mainWindow.getBounds()
+      saveStore()
+    }
+  })
+  mainWindow.on('closed', () => { mainWindow = null })
+
+  // ─── Visibility events for physics pause ─────────────────────
+  //
+  // We deliberately listen ONLY to minimize/restore/hide/show —
+  // NOT to blur/focus. The simulation should keep running when
+  // the user merely clicks into another app, even if our window
+  // is fully obscured. We only pause when the OS no longer needs
+  // to render us at all (minimized to taskbar, hidden via Cmd+H,
+  // or moved to another virtual desktop and explicitly hidden).
+  //
+  // This matches user intuition: "I didn't tell it to stop, so it
+  // shouldn't stop." It also lets the user keep filegraph3d alive
+  // on a second monitor while they work in another app.
+  // ─────────────────────────────────────────────────────────────
+  const sendVisibility = (visible) => {
+    if (!mainWindow?.isDestroyed()) {
+      mainWindow.webContents.send('window-visibility', { visible })
+    }
+  }
+  mainWindow.on('minimize', () => sendVisibility(false))
+  mainWindow.on('restore',  () => sendVisibility(true))
+  mainWindow.on('hide',     () => sendVisibility(false))
+  mainWindow.on('show',     () => sendVisibility(true))
+
+  // Drag & drop folder onto window
+  mainWindow.webContents.on('did-finish-load', () => {
+    // Auto-load last folder if it still exists
+    if (store.lastFolder && fs.existsSync(store.lastFolder)) {
+      startScanner(store.lastFolder)
+    } else {
+      mainWindow.webContents.send('no-folder')
+    }
+  })
+
+  if (process.env.FG3D_DEVTOOLS === '1') mainWindow.webContents.openDevTools()
+}
+
+// ─── Native menu ────────────────────────────────────────────────
+function rebuildMenu() {
+  const isMac = process.platform === 'darwin'
+  const pinnedItems = (store.pinnedProjects || []).map((p) => ({
+    label: `★  ${p.name}`,
+    sublabel: p.path,
+    click: () => startScanner(p.path),
+  }))
+  const recentItems = (store.recentFolders || [])
+    .filter((f) => !(store.pinnedProjects || []).some((p) => p.path === f))
+    .map((f) => ({ label: f, click: () => startScanner(f) }))
+  const recentSubmenu = (pinnedItems.length || recentItems.length)
+    ? [
+        ...(pinnedItems.length ? pinnedItems : []),
+        ...(pinnedItems.length && recentItems.length ? [{ type: 'separator' }] : []),
+        ...recentItems,
+        { type: 'separator' },
+        { label: 'Clear Recent', click: () => {
+          store.recentFolders = []
+          saveStore()
+          rebuildMenu()
+        }},
+      ]
+    : [{ label: 'No recent folders', enabled: false }]
+
+  const template = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    }] : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Open Folder…',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => pickAndLoadFolder(),
+        },
+        {
+          label: 'Open Recent',
+          submenu: recentSubmenu,
+        },
+        { type: 'separator' },
+        {
+          label: 'Close Folder',
+          accelerator: 'CmdOrCtrl+W',
+          enabled: !!currentRoot,
+          click: () => {
+            stopScanner()
+            store.lastFolder = null
+            saveStore()
+            mainWindow?.webContents.send('no-folder')
+          },
+        },
+        { type: 'separator' },
+        isMac ? { role: 'close' } : { role: 'quit' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        ...(isMac ? [{ type: 'separator' }, { role: 'front' }] : [{ role: 'close' }]),
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+async function pickAndLoadFolder() {
+  if (!mainWindow) return null
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'Select folder to visualize',
+    defaultPath: store.lastFolder || app.getPath('home'),
+  })
+  if (result.canceled || !result.filePaths[0]) return null
+  await startScanner(result.filePaths[0])
+  return result.filePaths[0]
+}
+
+// ─── IPC handlers ───────────────────────────────────────────────
+ipcMain.handle('pick-folder', () => pickAndLoadFolder())
+ipcMain.handle('load-folder', (_e, folder) => startScanner(folder))
+ipcMain.handle('get-state', () => ({
+  currentRoot,
+  recentFolders: store.recentFolders,
+}))
+ipcMain.handle('close-folder', () => {
+  stopScanner()
+  store.lastFolder = null
+  saveStore()
+  mainWindow?.webContents.send('no-folder')
+})
+// Path traversal guard. Resolves both paths to absolute, then checks
+// that the requested file is INSIDE currentRoot (not just that its
+// string starts with the same prefix, which fails on e.g.
+// /home/user/proj vs /home/user/proj2 false positives).
+function isInsideRoot(root, full) {
+  const resolvedRoot = path.resolve(root)
+  const resolvedFull = path.resolve(full)
+  const rel = path.relative(resolvedRoot, resolvedFull)
+  return rel && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+ipcMain.handle('read-file', (_e, id) => {
+  if (!currentRoot || !id) return null
+  try {
+    const full = path.join(currentRoot, id)
+    if (!isInsideRoot(currentRoot, full)) return null
+    const stat = fs.statSync(full)
+    if (!stat.isFile()) return null
+    if (stat.size > 2_000_000) return { content: '[file too large to open]', truncated: true }
+    const content = fs.readFileSync(full, 'utf8')
+    return { content }
+  } catch (e) {
+    return { content: `[error: ${e.message}]`, error: true }
+  }
+})
+// Shared write helper — used by IPC, HTTP /write, and HTTP /edit.
+// All AI-issued writes flow through here so the audit trail (history
+// snapshot + trace emission) is consistent regardless of entry point.
+function writeFileToRoot(id, content, { source = 'ipc' } = {}) {
+  if (!currentRoot || !id || typeof content !== 'string') return { ok: false, error: 'invalid args' }
+  if (content.length > 2_000_000) return { ok: false, error: 'content too large (>2MB)' }
+  try {
+    const full = path.join(currentRoot, id)
+    if (!isInsideRoot(currentRoot, full)) return { ok: false, error: 'outside root' }
+    fs.writeFileSync(full, content, 'utf8')
+    snapshotHistory(currentRoot, id, content)
+    // Mark every external write with `tool: 'write'` so the renderer
+    // can tint the node green instead of the read-pink.
+    emitTrace('write', id)
+    return { ok: true, size: Buffer.byteLength(content, 'utf8'), source }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+}
+
+ipcMain.handle('write-file', (_e, id, content) => writeFileToRoot(id, content, { source: 'ipc' }))
+ipcMain.handle('set-history-enabled', (_e, enabled) => {
+  historyEnabled = !!enabled
+  return { ok: true, enabled: historyEnabled }
+})
+ipcMain.handle('get-history-enabled', () => historyEnabled)
+ipcMain.handle('list-history', (_e, id) => listHistory(currentRoot, id))
+ipcMain.handle('read-history', (_e, id, ts) => readHistorySnap(currentRoot, id, ts))
+ipcMain.handle('restore-history', (_e, id, ts) => {
+  if (!currentRoot || !id || !ts) return { ok: false }
+  const content = readHistorySnap(currentRoot, id, ts)
+  if (content === null) return { ok: false, error: 'snapshot not found' }
+  try {
+    const full = path.join(currentRoot, id)
+    if (!isInsideRoot(currentRoot, full)) return { ok: false, error: 'outside root' }
+    fs.writeFileSync(full, content, 'utf8')
+    snapshotHistory(currentRoot, id, content)
+    return { ok: true, content }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// ─── Session change log ────────────────────────────────────────
+// Tracks every file modification detected by the scanner during this
+// session — what AI editing agents (Claude Code, Cursor) write hits
+// this list. Captures first-seen content on first detection so we can
+// generate diffs for the "show all changes" view.
+const sessionChanges = new Map()   // id -> { firstAt, lastAt, count, firstSeen, currentSize, currentLoc }
+function trackChange(id, content) {
+  const existing = sessionChanges.get(id)
+  const now = Date.now()
+  const loc = content ? content.split('\n').length : 0
+  const size = Buffer.byteLength(content || '', 'utf8')
+  if (existing) {
+    existing.lastAt = now
+    existing.count += 1
+    existing.currentSize = size
+    existing.currentLoc = loc
+  } else {
+    // First change we see — we already lost the original "before".
+    // Capture the current content as "firstSeen" so subsequent changes
+    // have something to diff against.
+    sessionChanges.set(id, {
+      firstAt: now, lastAt: now, count: 1,
+      firstSeen: content || '',
+      firstSeenSize: size, firstSeenLoc: loc,
+      currentSize: size, currentLoc: loc,
+    })
+  }
+}
+function listSessionChanges() {
+  const items = []
+  for (const [id, c] of sessionChanges.entries()) {
+    items.push({
+      id,
+      firstAt: c.firstAt, lastAt: c.lastAt, count: c.count,
+      sizeBefore: c.firstSeenSize, sizeAfter: c.currentSize,
+      locBefore: c.firstSeenLoc,   locAfter: c.currentLoc,
+      sizeDelta: c.currentSize - c.firstSeenSize,
+      locDelta:  c.currentLoc  - c.firstSeenLoc,
+    })
+  }
+  items.sort((a, b) => b.lastAt - a.lastAt)
+  return items
+}
+function getChangeDiff(id) {
+  const c = sessionChanges.get(id)
+  if (!c) return null
+  let after = null
+  try {
+    if (!currentRoot) return null
+    const full = path.join(currentRoot, id)
+    if (!isInsideRoot(currentRoot, full)) return null
+    const stat = fs.statSync(full)
+    if (stat.size > 2_000_000) return { error: 'file too large' }
+    after = fs.readFileSync(full, 'utf8')
+  } catch (e) { return { error: e.message } }
+  return {
+    id, firstAt: c.firstAt, lastAt: c.lastAt, count: c.count,
+    before: c.firstSeen,
+    after,
+    lines: makeLineDiff(c.firstSeen, after),
+  }
+}
+// Tiny LCS-based unified diff. Returns array of { tag: 'eq'|'add'|'del', a?: lineNo, b?: lineNo, text }.
+function makeLineDiff(before, after) {
+  const A = (before || '').split('\n')
+  const B = (after  || '').split('\n')
+  const n = A.length, m = B.length
+  // LCS table — bail out if too large to avoid huge allocations.
+  if (n * m > 2_000_000) return [{ tag: 'note', text: 'file too large to diff line-by-line' }]
+  const dp = new Uint32Array((n + 1) * (m + 1))
+  const W = m + 1
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * W + j] = A[i] === B[j]
+        ? dp[(i + 1) * W + (j + 1)] + 1
+        : Math.max(dp[(i + 1) * W + j], dp[i * W + (j + 1)])
+    }
+  }
+  const out = []
+  let i = 0, j = 0
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push({ tag: 'eq', a: i + 1, b: j + 1, text: A[i] }); i++; j++ }
+    else if (dp[(i + 1) * W + j] >= dp[i * W + (j + 1)]) { out.push({ tag: 'del', a: i + 1, text: A[i] }); i++ }
+    else { out.push({ tag: 'add', b: j + 1, text: B[j] }); j++ }
+  }
+  while (i < n) { out.push({ tag: 'del', a: i + 1, text: A[i] }); i++ }
+  while (j < m) { out.push({ tag: 'add', b: j + 1, text: B[j] }); j++ }
+  return out
+}
+
+// ─── File history ──────────────────────────────────────────────
+const HISTORY_DIR_NAME = '.filegraph3d'
+const HISTORY_MAX_PER_FILE = 3
+let historyEnabled = false  // default OFF — user toggles on in settings
+function historyDirFor(root, id) {
+  const safe = id.replace(/[\\/:]/g, '__').replace(/[^A-Za-z0-9._-]/g, '_')
+  return path.join(root, HISTORY_DIR_NAME, 'history', safe)
+}
+function snapshotHistory(root, id, content) {
+  if (!historyEnabled) return
+  if (!root || !id) return
+  try {
+    const dir = historyDirFor(root, id)
+    fs.mkdirSync(dir, { recursive: true })
+    const files = fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.snap'))
+      .map((f) => ({ name: f, ts: parseInt(f, 10) }))
+      .filter((f) => !isNaN(f.ts))
+      .sort((a, b) => b.ts - a.ts)
+    // Skip if newest snapshot is identical (avoid stutter from chokidar re-firing)
+    if (files.length > 0) {
+      try {
+        const prev = fs.readFileSync(path.join(dir, files[0].name), 'utf8')
+        if (prev === content) return
+      } catch {}
+    }
+    fs.writeFileSync(path.join(dir, `${Date.now()}.snap`), content, 'utf8')
+    // Prune to last HISTORY_MAX_PER_FILE
+    const all = fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.snap'))
+      .map((f) => ({ name: f, ts: parseInt(f, 10) }))
+      .filter((f) => !isNaN(f.ts))
+      .sort((a, b) => b.ts - a.ts)
+    for (const f of all.slice(HISTORY_MAX_PER_FILE)) {
+      try { fs.unlinkSync(path.join(dir, f.name)) } catch {}
+    }
+  } catch {}
+}
+function listHistory(root, id) {
+  if (!root || !id) return []
+  try {
+    const dir = historyDirFor(root, id)
+    if (!fs.existsSync(dir)) return []
+    return fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.snap'))
+      .map((f) => {
+        const ts = parseInt(f, 10)
+        if (isNaN(ts)) return null
+        try {
+          const stat = fs.statSync(path.join(dir, f))
+          return { ts, size: stat.size }
+        } catch { return null }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.ts - a.ts)
+  } catch { return [] }
+}
+function readHistorySnap(root, id, ts) {
+  if (!root || !id || !ts) return null
+  try {
+    const dir = historyDirFor(root, id)
+    const file = path.join(dir, `${ts}.snap`)
+    if (!fs.existsSync(file)) return null
+    return fs.readFileSync(file, 'utf8')
+  } catch { return null }
+}
+ipcMain.handle('reveal-in-os', (_e, id) => {
+  if (!currentRoot || !id) return
+  const full = path.join(currentRoot, id)
+  if (isInsideRoot(currentRoot, full) && fs.existsSync(full)) {
+    shell.showItemInFolder(full)
+  }
+})
+ipcMain.handle('open-in-editor', (_e, id) => {
+  if (!currentRoot || !id) return
+  const full = path.join(currentRoot, id)
+  if (isInsideRoot(currentRoot, full) && fs.existsSync(full)) {
+    shell.openPath(full)
+  }
+})
+
+// ─── Plugin system ──────────────────────────────────────────────
+const pluginLoader = require('./plugin-loader.cjs')
+
+ipcMain.handle('list-plugins', () => {
+  try {
+    return pluginLoader.discoverPlugins()
+  } catch (err) {
+    console.error('[main] plugin discovery failed:', err)
+    return []
+  }
+})
+
+ipcMain.handle('open-plugin-dir', () => {
+  try {
+    const dir = pluginLoader.ensurePluginDir()
+    shell.openPath(dir)
+    return dir
+  } catch (err) {
+    console.error('[main] cannot open plugin dir:', err)
+    return null
+  }
+})
+
+ipcMain.handle('plugin-dir', () => pluginLoader.getPluginDir())
+
+// ─── Pinned projects ──────────────────────────────────────────
+function basenameOf(p) {
+  return p.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop() || p
+}
+// ─── Panel data IPCs (renderer → main, bypasses HTTP/CSP) ─────
+// These mirror the HTTP control API endpoints but are reached via the
+// preload bridge instead of fetch(). The renderer can't fetch its own
+// HTTP server from the file:// origin under the current CSP, so we
+// expose the data through IPC. Same underlying functions are shared
+// with the HTTP layer.
+ipcMain.handle('panel:tour',       () => buildTour())
+ipcMain.handle('panel:timeline',   async () => await buildTimeline())
+ipcMain.handle('panel:changes',    () => listSessionChanges())
+ipcMain.handle('panel:change-diff', (_e, id) => getChangeDiff(id))
+ipcMain.handle('panel:packages',   () => buildPackagesCached())
+ipcMain.handle('panel:package',    (_e, name) => buildPackageDetail(name))
+ipcMain.handle('panel:legacy',     async () => await buildLegacyCached())
+ipcMain.handle('trace:log',        (_e, opts = {}) => {
+  let evs = traceLog
+  if (opts.tool) evs = evs.filter((e) => e.tool === opts.tool)
+  if (opts.limit) evs = evs.slice(-opts.limit)
+  return { sessionId: traceSessionId, events: evs, totalAvailable: traceLog.length }
+})
+ipcMain.handle('trace:stats',      () => ({ sessionId: traceSessionId, ...computeTraceStats(traceLog) }))
+ipcMain.handle('trace:sessions',   () => ({
+  sessions: listTraceSessions(currentRoot), currentSessionId: traceSessionId,
+}))
+ipcMain.handle('trace:session',    (_e, id) => {
+  const data = readTraceSession(currentRoot, id)
+  if (!data) return null
+  return { ...data, stats: computeTraceStats(data.events) }
+})
+ipcMain.handle('trace:clear',      () => { traceLog = []; startTraceSession(); return { newSessionId: traceSessionId } })
+ipcMain.handle('trace:export',     async (_e, exportPath) => {
+  if (!exportPath) {
+    const r = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export AI trace session',
+      defaultPath: `fg3d-trace-${traceSessionId}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (r.canceled || !r.filePath) return { canceled: true }
+    exportPath = r.filePath
+  }
+  try {
+    const stats = computeTraceStats(traceLog)
+    const out = {
+      sessionId: traceSessionId, root: currentRoot,
+      startedAt: traceSessionStartedAt, exportedAt: Date.now(),
+      stats, events: traceLog,
+    }
+    fs.writeFileSync(exportPath, JSON.stringify(out, null, 2), 'utf8')
+    return { ok: true, path: exportPath, eventCount: traceLog.length }
+  } catch (e) { return { error: e.message } }
+})
+
+ipcMain.handle('list-projects', () => ({
+  pinned: store.pinnedProjects || [],
+  recent: store.recentFolders || [],
+  current: currentRoot,
+}))
+ipcMain.handle('pin-project', (_e, payload) => {
+  const path = (payload && payload.path) || ''
+  if (!path) return { ok: false, error: 'path required' }
+  const name = (payload && payload.name) || basenameOf(path)
+  const color = (payload && payload.color) || null
+  store.pinnedProjects = (store.pinnedProjects || []).filter((p) => p.path !== path)
+  store.pinnedProjects.unshift({ path, name, color, pinnedAt: Date.now() })
+  saveStore()
+  rebuildMenu()
+  return { ok: true, pinned: store.pinnedProjects }
+})
+ipcMain.handle('unpin-project', (_e, path) => {
+  store.pinnedProjects = (store.pinnedProjects || []).filter((p) => p.path !== path)
+  saveStore()
+  rebuildMenu()
+  return { ok: true, pinned: store.pinnedProjects }
+})
+ipcMain.handle('rename-project', (_e, payload) => {
+  const path = (payload && payload.path) || ''
+  const name = (payload && payload.name) || ''
+  if (!path || !name) return { ok: false, error: 'path and name required' }
+  const list = store.pinnedProjects || []
+  const item = list.find((p) => p.path === path)
+  if (!item) return { ok: false, error: 'not pinned' }
+  item.name = name
+  saveStore()
+  rebuildMenu()
+  return { ok: true, pinned: list }
+})
+
+// ─── HTTP control server (for CLI + MCP) ───────────────────────
+// Exposes read-only graph queries and UI control actions on
+// http://127.0.0.1:PORT (default 7707). Local-only. Port and
+// enable/disable are configurable via env vars and persistent settings.
+const CONTROL_DEFAULT_PORT = parseInt(process.env.FG3D_PORT || '7707', 10)
+let controlServer = null
+let controlPort = CONTROL_DEFAULT_PORT
+
+function getGraphState() {
+  if (!scanner) return null
+  return { root: currentRoot, ...scanner.snapshot() }
+}
+function findNode(id) {
+  if (!scanner) return null
+  const f = scanner.files.get(id)
+  if (!f) return null
+  return {
+    id: f.id, ext: f.ext, loc: f.loc, size: f.size,
+    importCount: f.imports.length,
+    hasDynamicResolution: (f.dynamicPatterns || []).length > 0,
+    dynamicPatterns: f.dynamicPatterns || [],
+    lastSeenAt: f.lastSeenAt,
+  }
+}
+
+// Approximate token count — Anthropic's published rule of thumb is
+// ~3.5–4 chars/token for code. Use 4 conservatively for budgeting.
+function estimateTokens(obj) {
+  try { return Math.ceil(JSON.stringify(obj).length / 4) } catch { return 0 }
+}
+function withMeta(payload, extra = {}) {
+  const meta = {
+    scannedAt: scanner?._lastSnapshotAt || Date.now(),
+    serverTime: Date.now(),
+    ...extra,
+  }
+  meta.tokenEstimate = estimateTokens({ ...payload, meta })
+  return { ...payload, meta }
+}
+
+// Cached wrapper around buildSummary — recomputes only when the graph
+// snapshot version changes. Lazy: cost paid only when summary is read.
+let _summaryCache = { version: -1, data: null }
+function buildSummaryCached() {
+  if (!scanner) return null
+  const v = scanner.snapshotVersion || 0
+  if (_summaryCache.version === v && _summaryCache.data) return _summaryCache.data
+  const data = buildSummary()
+  // Race guard: only cache if version didn't shift during compute.
+  if (scanner.snapshotVersion === v) _summaryCache = { version: v, data }
+  return data
+}
+
+// Project summary — Layer-1 cheap overview for AI to read first
+function buildSummary() {
+  if (!scanner) return null
+  const files = [...scanner.files.values()]
+  const byExt = {}
+  let dynamicCount = 0
+  const incoming = new Map()
+  const outgoing = new Map()
+  for (const e of scanner.edges) {
+    incoming.set(e.t, (incoming.get(e.t) || 0) + 1)
+    outgoing.set(e.s, (outgoing.get(e.s) || 0) + 1)
+  }
+  for (const f of files) {
+    byExt[f.ext || 'other'] = (byExt[f.ext || 'other'] || 0) + 1
+    if ((f.dynamicPatterns || []).length > 0) dynamicCount++
+  }
+  // Top hubs
+  const topHubs = files
+    .map((f) => ({ id: f.id, incoming: incoming.get(f.id) || 0, ext: f.ext }))
+    .filter((h) => h.incoming >= 2)
+    .sort((a, b) => b.incoming - a.incoming)
+    .slice(0, 10)
+  // Top folders by file count
+  const folderCount = new Map()
+  for (const f of files) {
+    const p = f.id.includes('/') ? f.id.slice(0, f.id.lastIndexOf('/')) : '(root)'
+    const top = p.split('/')[0] || '(root)'
+    folderCount.set(top, (folderCount.get(top) || 0) + 1)
+  }
+  const topFolders = [...folderCount.entries()]
+    .sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([path, files]) => ({ path, files }))
+  // Orphans (no incoming AND no outgoing)
+  let orphanCount = 0
+  for (const f of files) {
+    if ((incoming.get(f.id) || 0) === 0 && (outgoing.get(f.id) || 0) === 0) orphanCount++
+  }
+  // Ext breakdown (top 5)
+  const extMix = Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .reduce((o, [k, v]) => (o[k] = v, o), {})
+  // External services (already aggregated)
+  const ext = getExternalUrls()
+  const topExternal = ext.domains.slice(0, 5).map((d) => d.domain)
+  return {
+    root: currentRoot,
+    fileCount: files.length,
+    edgeCount: scanner.edges.length,
+    extMix,
+    topFolders,
+    topHubs,
+    orphanCount,
+    dynamicPatternFileCount: dynamicCount,
+    externalDomainCount: ext.domains.length,
+    externalDomainsTop: topExternal,
+    historyEnabled,
+  }
+}
+function getDeps(id) {
+  if (!scanner) return []
+  return scanner.edges.filter((e) => e.s === id)
+}
+function getUsers(id) {
+  if (!scanner) return []
+  return scanner.edges.filter((e) => e.t === id)
+}
+// Package-level overview. For each detected package compute file count,
+// LOC total, edges in/out of the package (file-level), and dependents.
+// Cached against snapshotVersion like buildSummary.
+let _packagesCache = { version: -1, data: null }
+function buildPackagesCached() {
+  if (!scanner) return null
+  const v = scanner.snapshotVersion || 0
+  if (_packagesCache.version === v && _packagesCache.data) return _packagesCache.data
+  const m = scanner.monorepo
+  if (!m || m.kind === 'none' || !m.packages.length) {
+    const empty = { kind: m?.kind || 'none', packages: [], pkgEdges: [], rootIsPackage: !!m?.rootIsPackage }
+    _packagesCache = { version: v, data: empty }
+    return empty
+  }
+  // Bucket files per package
+  const filesByPkg = new Map()
+  for (const f of scanner.files.values()) {
+    if (!f.pkg) continue
+    const arr = filesByPkg.get(f.pkg) || []
+    arr.push(f)
+    filesByPkg.set(f.pkg, arr)
+  }
+  // Incoming/outgoing edge counts per package (file-level)
+  const edgesIn = new Map(), edgesOut = new Map()
+  for (const e of scanner.edges) {
+    const sf = scanner.files.get(e.s), tf = scanner.files.get(e.t)
+    if (!sf || !tf) continue
+    if (sf.pkg && sf.pkg !== tf.pkg) edgesOut.set(sf.pkg, (edgesOut.get(sf.pkg) || 0) + 1)
+    if (tf.pkg && sf.pkg !== tf.pkg) edgesIn.set(tf.pkg,  (edgesIn.get(tf.pkg)  || 0) + 1)
+  }
+  const packages = m.packages.map((p) => {
+    const files = filesByPkg.get(p.name) || []
+    const loc = files.reduce((s, f) => s + (f.loc || 0), 0)
+    const size = files.reduce((s, f) => s + (f.size || 0), 0)
+    return {
+      name: p.name,
+      relRoot: p.relRoot,
+      manifest: p.manifest,
+      language: p.language,
+      kind: p.kind,
+      fileCount: files.length,
+      loc, size,
+      crossPackageImports: edgesOut.get(p.name) || 0,
+      crossPackageDependents: edgesIn.get(p.name) || 0,
+    }
+  })
+  const data = {
+    kind: m.kind,
+    rootIsPackage: m.rootIsPackage,
+    packages,
+    pkgEdges: scanner.pkgEdges || [],
+  }
+  if (scanner.snapshotVersion === v) _packagesCache = { version: v, data }
+  return data
+}
+
+// Detail view for a single package: files (sorted by mass), declared
+// dependencies (from manifest), incoming/outgoing cross-package edges
+// with the specific file pairs that make up each edge.
+function buildPackageDetail(name) {
+  if (!scanner) return null
+  const m = scanner.monorepo
+  const pkg = m?.packages?.find((p) => p.name === name)
+  if (!pkg) return null
+  const files = []
+  const incoming = new Map()  // for sorting by mass
+  for (const e of scanner.edges) incoming.set(e.t, (incoming.get(e.t) || 0) + 1)
+  for (const f of scanner.files.values()) {
+    if (f.pkg !== name) continue
+    files.push({
+      id: f.id, ext: f.ext, loc: f.loc, size: f.size,
+      mass: incoming.get(f.id) || 0,
+    })
+  }
+  files.sort((a, b) => b.mass - a.mass)
+  // Cross-package edges involving this package
+  const outgoingEdges = []  // edges from THIS package to others
+  const incomingEdges = []  // edges from others into THIS package
+  for (const e of scanner.edges) {
+    const sf = scanner.files.get(e.s), tf = scanner.files.get(e.t)
+    if (!sf || !tf || !sf.pkg || !tf.pkg || sf.pkg === tf.pkg) continue
+    if (sf.pkg === name) outgoingEdges.push({ s: e.s, t: e.t, k: e.k, toPkg: tf.pkg })
+    if (tf.pkg === name) incomingEdges.push({ s: e.s, t: e.t, k: e.k, fromPkg: sf.pkg })
+  }
+  // Declared deps from manifest
+  let declared = []
+  try {
+    if (pkg.manifest === 'package.json') {
+      const j = JSON.parse(fs.readFileSync(path.join(pkg.root, 'package.json'), 'utf8'))
+      const collect = (field) => {
+        if (!j[field]) return
+        for (const [k, v] of Object.entries(j[field])) declared.push({ name: k, spec: v, kind: field })
+      }
+      collect('dependencies'); collect('devDependencies'); collect('peerDependencies')
+    }
+  } catch {}
+  return {
+    name, relRoot: pkg.relRoot, manifest: pkg.manifest,
+    language: pkg.language, kind: pkg.kind,
+    fileCount: files.length, files,
+    outgoingEdges, incomingEdges,
+    declared,
+  }
+}
+
+function searchFiles(q) {
+  if (!scanner || !q) return []
+  const needle = q.toLowerCase()
+  const out = []
+  for (const f of scanner.files.values()) {
+    if (f.id.toLowerCase().includes(needle)) out.push(f.id)
+    if (out.length >= 100) break
+  }
+  return out
+}
+
+// Predict the impact of editing a file: BFS through dependents (or
+// dependencies), tally total size + LOC + categorize by path. Token
+// estimate uses the ~4-chars-per-token heuristic Anthropic publishes.
+function computeBlastRadius(id, depth = 3, direction = 'users') {
+  if (!scanner || !scanner.files.has(id)) return null
+  const visited = new Set([id])
+  let frontier = new Set([id])
+  const byDepth = [{ depth: 0, ids: [id] }]
+  for (let d = 1; d <= depth; d++) {
+    const next = new Set()
+    for (const fid of frontier) {
+      const edges = direction === 'users' ? getUsers(fid) : getDeps(fid)
+      for (const e of edges) {
+        const neighbor = direction === 'users' ? e.s : e.t
+        if (visited.has(neighbor)) continue
+        visited.add(neighbor)
+        next.add(neighbor)
+      }
+    }
+    if (next.size === 0) break
+    byDepth.push({ depth: d, ids: [...next] })
+    frontier = next
+  }
+  const files = [...visited].map((fid) => {
+    const f = scanner.files.get(fid)
+    return f ? { id: fid, ext: f.ext, loc: f.loc, size: f.size } : null
+  }).filter(Boolean)
+  const totalSize = files.reduce((s, f) => s + f.size, 0)
+  const totalLoc  = files.reduce((s, f) => s + f.loc, 0)
+  // Anthropic publishes ~3.5–4 chars/token for code. Use 4 as a round
+  // estimate; this is the same heuristic the SDK docs recommend.
+  const tokenEstimate = Math.round(totalSize / 4)
+  const categories = { tests: 0, source: 0, config: 0, docs: 0, other: 0 }
+  for (const f of files) {
+    if (/(?:^|\/)(?:__tests__|test|tests|spec|e2e)\/|\.(?:test|spec)\.[a-z]+$/i.test(f.id)) categories.tests++
+    else if (/\.(?:json|ya?ml|toml|env|config|conf|ini|lock)(?:\.\w+)?$|^\.[a-z]+rc/i.test(f.id)) categories.config++
+    else if (/\.(?:md|mdx|txt|rst|adoc)$/i.test(f.id)) categories.docs++
+    else if (f.ext) categories.source++
+    else categories.other++
+  }
+  return {
+    seed: id, direction, depth,
+    totalFiles: files.length,
+    totalSize, totalLoc, tokenEstimate, categories,
+    files: files.sort((a, b) => b.size - a.size).slice(0, 200),
+    byDepth,
+  }
+}
+
+// Build a per-file "first introduced at" timeline from `git log`.
+// Cached after first build because git log over a large repo is slow.
+// Returns: { points: [{ ts, hash, subject, addedFiles: [...] }], firstAt, lastAt, isGit, error? }
+let timelineCache = { root: null, data: null, building: false }
+async function buildTimeline() {
+  if (!currentRoot) return { error: 'no folder loaded', isGit: false }
+  if (timelineCache.root === currentRoot && timelineCache.data) return timelineCache.data
+  if (timelineCache.building) return { error: 'building', isGit: true, building: true }
+  timelineCache.building = true
+  try {
+    await pExecFile('git', ['rev-parse', '--git-dir'], { cwd: currentRoot })
+  } catch {
+    timelineCache.building = false
+    return { error: 'not a git repository', isGit: false }
+  }
+  try {
+    const { stdout } = await pExecFile(
+      'git',
+      ['log', '--reverse', '--diff-filter=A', '--name-only', '--format=__C__%H|%at|%s'],
+      { cwd: currentRoot, maxBuffer: 100 * 1024 * 1024 }
+    )
+    const points = []
+    let cur = null
+    for (const line of stdout.split('\n')) {
+      if (line.startsWith('__C__')) {
+        const [hash, atStr, ...subj] = line.slice(5).split('|')
+        cur = { hash, ts: parseInt(atStr, 10) * 1000, subject: subj.join('|'), addedFiles: [] }
+        points.push(cur)
+      } else if (line && cur) {
+        // Only keep files we currently track (filters renames + deletes)
+        const id = line.replace(/\\/g, '/')
+        if (scanner?.files?.has(id)) cur.addedFiles.push(id)
+      }
+    }
+    // Drop empty commits (commits that added only files we no longer have)
+    const filtered = points.filter((p) => p.addedFiles.length > 0)
+    const data = {
+      isGit: true,
+      points: filtered,
+      firstAt: filtered[0]?.ts || Date.now(),
+      lastAt:  filtered[filtered.length - 1]?.ts || Date.now(),
+      commitCount: filtered.length,
+    }
+    timelineCache = { root: currentRoot, data, building: false }
+    return data
+  } catch (e) {
+    timelineCache.building = false
+    return { error: e.message, isGit: true }
+  }
+}
+
+// Heuristic-only onboarding tour. Picks likely entry points (index/
+// main/app/server at the project root or under src/), then the top
+// hub files by incoming-import count. Each stop has a generated
+// human-readable hint. An MCP client can call fg3d_tour_plan to get
+// the same script for narrating.
+function buildTour() {
+  if (!scanner) return null
+  const files = [...scanner.files.values()]
+  const stops = []
+  const seen = new Set()
+  const entryRe = /^(?:src\/)?(?:index|main|app|server|cli|bin)(?:\.[a-z]+)+$/i
+  const entries = files.filter((f) => entryRe.test(f.id)).sort((a, b) => a.id.length - b.id.length).slice(0, 3)
+  for (const f of entries) {
+    if (seen.has(f.id)) continue
+    seen.add(f.id)
+    stops.push({
+      id: f.id,
+      kind: 'entry',
+      hint: `Entry point — likely where execution starts. ${f.ext.toUpperCase()} file, ${f.loc} LOC.`,
+    })
+  }
+  // Inbound count per file
+  const inCount = new Map()
+  for (const e of scanner.edges) inCount.set(e.t, (inCount.get(e.t) || 0) + 1)
+  const hubs = files
+    .map((f) => ({ ...f, inCount: inCount.get(f.id) || 0 }))
+    .filter((f) => f.inCount >= 2 && !seen.has(f.id))
+    .sort((a, b) => b.inCount - a.inCount)
+    .slice(0, 5)
+  for (const f of hubs) {
+    seen.add(f.id)
+    stops.push({
+      id: f.id,
+      kind: 'hub',
+      hint: `Hub file — ${f.inCount} other files import this. Core utility or shared module.`,
+    })
+  }
+  // External-call concentrators
+  const ext = getExternalUrls()
+  const topCallers = new Map()
+  for (const d of ext.domains) {
+    for (const c of d.callers) {
+      topCallers.set(c.file, (topCallers.get(c.file) || 0) + 1)
+    }
+  }
+  const apiFiles = [...topCallers.entries()]
+    .filter(([id]) => !seen.has(id))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+  for (const [id, count] of apiFiles) {
+    seen.add(id)
+    stops.push({
+      id, kind: 'api',
+      hint: `External API integration — calls ${count} different external URL${count === 1 ? '' : 's'}.`,
+    })
+  }
+  return { stops, totalFiles: scanner.files.size }
+}
+
+function getExternalUrls() {
+  if (!scanner) return { domains: [], totalCalls: 0 }
+  const byDomain = new Map()
+  let total = 0
+  // Helper: register one URL occurrence
+  const add = (rawUrl, fileId, methodHint) => {
+    const m = rawUrl.match(/^(https?|wss?):\/\/([^\/:?#]+)/i)
+    if (!m) return
+    const proto = m[1].toLowerCase()
+    const domain = m[2].toLowerCase()
+    let bucket = byDomain.get(domain)
+    if (!bucket) { bucket = { domain, proto, callers: [] }; byDomain.set(domain, bucket) }
+    bucket.callers.push({ file: fileId, url: rawUrl, method: methodHint || (proto.startsWith('ws') ? 'WS' : 'GET') })
+    total++
+  }
+  for (const f of scanner.files.values()) {
+    // 1. Structured apiCalls — known fetch/axios/requests patterns with method
+    if (f.apiCalls && f.apiCalls.length) {
+      for (const c of f.apiCalls) {
+        if (/^https?:\/\//i.test(c.url)) add(c.url, f.id, c.method || 'GET')
+      }
+    }
+    // 2. Generic URL grep — catches everything else
+    if (f.externalUrls && f.externalUrls.length) {
+      for (const u of f.externalUrls) add(u.url, f.id, null)
+    }
+  }
+  // De-duplicate identical (file, url, method) triples within each domain
+  for (const bucket of byDomain.values()) {
+    const seen = new Set()
+    bucket.callers = bucket.callers.filter((c) => {
+      const k = c.file + '|' + c.url + '|' + c.method
+      if (seen.has(k)) return false
+      seen.add(k); return true
+    })
+  }
+  // Recompute total after dedup
+  total = 0
+  for (const b of byDomain.values()) total += b.callers.length
+  const domains = [...byDomain.values()].sort((a, b) => b.callers.length - a.callers.length)
+  return { domains, totalCalls: total }
+}
+
+function writeJson(res, status, data) {
+  const body = JSON.stringify(data)
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  })
+  res.end(body)
+}
+
+// ─── Trace store ───────────────────────────────────────────────
+//
+// Persistent record of every node access (tool, id, timestamp) the
+// AI/CLI/MCP layer makes. Lets the user see exactly what an AI did
+// during a coding session, export it for review, or replay it.
+//
+// Storage layout: `.filegraph3d/traces/session-{startTs}.jsonl`
+// One line per event. Each session ID is the unix-ms timestamp of
+// when the scanner started on that root.
+const TRACE_DIR_NAME = 'traces'
+const TRACE_MEM_CAP = 10000   // in-memory cap to prevent unbounded growth
+let traceSessionId = null      // ms timestamp; set in startScanner
+let traceSessionStartedAt = null
+let traceLog = []              // [{ tool, id, ts }]
+let traceWriteStream = null
+
+function traceDirFor(root) { return path.join(root, HISTORY_DIR_NAME, TRACE_DIR_NAME) }
+function traceFileFor(root, sessionId) {
+  return path.join(traceDirFor(root), `session-${sessionId}.jsonl`)
+}
+
+function startTraceSession() {
+  if (!currentRoot) return
+  traceSessionId = Date.now()
+  traceSessionStartedAt = traceSessionId
+  traceLog = []
+  closeTraceWriteStream()
+  try {
+    fs.mkdirSync(traceDirFor(currentRoot), { recursive: true })
+    traceWriteStream = fs.createWriteStream(traceFileFor(currentRoot, traceSessionId), { flags: 'a' })
+    // First line: session metadata
+    traceWriteStream.write(JSON.stringify({
+      type: 'meta', sessionId: traceSessionId, root: currentRoot, startedAt: traceSessionStartedAt,
+    }) + '\n')
+  } catch (e) {
+    traceWriteStream = null
+  }
+}
+function closeTraceWriteStream() {
+  if (traceWriteStream) {
+    try { traceWriteStream.end() } catch {}
+    traceWriteStream = null
+  }
+}
+
+function emitTrace(tool, id) {
+  if (!id) return
+  const ts = Date.now()
+  const ev = { tool, id, ts }
+  // In-memory (cap with sliding window)
+  traceLog.push(ev)
+  if (traceLog.length > TRACE_MEM_CAP) traceLog.splice(0, traceLog.length - TRACE_MEM_CAP)
+  // Disk append (best-effort)
+  if (traceWriteStream) {
+    try { traceWriteStream.write(JSON.stringify(ev) + '\n') } catch {}
+  }
+  mainWindow?.webContents.send('control:trace', { ...ev })
+}
+
+function listTraceSessions(root) {
+  if (!root) return []
+  const dir = traceDirFor(root)
+  if (!fs.existsSync(dir)) return []
+  const out = []
+  for (const name of fs.readdirSync(dir)) {
+    const m = name.match(/^session-(\d+)\.jsonl$/)
+    if (!m) continue
+    const sessionId = parseInt(m[1], 10)
+    const full = path.join(dir, name)
+    let stat, size = 0, eventCount = 0, endedAt = sessionId
+    try { stat = fs.statSync(full); size = stat.size; endedAt = stat.mtimeMs } catch {}
+    // Cheap line count for event count (subtract 1 for meta line)
+    try {
+      const data = fs.readFileSync(full, 'utf8')
+      eventCount = Math.max(0, data.split('\n').filter((l) => l.trim()).length - 1)
+    } catch {}
+    out.push({
+      sessionId, startedAt: sessionId, endedAt,
+      eventCount, size,
+      isCurrent: sessionId === traceSessionId,
+    })
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt)
+}
+
+function readTraceSession(root, sessionId) {
+  if (!root) return null
+  const f = traceFileFor(root, sessionId)
+  if (!fs.existsSync(f)) return null
+  let meta = null
+  const events = []
+  try {
+    const data = fs.readFileSync(f, 'utf8')
+    for (const line of data.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const j = JSON.parse(line)
+        if (j.type === 'meta') meta = j
+        else events.push(j)
+      } catch {}
+    }
+  } catch { return null }
+  return { sessionId, meta, events, eventCount: events.length }
+}
+
+// Compute stats over an event array. Used by /trace/stats and by the
+// session-detail endpoint.
+function computeTraceStats(events) {
+  const byTool = {}
+  const byFile = new Map()
+  let firstAt = null, lastAt = null
+  for (const e of events) {
+    byTool[e.tool] = (byTool[e.tool] || 0) + 1
+    byFile.set(e.id, (byFile.get(e.id) || 0) + 1)
+    if (firstAt === null || e.ts < firstAt) firstAt = e.ts
+    if (lastAt  === null || e.ts > lastAt)  lastAt = e.ts
+  }
+  const topFiles = [...byFile.entries()]
+    .map(([id, count]) => ({ id, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20)
+  // Time histogram — 20 buckets across [firstAt, lastAt]
+  let timeline = []
+  if (firstAt !== null && lastAt !== null && lastAt > firstAt) {
+    const buckets = 20
+    timeline = Array(buckets).fill(0)
+    const span = lastAt - firstAt
+    for (const e of events) {
+      const idx = Math.min(buckets - 1, Math.floor((e.ts - firstAt) / span * buckets))
+      timeline[idx]++
+    }
+  }
+  return {
+    eventCount: events.length,
+    fileCount: byFile.size,
+    byTool, topFiles, timeline,
+    firstAt, lastAt,
+    durationMs: (firstAt && lastAt) ? lastAt - firstAt : 0,
+  }
+}
+
+function handleControlRequest(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    })
+    return res.end()
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host}`)
+  const parts = url.pathname.split('/').filter(Boolean)
+  const [seg0, ...rest] = parts
+  const idFromRest = () => decodeURIComponent(rest.join('/'))
+  const traceId = () => { const id = idFromRest(); emitTrace(seg0, id); return id }
+
+  try {
+    if (req.method === 'GET' && parts.length === 0) {
+      return writeJson(res, 200, {
+        name: 'filegraph3d',
+        endpoints: [
+          'GET /health', 'GET /graph', 'GET /node/:id', 'GET /file/:id',
+          'GET /deps/:id', 'GET /users/:id', 'GET /find?q=', 'GET /history/:id',
+          'GET /packages', 'GET /package/:name', 'GET /package-graph',
+          'GET /legacy?type=orphan|path|filename|duplicate',
+          'GET /trace', 'GET /trace/stats', 'GET /trace/sessions', 'GET /trace/session/:id',
+          'POST /trace/clear', 'POST /trace/export?path=',
+          'POST /focus/:id', 'POST /open/:id', 'POST /restore/:id?ts=',
+          'POST /write/:id', 'POST /edit/:id',
+        ],
+      })
+    }
+
+    if (req.method === 'GET' && seg0 === 'health') {
+      return writeJson(res, 200, {
+        ok: true,
+        root: currentRoot,
+        fileCount: scanner ? scanner.files.size : 0,
+        edgeCount: scanner ? scanner.edges.length : 0,
+        historyEnabled,
+      })
+    }
+
+    if (!scanner) return writeJson(res, 503, { error: 'no folder loaded' })
+
+    if (req.method === 'GET' && seg0 === 'summary') {
+      const s = buildSummaryCached()
+      if (!s) return writeJson(res, 503, { error: 'no folder loaded' })
+      return writeJson(res, 200, withMeta(s))
+    }
+    if (req.method === 'GET' && seg0 === 'graph') {
+      // filter → sort → paginate. Default sort is mass:desc so a bare
+      // `limit=N` returns the N most-imported files (genuinely useful),
+      // not insertion-order garbage. Pass sort=insertion to opt out.
+      const data = getGraphState()
+      const limit  = parseInt(url.searchParams.get('limit')  || '0', 10)
+      const offset = parseInt(url.searchParams.get('offset') || '0', 10)
+      const extFilter = url.searchParams.get('ext')
+      const minMass = parseInt(url.searchParams.get('minMass') || '0', 10)
+      const sort = url.searchParams.get('sort') || 'mass:desc'
+
+      // Incoming map (computed once if mass involved in filter or sort)
+      let inc = null
+      const needsInc = sort.startsWith('mass') || minMass > 0
+      if (needsInc) {
+        inc = new Map()
+        for (const e of scanner.edges) inc.set(e.t, (inc.get(e.t) || 0) + 1)
+      }
+
+      let files = data.files.slice()
+      if (extFilter) files = files.filter((f) => f.ext === extFilter)
+      if (minMass > 0) files = files.filter((f) => (inc.get(f.id) || 0) >= minMass)
+
+      // Sort
+      if (sort !== 'insertion') {
+        const [key, dirRaw] = sort.split(':')
+        const dir = dirRaw === 'asc' ? 1 : -1
+        const getter = key === 'mass' ? ((f) => inc.get(f.id) || 0)
+                     : key === 'size' ? ((f) => f.size)
+                     : key === 'loc'  ? ((f) => f.loc)
+                     : key === 'id'   ? null
+                     : null
+        if (getter) files.sort((a, b) => dir * (getter(a) - getter(b)))
+        else if (key === 'id') files.sort((a, b) => dir * a.id.localeCompare(b.id))
+        // else: unknown sort key — silently keep filter order
+      }
+
+      const totalAvailable = files.length
+      const sliced = limit > 0 ? files.slice(offset, offset + limit) : files
+      return writeJson(res, 200, withMeta(
+        { root: data.root, files: sliced, edges: data.edges },
+        { totalAvailable, returned: sliced.length, offset, limit: limit || sliced.length,
+          sort, truncated: limit > 0 && (offset + limit) < totalAvailable }
+      ))
+    }
+    if (req.method === 'GET' && seg0 === 'node' && rest.length > 0) {
+      const id = traceId()
+      const node = findNode(id)
+      if (!node) return writeJson(res, 404, { error: 'not found' })
+      return writeJson(res, 200, withMeta({
+        ...node,
+        imports: getDeps(id),
+        importedBy: getUsers(id),
+      }))
+    }
+    if (req.method === 'POST' && seg0 === 'refresh') {
+      if (rest.length === 0) return writeJson(res, 400, { error: 'usage: POST /refresh/:id' })
+      const id = idFromRest()
+      try {
+        const absPath = path.join(currentRoot, id)
+        if (!isInsideRoot(currentRoot, absPath)) return writeJson(res, 400, { error: 'outside root' })
+        if (!fs.existsSync(absPath)) {
+          // File deleted — drop from graph
+          if (scanner.files.delete(id)) { scanner.rebuildEdges(); scanner.emitSnapshot() }
+          return writeJson(res, 200, withMeta({ ok: true, action: 'removed', id }))
+        }
+        // Force re-parse via scanner internals
+        const file = scanner.parseOne(absPath)
+        if (!file) return writeJson(res, 500, { error: 'parse failed' })
+        scanner.files.set(file.id, file)
+        scanner.rebuildEdges()
+        scanner.emitSnapshot()
+        return writeJson(res, 200, withMeta({ ok: true, action: 'refreshed', id }))
+      } catch (e) { return writeJson(res, 500, { error: e.message }) }
+    }
+    if (req.method === 'GET' && seg0 === 'file' && rest.length > 0) {
+      const id = traceId()
+      const full = path.join(currentRoot, id)
+      if (!isInsideRoot(currentRoot, full)) return writeJson(res, 400, { error: 'outside root' })
+      try {
+        const stat = fs.statSync(full)
+        if (!stat.isFile()) return writeJson(res, 404, { error: 'not a file' })
+        if (stat.size > 2_000_000) return writeJson(res, 413, { error: 'file too large', size: stat.size })
+        return writeJson(res, 200, { id, content: fs.readFileSync(full, 'utf8') })
+      } catch (e) { return writeJson(res, 500, { error: e.message }) }
+    }
+    if (req.method === 'GET' && seg0 === 'deps' && rest.length > 0) {
+      return writeJson(res, 200, getDeps(traceId()))
+    }
+    if (req.method === 'GET' && seg0 === 'users' && rest.length > 0) {
+      return writeJson(res, 200, getUsers(traceId()))
+    }
+    if (req.method === 'GET' && seg0 === 'find') {
+      return writeJson(res, 200, searchFiles(url.searchParams.get('q') || ''))
+    }
+    if (req.method === 'GET' && seg0 === 'external') {
+      return writeJson(res, 200, getExternalUrls())
+    }
+    if (req.method === 'GET' && seg0 === 'timeline') {
+      buildTimeline().then((data) => writeJson(res, 200, data))
+        .catch((e) => writeJson(res, 500, { error: e.message }))
+      return
+    }
+    if (req.method === 'GET' && seg0 === 'tour') {
+      const t = buildTour()
+      if (!t) return writeJson(res, 503, { error: 'no folder loaded' })
+      return writeJson(res, 200, t)
+    }
+    if (req.method === 'GET' && seg0 === 'changes' && rest.length === 0) {
+      return writeJson(res, 200, listSessionChanges())
+    }
+    if (req.method === 'GET' && seg0 === 'changes' && rest.length > 0) {
+      const id = idFromRest()
+      const d = getChangeDiff(id)
+      if (!d) return writeJson(res, 404, { error: 'no change recorded for this file' })
+      return writeJson(res, 200, d)
+    }
+    if (req.method === 'GET' && seg0 === 'blast' && rest.length > 0) {
+      const id = idFromRest()
+      emitTrace('blast', id)
+      const depth = Math.max(1, Math.min(10, parseInt(url.searchParams.get('depth') || '3', 10)))
+      const dir = url.searchParams.get('dir') === 'deps' ? 'deps' : 'users'
+      const r = computeBlastRadius(id, depth, dir)
+      if (!r) return writeJson(res, 404, { error: 'not found' })
+      // Send all impacted node ids to renderer for visual highlight
+      mainWindow?.webContents.send('control:blast', { seed: id, ids: r.files.map((f) => f.id) })
+      return writeJson(res, 200, r)
+    }
+    if (req.method === 'GET' && seg0 === 'history' && rest.length > 0) {
+      return writeJson(res, 200, listHistory(currentRoot, traceId()))
+    }
+    if (req.method === 'POST' && seg0 === 'focus' && rest.length > 0) {
+      const id = traceId()
+      if (!scanner.files.has(id)) return writeJson(res, 404, { error: 'not found' })
+      mainWindow?.webContents.send('control:focus', { id })
+      return writeJson(res, 200, { ok: true, id })
+    }
+    if (req.method === 'POST' && seg0 === 'open' && rest.length > 0) {
+      const id = traceId()
+      if (!scanner.files.has(id)) return writeJson(res, 404, { error: 'not found' })
+      mainWindow?.webContents.send('control:open', { id })
+      return writeJson(res, 200, { ok: true, id })
+    }
+    if (req.method === 'GET' && seg0 === 'trace' && rest.length === 0) {
+      // Current session log. Filter by tool, since=, limit.
+      const sinceRaw = url.searchParams.get('since')
+      const toolFilter = url.searchParams.get('tool')
+      const limit = parseInt(url.searchParams.get('limit') || '0', 10)
+      let evs = traceLog
+      if (sinceRaw) {
+        const since = parseInt(sinceRaw, 10)
+        evs = evs.filter((e) => e.ts > since)
+      }
+      if (toolFilter) evs = evs.filter((e) => e.tool === toolFilter)
+      const totalAvailable = evs.length
+      if (limit > 0) evs = evs.slice(-limit)  // most recent N
+      return writeJson(res, 200, withMeta({
+        sessionId: traceSessionId,
+        events: evs,
+      }, { totalAvailable, returned: evs.length }))
+    }
+    if (req.method === 'GET' && seg0 === 'trace' && rest[0] === 'stats') {
+      // Stats over current session
+      const stats = computeTraceStats(traceLog)
+      return writeJson(res, 200, withMeta({ sessionId: traceSessionId, ...stats }))
+    }
+    if (req.method === 'GET' && seg0 === 'trace' && rest[0] === 'sessions') {
+      return writeJson(res, 200, withMeta({
+        sessions: listTraceSessions(currentRoot),
+        currentSessionId: traceSessionId,
+      }))
+    }
+    if (req.method === 'GET' && seg0 === 'trace' && rest[0] === 'session' && rest[1]) {
+      const id = parseInt(rest[1], 10)
+      const data = readTraceSession(currentRoot, id)
+      if (!data) return writeJson(res, 404, { error: 'session not found' })
+      const stats = computeTraceStats(data.events)
+      return writeJson(res, 200, withMeta({ ...data, stats }))
+    }
+    if (req.method === 'POST' && seg0 === 'trace' && rest[0] === 'clear') {
+      // Soft clear: drop in-memory log + start a NEW session on disk so
+      // old log file is preserved.
+      traceLog = []
+      startTraceSession()
+      return writeJson(res, 200, { ok: true, newSessionId: traceSessionId })
+    }
+    if (req.method === 'POST' && seg0 === 'trace' && rest[0] === 'export') {
+      // Write current session to a user-chosen path. Body should be
+      // { path } or query ?path=. Returns the absolute output path.
+      let bodyChunks = []
+      req.on('data', (c) => bodyChunks.push(c))
+      req.on('end', () => {
+        let exportPath = url.searchParams.get('path')
+        try {
+          const body = Buffer.concat(bodyChunks).toString('utf8')
+          if (body) {
+            const parsed = JSON.parse(body)
+            exportPath = exportPath || parsed?.path
+          }
+        } catch {}
+        if (!exportPath) return writeJson(res, 400, { error: 'usage: pass ?path= or { "path": "..." }' })
+        try {
+          const stats = computeTraceStats(traceLog)
+          const out = {
+            sessionId: traceSessionId,
+            root: currentRoot,
+            startedAt: traceSessionStartedAt,
+            exportedAt: Date.now(),
+            stats,
+            events: traceLog,
+          }
+          fs.writeFileSync(exportPath, JSON.stringify(out, null, 2), 'utf8')
+          return writeJson(res, 200, { ok: true, path: exportPath, eventCount: traceLog.length })
+        } catch (e) { return writeJson(res, 500, { error: e.message }) }
+      })
+      return
+    }
+    if (req.method === 'GET' && seg0 === 'legacy' && rest.length === 0) {
+      // Async — returns once the legacy module is loaded
+      buildLegacyCached().then((data) => {
+        if (!data) return writeJson(res, 503, { error: 'no folder loaded' })
+        // Optional ?type=orphan|path|filename|duplicate filter
+        const type = url.searchParams.get('type')
+        if (type) {
+          const slice = { summary: data.summary }
+          if (type === 'orphan')        slice.orphans = data.orphans
+          else if (type === 'path')     slice.pathPatterns = data.pathPatterns
+          else if (type === 'filename') slice.filenamePatterns = data.filenamePatterns
+          else if (type === 'duplicate')slice.duplicates = data.duplicates
+          else return writeJson(res, 400, { error: 'bad type; use orphan|path|filename|duplicate' })
+          return writeJson(res, 200, withMeta(slice))
+        }
+        return writeJson(res, 200, withMeta(data))
+      }).catch((e) => writeJson(res, 500, { error: e.message }))
+      return
+    }
+    if (req.method === 'GET' && seg0 === 'packages' && rest.length === 0) {
+      const data = buildPackagesCached()
+      if (!data) return writeJson(res, 503, { error: 'no folder loaded' })
+      return writeJson(res, 200, withMeta(data))
+    }
+    if (req.method === 'GET' && seg0 === 'package' && rest.length > 0) {
+      const name = idFromRest()
+      emitTrace('package', name)
+      const d = buildPackageDetail(name)
+      if (!d) return writeJson(res, 404, { error: 'package not found', name })
+      return writeJson(res, 200, withMeta(d))
+    }
+    if (req.method === 'GET' && seg0 === 'package-graph') {
+      const data = buildPackagesCached()
+      if (!data) return writeJson(res, 503, { error: 'no folder loaded' })
+      return writeJson(res, 200, withMeta({
+        kind: data.kind,
+        packages: data.packages.map((p) => ({ name: p.name, fileCount: p.fileCount })),
+        edges: data.pkgEdges,
+      }))
+    }
+    if (req.method === 'POST' && (seg0 === 'write' || seg0 === 'edit') && rest.length > 0) {
+      // Body: /write/:id  expects { content }
+      //       /edit/:id   expects { find, replace, replaceAll? }
+      // Both wrapped through writeFileToRoot so audit trail is uniform.
+      const id = idFromRest()
+      const full = path.join(currentRoot, id)
+      if (!isInsideRoot(currentRoot, full)) return writeJson(res, 400, { error: 'outside root' })
+      let bodyChunks = []
+      req.on('data', (c) => bodyChunks.push(c))
+      req.on('end', () => {
+        let body
+        try { body = JSON.parse(Buffer.concat(bodyChunks).toString('utf8')) }
+        catch { return writeJson(res, 400, { error: 'invalid JSON body' }) }
+        if (seg0 === 'write') {
+          if (typeof body.content !== 'string') return writeJson(res, 400, { error: 'usage: { "content": "..." }' })
+          const r = writeFileToRoot(id, body.content, { source: 'http-write' })
+          if (!r.ok) return writeJson(res, 500, r)
+          return writeJson(res, 200, withMeta({ ...r, id }))
+        }
+        // edit
+        if (typeof body.find !== 'string' || typeof body.replace !== 'string') {
+          return writeJson(res, 400, { error: 'usage: { "find": "...", "replace": "...", "replaceAll": false }' })
+        }
+        let content
+        try { content = fs.readFileSync(full, 'utf8') }
+        catch (e) { return writeJson(res, 500, { error: 'read failed: ' + e.message }) }
+        const findStr = body.find
+        if (!findStr) return writeJson(res, 400, { error: 'find string cannot be empty' })
+        // Count occurrences
+        let count = 0, idx = 0
+        while ((idx = content.indexOf(findStr, idx)) !== -1) { count++; idx += findStr.length }
+        if (count === 0) return writeJson(res, 404, { error: 'find string not found', find: findStr })
+        const replaceAll = body.replaceAll === true
+        if (!replaceAll && count > 1) {
+          return writeJson(res, 409, {
+            error: `find string is not unique (${count} occurrences). Pass replaceAll:true or use a more specific find string.`,
+            occurrences: count,
+          })
+        }
+        const next = replaceAll
+          ? content.split(findStr).join(body.replace)
+          : content.replace(findStr, body.replace)
+        const r = writeFileToRoot(id, next, { source: 'http-edit' })
+        if (!r.ok) return writeJson(res, 500, r)
+        return writeJson(res, 200, withMeta({ ...r, id, replacements: replaceAll ? count : 1 }))
+      })
+      return
+    }
+    if (req.method === 'POST' && seg0 === 'restore' && rest.length > 0) {
+      const id = idFromRest()
+      emitTrace('write', id)
+      const ts = parseInt(url.searchParams.get('ts') || '0', 10)
+      if (!ts) return writeJson(res, 400, { error: 'missing ts' })
+      const content = readHistorySnap(currentRoot, id, ts)
+      if (content === null) return writeJson(res, 404, { error: 'snapshot not found' })
+      const full = path.join(currentRoot, id)
+      if (!isInsideRoot(currentRoot, full)) return writeJson(res, 400, { error: 'outside root' })
+      try {
+        fs.writeFileSync(full, content, 'utf8')
+        snapshotHistory(currentRoot, id, content)
+        return writeJson(res, 200, { ok: true, id, ts })
+      } catch (e) { return writeJson(res, 500, { error: e.message }) }
+    }
+    return writeJson(res, 404, { error: 'unknown endpoint', path: url.pathname })
+  } catch (e) {
+    return writeJson(res, 500, { error: e.message })
+  }
+}
+
+function startControlServer(port = controlPort) {
+  if (controlServer) return
+  controlServer = http.createServer(handleControlRequest)
+  controlServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`[fg3d] control port ${port} in use — control API disabled. Set FG3D_PORT to override.`)
+      controlServer = null
+    } else {
+      console.error('[fg3d] control server error:', err)
+    }
+  })
+  controlServer.listen(port, '127.0.0.1', () => {
+    controlPort = port
+    console.log(`[fg3d] control API listening on http://127.0.0.1:${port}`)
+  })
+}
+function stopControlServer() {
+  if (controlServer) {
+    try { controlServer.close() } catch {}
+    controlServer = null
+  }
+}
+ipcMain.handle('control-port', () => controlPort)
+
+// ─── App lifecycle ──────────────────────────────────────────────
+app.whenReady().then(() => {
+  rebuildMenu()
+  createWindow()
+  startControlServer()
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  stopScanner()
+  stopControlServer()
+  if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => { stopScanner(); stopControlServer() })
+
+// Hardening
+app.on('web-contents-created', (_e, contents) => {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http')) shell.openExternal(url)
+    return { action: 'deny' }
+  })
+})

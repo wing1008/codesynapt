@@ -1,0 +1,108 @@
+{
+  "name": "filegraph3d",
+  "version": "0.11.1",
+  "description": "Real-time 3D code dependency visualizer — active-set curation, file tree, minimap, scales to 100k+ files",
+  "license": "BUSL-1.1",
+  "author": "",
+  "homepage": "https://github.com/YOUR_USER/filegraph3d#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_USER/filegraph3d.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_USER/filegraph3d/issues"
+  },
+  "keywords": [
+    "code-visualization",
+    "dependency-graph",
+    "3d",
+    "electron",
+    "three.js",
+    "developer-tools"
+  ],
+  "type": "module",
+  "main": "electron/main.cjs",
+  "bin": {
+    "filegraph3d-server": "./server.js",
+    "fg3d": "./bin/fg3d.cjs",
+    "fg3d-mcp": "./bin/fg3d-mcp.cjs"
+  },
+  "scripts": {
+    "postinstall": "node scripts/copy-vendor.js",
+    "start": "electron .",
+    "electron": "electron .",
+    "server": "node server.js",
+    "test": "node test.js && node /tmp/test-scanner.mjs 2>/dev/null || true",
+    "license-check": "node scripts/license-check.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "chokidar": "^3.6.0",
+    "three": "^0.160.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "electron": "^41.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "io.filegraph3d.app",
+    "productName": "FileGraph 3D",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/fsevents/**/*"
+    ],
+    "files": [
+      "electron/**/*",
+      "public/**/*",
+      "parser.js",
+      "scanner.js",
+      "package.json"
+    ],
+    "extraResources": [],
+    "directories": {
+      "buildResources": "build"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb", "arch": ["x64"] },
+        { "target": "tar.gz", "arch": ["x64"] }
+      ],
+      "category": "Development",
+      "synopsis": "Real-time 3D code dependency visualizer",
+      "description": "FileGraph 3D visualizes how files in a codebase connect to each other. Drop a folder and watch every file orbit into place, with edges showing imports."
+    },
+    "publish": null
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

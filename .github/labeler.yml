@@ -1,0 +1,69 @@
+# actions/labeler configuration
+# https://github.com/actions/labeler
+#
+# Automatically applies labels to PRs based on which files they change.
+# This frees the maintainer from labeling every PR manually, which in
+# turn makes release-drafter categorization more reliable.
+#
+# Labels here should match those in release-drafter.yml's categories.
+
+# ─── Documentation ──────────────────────────────────────
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+          - 'plugin-api/docs/**'
+
+# ─── Plugin system ──────────────────────────────────────
+plugin-api:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'plugin-api/**'
+          - 'electron/plugin-loader.cjs'
+          - 'public/plugin-host.js'
+
+# ─── UI / themes ────────────────────────────────────────
+ui:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'public/style.css'
+          - 'public/index.html'
+          - 'public/app.js'
+
+theme:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'public/style.css'
+          - 'plugin-api/examples/*-theme/**'
+
+# ─── Dependencies ───────────────────────────────────────
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'package.json'
+          - 'package-lock.json'
+          - 'plugin-api/package.json'
+
+# ─── CI / infrastructure ────────────────────────────────
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+          - '.github/dependabot.yml'
+          - 'scripts/**'
+
+# ─── Performance (heuristic — title-based) ──────────────
+# File globs are imprecise for perf work; combine with title keywords
+performance:
+  - any:
+      - head-branch:
+          - '^perf/'
+          - '^performance/'
+
+# ─── Security (heuristic) ───────────────────────────────
+security:
+  - any:
+      - head-branch:
+          - '^security/'
+          - '^cve/'

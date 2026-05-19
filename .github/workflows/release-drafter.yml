@@ -1,0 +1,39 @@
+name: release-drafter
+
+# Runs on every merge to main, and on PR events to update the running
+# release draft. The draft is visible in the Releases tab but not
+# published until the maintainer publishes it manually.
+#
+# Pull request events keep the draft in sync as labels change.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+      - edited
+  workflow_dispatch:
+
+permissions:
+  contents: write       # needed to create/update the draft release
+  pull-requests: write  # needed to read PR metadata
+
+# Only one release-drafter run at a time — avoids racing draft updates.
+concurrency:
+  group: release-drafter
+  cancel-in-progress: false
+
+jobs:
+  update_release_draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        with:
+          config-name: release-drafter.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
