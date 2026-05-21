@@ -115,6 +115,8 @@ const TRACKED_EXT = new Set([
   'cs',
   // Apple family
   'swift',
+  // Dart / Flutter
+  'dart',
   // Systems
   'rs', 'go', 'rb', 'php',
   'c', 'cc', 'cpp', 'h', 'hpp',

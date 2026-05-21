@@ -57,6 +57,8 @@ export function parseFile(absPath, content, ext) {
         r = parseCSharp(content); break
       case 'swift':
         r = parseSwift(content); break
+      case 'dart':
+        r = parseDart(content); break
       case 'c': case 'cc': case 'cpp': case 'h': case 'hpp':
         r = parseC(content); break
       case 'rb':
@@ -425,6 +427,23 @@ function parseSwift(content) {
   return { imports }
 }
 
+// Dart — `import 'package:foo/bar.dart';`, `import 'src/foo.dart';`,
+//   `export 'src/x.dart';`, `part 'foo.g.dart';`, `part of 'main.dart';`
+// All four are recorded; resolveImport handles `dart:` / `package:` /
+// relative resolution. The `part of` directive lands here too — its
+// spec points back at the parent library file, which is a legitimate
+// dependency edge in our graph.
+function parseDart(content) {
+  const imports = []
+  const re = /^\s*(import|export|part(?:\s+of)?)\s+['"]([^'"]+)['"]/gm
+  let m
+  while ((m = re.exec(content))) {
+    const kw = m[1].split(/\s+/)[0]  // 'part of' → 'part'
+    imports.push({ spec: m[2], kind: kw })
+  }
+  return { imports }
+}
+
 // PowerShell — `. ./path.ps1` (dot-source), `Import-Module Name`,
 //   `Import-Module ./local/Mod.psm1`, `using module ./path`
 function parsePS1(content) {
@@ -699,7 +718,7 @@ const RESOLVE_EXTS = [
   '.html', '.vue', '.svelte', '.astro',
   '.json', '.md', '.mdx', '.rst', '.svg',
   '.rs', '.go', '.java', '.kt', '.rb', '.php',
-  '.cs', '.swift',
+  '.cs', '.swift', '.dart',
   '.c', '.cc', '.cpp', '.h', '.hpp',
   '.lsp', '.dcl', '.clj', '.scm',
   '.sh', '.bash', '.ps1', '.psm1',
@@ -762,6 +781,20 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
         if (id.startsWith(sub + '/') && id.endsWith('.cs')) return id
       }
     }
+    return null
+  }
+
+  // Dart — `dart:`/`package:` are external (SDK / pub.dev), skip them.
+  // Everything else is a path string relative to the importing file's
+  // directory: `import 'services/x.dart'` from `lib/main.dart` resolves
+  // to `lib/services/x.dart`. Also handles `export` / `part` / `part of`.
+  if (fromExt === 'dart') {
+    if (spec.startsWith('dart:')) return null
+    if (spec.startsWith('package:')) return null
+    const fromDir = path.dirname(fromAbsPath)
+    const cand = path.resolve(fromDir, spec)
+    const id = idOf(rootAbs, cand)
+    if (validIds.has(id)) return id
     return null
   }
 
