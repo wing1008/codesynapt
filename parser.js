@@ -37,6 +37,10 @@ export function parseFile(absPath, content, ext) {
         r = parseGo(content); break
       case 'java': case 'kt':
         r = parseJavaKotlin(content); break
+      case 'cs':
+        r = parseCSharp(content); break
+      case 'swift':
+        r = parseSwift(content); break
       case 'c': case 'cc': case 'cpp': case 'h': case 'hpp':
         r = parseC(content); break
       case 'rb':
@@ -45,6 +49,12 @@ export function parseFile(absPath, content, ext) {
         r = parsePHP(content); break
       case 'sh': case 'bash': case 'zsh':
         r = parseShell(content); break
+      case 'ps1':
+        r = parsePS1(content); break
+      case 'clj': case 'scm':
+        r = parseClojure(content); break
+      case 'rst':
+        r = parseRst(content); break
       case 'json': case 'yaml': case 'yml': case 'toml': case 'xml': case 'sql':
         // Skip URL grep on these — package-lock.json and YAML lockfiles
         // contain hundreds of registry URLs that drown out real API hosts.
@@ -351,6 +361,80 @@ function parseShell(content) {
   return { imports }
 }
 
+// C# — `using Namespace;`, `using static System.Math;`, `using Alias = Path;`
+function parseCSharp(content) {
+  const imports = []
+  // Three forms; capture the namespace path in group 1
+  const re = /^\s*using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)\s*;/gm
+  let m
+  while ((m = re.exec(content))) imports.push({ spec: m[1], kind: 'using' })
+  return { imports }
+}
+
+// Swift — `import Module`, `@_exported import Module`,
+//   `import struct ModuleA.Foo`, `@testable import ModuleB`
+function parseSwift(content) {
+  const imports = []
+  const re = /^\s*(?:@\w+\s+)?import\s+(?:(?:class|struct|enum|protocol|typealias|func|var|let)\s+)?([A-Za-z_][\w.]*)/gm
+  let m
+  while ((m = re.exec(content))) imports.push({ spec: m[1], kind: 'import' })
+  return { imports }
+}
+
+// PowerShell — `. ./path.ps1` (dot-source), `Import-Module Name`,
+//   `Import-Module ./local/Mod.psm1`, `using module ./path`
+function parsePS1(content) {
+  const imports = []
+  // dot-source: . <path>
+  const dotRe = /^\s*\.\s+(?:&\s*)?(['"]?)([^\s'";|]+)\1/gm
+  let m
+  while ((m = dotRe.exec(content))) {
+    if (m[2] && m[2] !== '..') imports.push({ spec: m[2], kind: 'source' })
+  }
+  // Import-Module Name [-Name] (handles -Name flag)
+  const impRe = /(?:Import-Module|using\s+module)\s+(?:-Name\s+)?(['"]?)([^\s'";|,]+)\1/gi
+  while ((m = impRe.exec(content))) {
+    imports.push({ spec: m[2], kind: 'import-module' })
+  }
+  return { imports }
+}
+
+// Clojure / Scheme — `(require '[ns :as alias])`, `(use 'ns)`,
+//   `(:require [ns ...] [ns2 ...])`, `(:use ns)`
+function parseClojure(content) {
+  const imports = []
+  // Step 1: locate each require/use/import form's body.
+  const formRe = /\((?::?(?:require|use|import))\s+([\s\S]*?)\)/g
+  let block
+  while ((block = formRe.exec(content))) {
+    const body = block[1]
+    // Step 2a: vector form — `[ns :as alias]` or `[ns :refer [...]]`
+    const vecRe = /\[\s*([a-zA-Z][\w.\-]*)/g
+    let v
+    while ((v = vecRe.exec(body))) imports.push({ spec: v[1], kind: 'require' })
+    // Step 2b: quoted symbol form — `'ns`
+    const symRe = /'([a-zA-Z][\w.\-]+)/g
+    let s
+    while ((s = symRe.exec(body))) imports.push({ spec: s[1], kind: 'require' })
+  }
+  return { imports }
+}
+
+// reStructuredText — `.. include:: path`, `.. literalinclude:: path`,
+//   `:doc:\`path\``
+function parseRst(content) {
+  const imports = []
+  const incRe = /^\.\.\s*(?:include|literalinclude|figure|image)\s*::\s*(\S+)/gm
+  let m
+  while ((m = incRe.exec(content))) imports.push({ spec: m[1], kind: 'include' })
+  // :doc:`path` cross-reference
+  const docRe = /:doc:`([^`<]+)`/g
+  while ((m = docRe.exec(content))) {
+    imports.push({ spec: m[1].trim(), kind: 'doc' })
+  }
+  return { imports }
+}
+
 function parseGeneric(content) {
   // Last-resort: catch obviously-relative path-looking string literals
   // (kept restrictive to avoid noise)
@@ -569,11 +653,12 @@ const RESOLVE_EXTS = [
   '.py', '.pyi',
   '.css', '.scss', '.sass', '.less',
   '.html', '.vue', '.svelte', '.astro',
-  '.json', '.md', '.mdx', '.svg',
+  '.json', '.md', '.mdx', '.rst', '.svg',
   '.rs', '.go', '.java', '.kt', '.rb', '.php',
+  '.cs', '.swift',
   '.c', '.cc', '.cpp', '.h', '.hpp',
-  '.lsp', '.dcl',
-  '.sh', '.bash',
+  '.lsp', '.dcl', '.clj', '.scm',
+  '.sh', '.bash', '.ps1', '.psm1',
 ]
 
 const INDEX_FILES = [
@@ -607,6 +692,70 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
       const cand = path.join(rootAbs, subPath + ext)
       const relId = idOf(rootAbs, cand)
       if (validIds.has(relId)) return relId
+    }
+    return null
+  }
+
+  // C# dotted namespace (System.Collections.Generic) → search.
+  // Standard convention: namespace path matches directory path. We
+  // try the full path first, then progressively shorter prefixes
+  // (handles `using A.B.C` where the file is `A/B/C.cs` OR `A/B.cs`).
+  if (fromExt === 'cs' && /^[A-Za-z]/.test(spec)) {
+    const parts = spec.split('.')
+    for (let i = parts.length; i >= 1; i--) {
+      const sub = parts.slice(0, i).join('/')
+      const cand = path.join(rootAbs, sub + '.cs')
+      const id = idOf(rootAbs, cand)
+      if (validIds.has(id)) return id
+    }
+    // Also try as a folder containing the namespace's .cs files
+    for (let i = parts.length; i >= 1; i--) {
+      const sub = parts.slice(0, i).join('/')
+      const dir = path.join(rootAbs, sub)
+      // Just check for *any* .cs file inside (return the first match)
+      for (const id of validIds) {
+        if (id.startsWith(sub + '/') && id.endsWith('.cs')) return id
+      }
+    }
+    return null
+  }
+
+  // Swift `import ModuleName` → look for a top-level folder of that
+  // name (Sources/ModuleName/ or just ModuleName/) and return one of
+  // its .swift files. SwiftPM convention.
+  if (fromExt === 'swift' && /^[A-Za-z]/.test(spec)) {
+    const moduleName = spec.split('.')[0]   // ignore .Submodule for now
+    const patterns = [
+      `Sources/${moduleName}/`,
+      `${moduleName}/Sources/`,
+      `${moduleName}/`,
+    ]
+    for (const pat of patterns) {
+      for (const id of validIds) {
+        if (id.includes(pat) && id.endsWith('.swift')) return id
+      }
+    }
+    return null
+  }
+
+  // PowerShell `Import-Module Name` → look for Name.psm1 / Name/Name.psm1
+  if (fromExt === 'ps1' && /^[A-Za-z]/.test(spec) && !spec.includes('/')) {
+    const candidates = [`${spec}.psm1`, `${spec}/${spec}.psm1`, `${spec}.ps1`]
+    for (const cand of candidates) {
+      const id = idOf(rootAbs, path.join(rootAbs, cand))
+      if (validIds.has(id)) return id
+    }
+    return null
+  }
+
+  // Clojure / Scheme dotted/dashed namespace → file path
+  // Convention: `my.cool.ns` → `my/cool/ns.clj` (also `_` for `-`)
+  if ((fromExt === 'clj' || fromExt === 'scm') && /^[a-z]/.test(spec)) {
+    const subPath = spec.replace(/\./g, '/').replace(/-/g, '_')
+    for (const ext of [`.${fromExt}`, '.cljc']) {
+      const cand = path.join(rootAbs, subPath + ext)
+      const id = idOf(rootAbs, cand)
+      if (validIds.has(id)) return id
     }
     return null
   }

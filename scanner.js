@@ -97,8 +97,8 @@ const TRACKED_EXT = new Set([
   'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
   // Python
   'py', 'pyw', 'pyi',
-  // Lisp / AutoCAD
-  'lsp', 'dcl', 'lisp', 'el', 'clj', 'scm',
+  // Lisp / Scheme / Clojure / Emacs
+  'lsp', 'dcl', 'lisp', 'el', 'clj', 'scm', 'cljc',
   // Styles
   'css', 'scss', 'sass', 'less', 'styl',
   // Markup / Component
@@ -107,13 +107,21 @@ const TRACKED_EXT = new Set([
   'json', 'yaml', 'yml', 'toml',
   // Docs
   'md', 'mdx', 'rst',
-  // Other languages
-  'java', 'kt', 'swift', 'rs', 'go', 'rb', 'php',
-  'c', 'cc', 'cpp', 'h', 'hpp', 'cs',
-  'sh', 'bash', 'zsh', 'ps1',
+  // JVM family
+  'java', 'kt',
+  // .NET family
+  'cs',
+  // Apple family
+  'swift',
+  // Systems
+  'rs', 'go', 'rb', 'php',
+  'c', 'cc', 'cpp', 'h', 'hpp',
+  // Shell / scripting
+  'sh', 'bash', 'zsh', 'ps1', 'psm1',
+  // Data
   'sql', 'xml',
-  // CAD
-  'dwg', 'dxf',
+  // NOTE: dwg/dxf removed — binary CAD files have no import concept,
+  // scanning them just creates orphan noise.
 ])
 
 export class Scanner extends EventEmitter {
