@@ -226,6 +226,15 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_suggest',
+    description: '현재 코드 상태를 보고 "AI에게 다음에 시킬 작업"을 우선순위 순으로 추천. high/medium/low priority. 규칙: 미선언 환경 변수, 테스트 없는 hub 파일, 고립(죽은) 파일, 사용 안 되는 환경 변수, 동적 import 비중. 비개발자가 "다음 뭐 시켜?" 막힐 때 첫 호출 추천.',
+    inputSchema: {
+      type: 'object',
+      properties: { top: { type: 'number', description: '최대 추천 수 (기본 10)', default: 10 } },
+    },
+    handler: async ({ top }) => (await apiReq('GET', '/suggest', { top: top ?? 10 })).data,
+  },
+  {
     name: 'fg3d_env',
     description: '.env 파일에 선언된 환경 변수와 소스 코드에서 실제 사용되는 환경 변수를 cross-reference. 응답: declared/used/status(ok|unused|undeclared). undeclared = 코드는 쓰는데 .env에 없음 → 배포시 실패 가능. unused = .env에는 있는데 안 씀 → 키 노출/정리 후보. var 지정시 단일 변수 상세.',
     inputSchema: {

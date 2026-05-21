@@ -116,6 +116,10 @@ const USAGE = `filegraph3d CLI — usage:
                               #   가까운 의존 파일 우선 선택.
   fg3d env [VAR] [--json]     # .env 변수 ↔ 사용처 매핑. VAR 지정 안 하면
                               #   전체 + 미사용/미선언 상태 표시.
+  fg3d suggest [--top N] [--json]
+                              # "AI에게 다음에 시킬 작업" 자동 추천.
+                              #   undeclared env, 테스트 없는 hub,
+                              #   orphans, unused env, dynamic ratio 등.
   fg3d timeline               # git history → when each file first appeared
   fg3d tour                   # suggested guided tour of the project
   fg3d changes                # files modified this session
@@ -695,6 +699,30 @@ async function main() {
         }
         process.stdout.write(`\n   AI에게 줄 때:\n`)
         process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
+        break
+      }
+      case 'suggest': {
+        const asJson = args.includes('--json')
+        let top = '10'
+        for (let i = 0; i < args.length; i++) if (args[i] === '--top' && args[i+1]) top = args[++i]
+        const r = await req('GET', '/suggest', { top })
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        process.stdout.write(`📋 AI에게 시킬 다음 작업 추천 (${j.total}개 중 상위 ${j.suggestions.length})\n`)
+        process.stdout.write(`   현재 상태: 파일 ${j.contextSnapshot.fileCount} / 엣지 ${j.contextSnapshot.edgeCount} / 고립 ${j.contextSnapshot.orphanCount}\n`)
+        if (j.suggestions.length === 0) {
+          process.stdout.write(`\n   ✓ 깨끗합니다 — 추천 사항 없음.\n`)
+          break
+        }
+        process.stdout.write(`\n`)
+        for (let i = 0; i < j.suggestions.length; i++) {
+          const s = j.suggestions[i]
+          const icon = s.priority === 'high' ? '🔴' : s.priority === 'medium' ? '🟡' : '🟢'
+          process.stdout.write(`${icon} [${s.priority.toUpperCase().padEnd(6)}] ${s.title}\n`)
+          process.stdout.write(`     이유: ${s.why}\n`)
+          process.stdout.write(`     ▶ ${s.advice}\n\n`)
+        }
         break
       }
       case 'env': {
