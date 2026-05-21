@@ -59,6 +59,16 @@ const USAGE = `filegraph3d CLI — usage:
                               #   serves /summary, /graph, /node/:id,
                               #   /blast/:id, /packages, etc.
                               #   no Electron window — pure CLI/MCP/CI use
+  fg3d ci-diff <base..head> [path] [--format=github-comment|json|plain] [--depth N]
+                              # PR impact report: blast radius for every
+                              #   file changed between two git refs.
+                              #   Default --format=github-comment is
+                              #   markdown ready to drop into a PR.
+  fg3d ci-gate <base..head> [path] [--max-blast N] [--max-changed N]
+                              # PR gate for CI: fails (exit 1) if change
+                              #   set exceeds thresholds.
+                              #   --max-blast N    largest single-file blast
+                              #   --max-changed N  total changed files
 
   ── Remote (needs the desktop app running at :7707) ──────────
   fg3d health
@@ -258,6 +268,241 @@ async function runHeadlessServe(args) {
   return new Promise(() => {})
 }
 
+// ── CI: headless diff/blast for PR gating + commenting ───────
+//
+// Both ci-diff and ci-gate share the same pipeline:
+//   1. Resolve the git range (e.g. main..HEAD)
+//   2. git diff --name-only --diff-filter=ACMR  → changed files
+//   3. Scan the repo at HEAD with Scanner
+//   4. For each changed file still present, compute its blast radius
+//      (transitive dependents, depth=3 by default)
+//   5. Summarise + format
+
+function parseGitRange(s) {
+  // Accept: `main..HEAD`, `main...HEAD`, single ref → `<ref>..HEAD`
+  if (!s) return null
+  if (!s.includes('..')) return { base: s, head: 'HEAD', op: '..' }
+  const op = s.includes('...') ? '...' : '..'
+  const [base, head] = s.split(op)
+  return { base, head: head || 'HEAD', op }
+}
+
+function execCapture(cmd, args, opts) {
+  const { execFileSync } = require('child_process')
+  try {
+    const out = execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 100 * 1024 * 1024, ...opts })
+    return { ok: true, out }
+  } catch (e) {
+    return { ok: false, error: e.message, stderr: e.stderr?.toString?.() || '' }
+  }
+}
+
+async function runCiAnalysis(args) {
+  const path = require('path')
+  const fs = require('fs')
+  let rangeStr = null, target = null
+  let depth = 3
+  const flags = { format: 'github-comment', maxBlast: null, maxChanged: null }
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === '--format' && args[i+1])         flags.format = args[++i]
+    else if (a.startsWith('--format='))        flags.format = a.slice(9)
+    else if (a === '--depth' && args[i+1])     depth = parseInt(args[++i], 10)
+    else if (a === '--max-blast' && args[i+1]) flags.maxBlast = parseInt(args[++i], 10)
+    else if (a === '--max-changed' && args[i+1]) flags.maxChanged = parseInt(args[++i], 10)
+    else if (!a.startsWith('--')) {
+      if (!rangeStr) rangeStr = a
+      else if (!target) target = a
+    }
+  }
+  if (!rangeStr) die('usage: ci-diff <base..head> [path] [--format=...]')
+  target = target || process.cwd()
+  const abs = path.resolve(target)
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+    die(`not a directory: ${abs}`)
+  }
+  const range = parseGitRange(rangeStr)
+  if (!range) die(`invalid git range: ${rangeStr}`)
+
+  // 1. git diff — names only, A(dded) C(opied) M(odified) R(enamed)
+  const diffArgs = ['diff', '--name-only', '--diff-filter=ACMR', `${range.base}${range.op}${range.head}`]
+  const diff = execCapture('git', diffArgs, { cwd: abs })
+  if (!diff.ok) {
+    die(`git diff failed: ${diff.stderr || diff.error}\n  (is "${abs}" a git repo, and do refs "${range.base}"/"${range.head}" exist?)`)
+  }
+  const changed = diff.out.split('\n').map((l) => l.trim().replace(/\\/g, '/')).filter(Boolean)
+
+  // 2. Scan HEAD with Scanner (headless)
+  const { Scanner } = await import('../scanner.js')
+  const s = new Scanner(abs)
+  const snap = await new Promise((resolve) => {
+    s.once('snapshot', resolve)
+    s.start()
+  })
+  // We only need the snapshot; stop watching.
+  try { s.stop() } catch {}
+
+  // Build incoming-edge index for blast BFS
+  const fileSet = new Set(snap.files.map((f) => f.id))
+  const reverseEdges = new Map()  // t -> [s, s, ...]
+  for (const e of snap.edges) {
+    if (!reverseEdges.has(e.t)) reverseEdges.set(e.t, [])
+    reverseEdges.get(e.t).push(e.s)
+  }
+
+  function blastFor(id, maxDepth) {
+    if (!fileSet.has(id)) return null
+    const visited = new Set([id])
+    let frontier = new Set([id])
+    for (let d = 1; d <= maxDepth; d++) {
+      const next = new Set()
+      for (const fid of frontier) {
+        const users = reverseEdges.get(fid) || []
+        for (const u of users) {
+          if (visited.has(u)) continue
+          visited.add(u); next.add(u)
+        }
+      }
+      if (next.size === 0) break
+      frontier = next
+    }
+    visited.delete(id)
+    let tests = 0
+    for (const fid of visited) {
+      if (/(?:^|\/)(?:__tests__|test|tests|spec|e2e)\/|\.(?:test|spec)\.[a-z]+$/i.test(fid)) tests++
+    }
+    return { dependents: visited.size, tests }
+  }
+
+  // 3. Per-file blast
+  const perFile = []
+  let trackedCount = 0
+  let untrackedCount = 0
+  let deletedCount = 0
+  for (const id of changed) {
+    if (fileSet.has(id)) {
+      const r = blastFor(id, depth)
+      perFile.push({ id, status: 'changed', dependents: r.dependents, tests: r.tests })
+      trackedCount++
+    } else {
+      // Either deleted (gone from HEAD entirely) or untracked extension.
+      const full = path.join(abs, id)
+      if (fs.existsSync(full)) {
+        perFile.push({ id, status: 'untracked-ext', dependents: 0, tests: 0 })
+        untrackedCount++
+      } else {
+        perFile.push({ id, status: 'deleted', dependents: 0, tests: 0 })
+        deletedCount++
+      }
+    }
+  }
+  perFile.sort((a, b) => b.dependents - a.dependents)
+  const maxBlast = perFile.reduce((m, x) => Math.max(m, x.dependents), 0)
+  const totalTests = perFile.reduce((s, x) => s + x.tests, 0)
+  return {
+    root: abs, range,
+    changedCount: changed.length,
+    trackedCount, untrackedCount, deletedCount,
+    perFile, maxBlast, totalTests, depth,
+    snapshotFileCount: snap.files.length,
+    snapshotEdgeCount: snap.edges.length,
+    flags,
+  }
+}
+
+function fmtCiPlain(r) {
+  const lines = []
+  lines.push(`fg3d ci-diff — ${r.range.base}${r.range.op}${r.range.head}`)
+  lines.push(`root: ${r.root}`)
+  lines.push(`scan: ${r.snapshotFileCount} files, ${r.snapshotEdgeCount} edges`)
+  lines.push(`changed: ${r.changedCount} (tracked ${r.trackedCount}, ext-untracked ${r.untrackedCount}, deleted ${r.deletedCount})`)
+  lines.push(`max blast (depth ${r.depth}): ${r.maxBlast}   tests touched: ${r.totalTests}`)
+  lines.push('')
+  lines.push(`${'file'.padEnd(50)}  ${'status'.padEnd(13)}  ${'dep'.padStart(4)}  ${'test'.padStart(4)}`)
+  lines.push('-'.repeat(80))
+  for (const f of r.perFile) {
+    const idShort = f.id.length > 50 ? '…' + f.id.slice(-49) : f.id
+    lines.push(`${idShort.padEnd(50)}  ${f.status.padEnd(13)}  ${String(f.dependents).padStart(4)}  ${String(f.tests).padStart(4)}`)
+  }
+  return lines.join('\n') + '\n'
+}
+
+function fmtCiMarkdown(r) {
+  const lines = []
+  lines.push(`## 📦 fg3d impact — \`${r.range.base}${r.range.op}${r.range.head}\``)
+  lines.push('')
+  lines.push(`Scanned ${r.snapshotFileCount} files / ${r.snapshotEdgeCount} edges. Changed ${r.changedCount} files (tracked ${r.trackedCount}, ext-untracked ${r.untrackedCount}, deleted ${r.deletedCount}).`)
+  lines.push('')
+  lines.push(`**Largest single-file blast (depth ${r.depth}):** ${r.maxBlast} dependents  ·  **Tests touched:** ${r.totalTests}`)
+  lines.push('')
+  const tracked = r.perFile.filter((f) => f.status === 'changed')
+  if (tracked.length === 0) {
+    lines.push('_No tracked source files changed._')
+  } else {
+    lines.push('| File | Status | Dependents (≤ depth) | Tests touched |')
+    lines.push('|---|---|---:|---:|')
+    for (const f of tracked.slice(0, 20)) {
+      lines.push(`| \`${f.id}\` | ${f.status} | ${f.dependents} | ${f.tests} |`)
+    }
+    if (tracked.length > 20) lines.push(`| _…and ${tracked.length - 20} more_ | | | |`)
+    const high = tracked.filter((f) => f.dependents >= 10)
+    if (high.length) {
+      lines.push('')
+      lines.push('### ⚠️ High-impact files')
+      for (const f of high) lines.push(`- \`${f.id}\` — ${f.dependents} dependents`)
+    }
+  }
+  const other = r.perFile.filter((f) => f.status !== 'changed')
+  if (other.length) {
+    lines.push('')
+    lines.push(`<details><summary>Other changed files (${other.length})</summary>`)
+    lines.push('')
+    for (const f of other) lines.push(`- \`${f.id}\` (${f.status})`)
+    lines.push('</details>')
+  }
+  lines.push('')
+  lines.push(`<sub>Generated by [filegraph3d](https://github.com/) · depth ${r.depth}</sub>`)
+  return lines.join('\n') + '\n'
+}
+
+async function runCiDiff(args) {
+  const r = await runCiAnalysis(args)
+  const fmt = r.flags.format
+  if (fmt === 'json')               process.stdout.write(JSON.stringify(r, null, 2) + '\n')
+  else if (fmt === 'plain')         process.stdout.write(fmtCiPlain(r))
+  else if (fmt === 'github-comment'
+        || fmt === 'markdown'
+        || fmt === 'md')            process.stdout.write(fmtCiMarkdown(r))
+  else die(`unknown format: ${fmt} (use github-comment | json | plain)`)
+}
+
+async function runCiGate(args) {
+  const r = await runCiAnalysis(args)
+  // Defaults: if neither threshold given, fall back to lenient defaults
+  // so the command still does something useful in --help-less invocations.
+  const maxBlast   = r.flags.maxBlast   ?? Infinity
+  const maxChanged = r.flags.maxChanged ?? Infinity
+  const fails = []
+  if (r.maxBlast > maxBlast) {
+    const worst = r.perFile.filter((f) => f.dependents === r.maxBlast)
+    fails.push(`blast: largest single-file impact is ${r.maxBlast} dependents (limit ${maxBlast})`)
+    for (const f of worst.slice(0, 3)) fails.push(`  - ${f.id}`)
+  }
+  if (r.trackedCount > maxChanged) {
+    fails.push(`changed: ${r.trackedCount} tracked files changed (limit ${maxChanged})`)
+  }
+  // Always print a one-line summary, then thresholds
+  process.stderr.write(`fg3d ci-gate — ${r.range.base}${r.range.op}${r.range.head}\n`)
+  process.stderr.write(`changed: ${r.trackedCount} tracked  ·  max blast (depth ${r.depth}): ${r.maxBlast}  ·  tests touched: ${r.totalTests}\n`)
+  if (fails.length === 0) {
+    process.stderr.write(`OK — all thresholds within limits.\n`)
+    process.exit(0)
+  }
+  process.stderr.write(`\nFAIL:\n`)
+  for (const line of fails) process.stderr.write(`  ${line}\n`)
+  process.exit(1)
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2)
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
@@ -277,6 +522,18 @@ async function main() {
         // Drop-in replacement for the desktop app's :7707 control plane
         // for CLI / MCP / CI usage.
         await runHeadlessServe(args)
+        break
+      }
+      case 'ci-diff': {
+        // PR impact report. Headless: scans HEAD, diffs base..head,
+        // emits per-file blast radius in markdown/json/plain.
+        await runCiDiff(args)
+        break
+      }
+      case 'ci-gate': {
+        // PR gate for CI. Same data as ci-diff but exits 1 if any
+        // threshold is breached.
+        await runCiGate(args)
         break
       }
       case 'health': {
