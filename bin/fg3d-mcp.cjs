@@ -226,6 +226,33 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_safety',
+    description: '🟢/🟡/🔴 "AI에게 이 파일 수정시켜도 되나" 신호등. dependents/routes/외부 API/dynamic 패턴/테스트 유무를 종합. 비개발자가 AI 작업 승인 전, 또는 AI가 수정 전 self-check용. risky면 사람이 검토 권장.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '대상 파일 ID' },
+        deep: { type: 'boolean', description: 'true면 영향받는 파일 전체 리스트도 반환', default: false },
+      },
+      required: ['id'],
+    },
+    handler: async ({ id, deep }) => (await apiReq('GET', '/safety/' + encId(id), { deep: deep ? '1' : null })).data,
+  },
+  {
+    name: 'fg3d_bundle',
+    description: '파일 수정 전 함께 읽어야 할 의존 파일을 token 예산 안에서 자동 추출. AI가 "X 고쳐줘" 요청 받았을 때, 이 도구로 컨텍스트를 먼저 묶고 그 파일들을 읽은 뒤 수정. depth 안에서 mass 높은 파일 우선 선택.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '수정 대상 파일 ID' },
+        budget: { type: 'number', description: '토큰 예산 (기본 8000)', default: 8000 },
+        depth: { type: 'number', description: 'BFS 깊이 (1-10, 기본 3)', default: 3 },
+      },
+      required: ['id'],
+    },
+    handler: async ({ id, budget, depth }) => (await apiReq('GET', '/bundle/' + encId(id), { budget: budget ?? 8000, depth: depth ?? 3 })).data,
+  },
+  {
     name: 'fg3d_list_packages',
     description: '모노레포의 패키지 목록 조회. 응답에 kind(pnpm/npm-workspaces/yarn/lerna/turbo/nx/python-uv/multi-package/single/none), 각 패키지의 name/relRoot/fileCount/loc/cross-package edges 포함. 모노레포 아니면 packages가 빈 배열. 모노레포 작업 시작 시 가장 먼저 호출하세요.',
     inputSchema: { type: 'object', properties: {} },

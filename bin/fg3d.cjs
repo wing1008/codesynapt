@@ -106,6 +106,14 @@ const USAGE = `filegraph3d CLI — usage:
   fg3d blast <id> [n] [dir]   # impact of editing <id>: dependents within n hops
                               #   n   = BFS depth (default 3)
                               #   dir = users|deps (default users)
+  fg3d safety <id> [--deep] [--json]
+                              # 🟢/🟡/🔴 + 한 줄 권고. AI에게 시키기 전
+                              #   "이 파일 건드려도 되나" 즉답.
+                              #   --deep → 영향받는 파일 전체 리스트
+  fg3d bundle <id> [--budget N] [--depth N] [--json]
+                              # AI에게 "이 파일 수정해줘" 시킬 때 함께 줄
+                              #   파일 묶음. token 예산(기본 8000) 안에서
+                              #   가까운 의존 파일 우선 선택.
   fg3d timeline               # git history → when each file first appeared
   fg3d tour                   # suggested guided tour of the project
   fg3d changes                # files modified this session
@@ -640,6 +648,51 @@ async function main() {
           for (const id of d.ids.slice(0, 50)) process.stdout.write(`    ${id}\n`)
           if (d.ids.length > 50) process.stdout.write(`    … +${d.ids.length - 50} more\n`)
         }
+        break
+      }
+      case 'safety': {
+        if (!args[0]) return die('usage: fg3d safety <id> [--deep] [--json]')
+        const id = args[0]
+        const deep = args.includes('--deep') ? '1' : null
+        const asJson = args.includes('--json')
+        const r = await req('GET', '/safety/' + encId(id), { deep })
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        const icon = j.level === 'risky' ? '🔴' : j.level === 'caution' ? '🟡' : '🟢'
+        const label = j.level === 'risky' ? 'RISKY' : j.level === 'caution' ? 'CAUTION' : 'SAFE'
+        process.stdout.write(`${icon} ${label}  ${id}\n`)
+        process.stdout.write(`   의존 ${j.dependents}  ·  routes ${j.routes}  ·  외부 API ${j.externalUrls}  ·  테스트 ${j.testsInBlast}\n`)
+        for (const r of j.reasons) process.stdout.write(`   · ${r}\n`)
+        process.stdout.write(`\n   ${j.advice}\n`)
+        if (j.blastFiles) {
+          process.stdout.write(`\n   영향받는 파일 (${j.blastFiles.length}):\n`)
+          for (const f of j.blastFiles.slice(0, 50)) process.stdout.write(`     ${f}\n`)
+          if (j.blastFiles.length > 50) process.stdout.write(`     … +${j.blastFiles.length - 50} more\n`)
+        }
+        break
+      }
+      case 'bundle': {
+        if (!args[0]) return die('usage: fg3d bundle <id> [--budget N] [--depth N] [--json]')
+        const id = args[0]
+        let budget = '8000', depth = '3'
+        for (let i = 1; i < args.length; i++) {
+          if (args[i] === '--budget' && args[i+1]) budget = args[++i]
+          else if (args[i] === '--depth' && args[i+1]) depth = args[++i]
+        }
+        const asJson = args.includes('--json')
+        const r = await req('GET', '/bundle/' + encId(id), { budget, depth })
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        process.stdout.write(`📦 context bundle for ${j.seed}\n`)
+        process.stdout.write(`   token 예산 ${j.budgetTokens.toLocaleString()} 중 ${j.usedTokens.toLocaleString()} 사용\n`)
+        process.stdout.write(`   포함 ${j.filesIncluded} / 후보 ${j.totalCandidates} (생략 ${j.filesOmitted})\n\n`)
+        for (const f of j.files) {
+          process.stdout.write(`   [hop ${f.depth}]  ${f.id}  (${f.tokenCost.toLocaleString()} tok)\n`)
+        }
+        process.stdout.write(`\n   AI에게 줄 때:\n`)
+        process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
         break
       }
       case 'changes': {
