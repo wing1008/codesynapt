@@ -782,6 +782,44 @@ function extractPyRoutes(content) {
   return routes
 }
 
+// Next.js file-system API routes — derive route path + methods from
+// file location + exported handler names. Conservative: only triggers
+// when the id matches an app/api or pages/api pattern.
+export function extractNextApiRoutes(id, content) {
+  if (!id || !content) return []
+  // app router: src/app/api/<seg>/route.<ext>  OR  app/api/.../route.<ext>
+  let m, basePath
+  if ((m = id.match(/^(?:src\/)?app\/(api\/.+)\/route\.(?:tsx|jsx|ts|js)$/))) {
+    basePath = '/' + m[1]
+  }
+  // pages router: src/pages/api/<seg>.<ext>
+  else if ((m = id.match(/^(?:src\/)?pages\/(api\/.+)\.(?:tsx|jsx|ts|js)$/))) {
+    basePath = '/' + m[1].replace(/\/index$/, '')
+  }
+  if (!basePath) return []
+  // Normalize Next dynamic segments [id] → :id, [...rest] → *
+  basePath = basePath.replace(/\[\.\.\.(\w+)\]/g, '*').replace(/\[(\w+)\]/g, ':$1')
+
+  // App router exports per-method handlers
+  const methodsExported = []
+  for (const verb of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']) {
+    // export async function GET(...)  OR  export const GET = ...
+    const re = new RegExp(`export\\s+(?:async\\s+)?(?:function\\s+${verb}\\b|const\\s+${verb}\\s*=)`)
+    if (re.test(content)) methodsExported.push(verb)
+  }
+  if (methodsExported.length > 0) {
+    return methodsExported.map((method) => ({ method, path: basePath }))
+  }
+  // Pages router: `export default function handler(req, res)`.
+  // Method is decided by req.method at runtime; record ANY (we'd emit
+  // 'GET' as conservative default, but ANY lets the route↔fetch matcher
+  // match calls with any method).
+  if (/export\s+default\s+(?:async\s+)?function/.test(content)) {
+    return [{ method: 'ANY', path: basePath }]
+  }
+  return []
+}
+
 function extractPyApiCalls(content) {
   const calls = []
   // requests.get('http://...'), httpx.post('/x'), urllib...

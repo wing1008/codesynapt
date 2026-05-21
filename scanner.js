@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import chokidar from 'chokidar'
 import { EventEmitter } from 'events'
-import { parseFile, resolveImport, normalizeUrlPath, routePathToRegex } from './parser.js'
+import { parseFile, resolveImport, normalizeUrlPath, routePathToRegex, extractNextApiRoutes } from './parser.js'
 import { detectMonorepo, packageForFile } from './monorepo.js'
 
 const IGNORE_DIRS = new Set([
@@ -314,6 +314,13 @@ export class Scanner extends EventEmitter {
     try { content = fs.readFileSync(absPath, 'utf8') } catch {}
     const loc = content ? content.split('\n').length : 0
     const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage, dbModels } = parseFile(absPath, content, ext)
+    // Augment with Next.js file-system API routes (app router + pages
+    // router). Conservative: only append, never remove existing routes.
+    let finalRoutes = routes || []
+    if (['ts','tsx','js','jsx','mjs','cjs'].includes(ext)) {
+      const nextRoutes = extractNextApiRoutes(id, content)
+      if (nextRoutes.length > 0) finalRoutes = [...finalRoutes, ...nextRoutes]
+    }
     // Tag the file with its owning package (null if outside all
     // packages or no monorepo). Used by UI for package-level grouping
     // and by API endpoints for package-level slicing.
@@ -322,7 +329,7 @@ export class Scanner extends EventEmitter {
       : null
     return {
       id, ext, loc, size: stat.size, imports, absPath,
-      routes:           routes           || [],
+      routes:           finalRoutes,
       apiCalls:         apiCalls         || [],
       externalUrls:     externalUrls     || [],
       dynamicPatterns:  dynamicPatterns  || [],
