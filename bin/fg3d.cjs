@@ -120,6 +120,10 @@ const USAGE = `filegraph3d CLI — usage:
                               # "AI에게 다음에 시킬 작업" 자동 추천.
                               #   undeclared env, 테스트 없는 hub,
                               #   orphans, unused env, dynamic ratio 등.
+  fg3d feature <keyword> [--json]
+                              # "결제" / "auth" 같은 키워드 → 관련 파일
+                              #   frontend/backend/shared 분류.
+                              #   path 매칭 + 라우트 매칭 + apiCall 매칭.
   fg3d timeline               # git history → when each file first appeared
   fg3d tour                   # suggested guided tour of the project
   fg3d changes                # files modified this session
@@ -699,6 +703,32 @@ async function main() {
         }
         process.stdout.write(`\n   AI에게 줄 때:\n`)
         process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
+        break
+      }
+      case 'feature': {
+        if (!args[0]) return die('usage: fg3d feature <keyword> [--json]')
+        const kw = args[0]
+        const asJson = args.includes('--json')
+        const r = await req('GET', '/feature/' + encodeURIComponent(kw))
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        process.stdout.write(`🔍 "${kw}" 관련 파일 (heuristic) — ${j.total}개\n`)
+        process.stdout.write(`   frontend ${j.counts.frontend}  ·  backend ${j.counts.backend}  ·  shared ${j.counts.shared}\n\n`)
+        const sec = (label, list) => {
+          if (list.length === 0) return
+          process.stdout.write(`${label} (${list.length}):\n`)
+          for (const f of list.slice(0, 40)) {
+            const via = f.via === 'path' ? '' : ` [via ${f.via}]`
+            process.stdout.write(`  · ${f.id}${via}\n`)
+          }
+          if (list.length > 40) process.stdout.write(`  … +${list.length - 40} more\n`)
+          process.stdout.write(`\n`)
+        }
+        sec('Frontend', j.frontend)
+        sec('Backend',  j.backend)
+        sec('Shared',   j.shared)
+        if (j.total === 0) process.stdout.write(`   매칭 없음. 다른 키워드로 시도하거나 fg3d find 사용.\n`)
         break
       }
       case 'suggest': {

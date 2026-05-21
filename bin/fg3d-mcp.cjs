@@ -226,6 +226,16 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_feature',
+    description: '키워드 → 관련 파일 클러스터링 (heuristic). 비개발자가 "결제 화면 색 바꿔줘" 같이 기능 단위로 말할 때, AI가 이 도구로 어느 파일들 봐야 할지 파악. frontend/backend/shared 자동 분류. path 매칭 + routes/apiCalls URL 매칭.',
+    inputSchema: {
+      type: 'object',
+      properties: { keyword: { type: 'string', description: '기능 키워드 (예: payment, auth, checkout, signup)' } },
+      required: ['keyword'],
+    },
+    handler: async ({ keyword }) => (await apiReq('GET', '/feature/' + encodeURIComponent(keyword))).data,
+  },
+  {
     name: 'fg3d_suggest',
     description: '현재 코드 상태를 보고 "AI에게 다음에 시킬 작업"을 우선순위 순으로 추천. high/medium/low priority. 규칙: 미선언 환경 변수, 테스트 없는 hub 파일, 고립(죽은) 파일, 사용 안 되는 환경 변수, 동적 import 비중. 비개발자가 "다음 뭐 시켜?" 막힐 때 첫 호출 추천.',
     inputSchema: {
