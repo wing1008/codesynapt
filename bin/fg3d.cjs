@@ -114,6 +114,8 @@ const USAGE = `filegraph3d CLI — usage:
                               # AI에게 "이 파일 수정해줘" 시킬 때 함께 줄
                               #   파일 묶음. token 예산(기본 8000) 안에서
                               #   가까운 의존 파일 우선 선택.
+  fg3d env [VAR] [--json]     # .env 변수 ↔ 사용처 매핑. VAR 지정 안 하면
+                              #   전체 + 미사용/미선언 상태 표시.
   fg3d timeline               # git history → when each file first appeared
   fg3d tour                   # suggested guided tour of the project
   fg3d changes                # files modified this session
@@ -693,6 +695,34 @@ async function main() {
         }
         process.stdout.write(`\n   AI에게 줄 때:\n`)
         process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
+        break
+      }
+      case 'env': {
+        const asJson = args.includes('--json')
+        const v = args[0] && !args[0].startsWith('--') ? args[0] : null
+        const r = await req('GET', '/env', v ? { var: v } : null)
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        if (v) {
+          // single-var detail
+          process.stdout.write(`var: ${j.var}\n`)
+          process.stdout.write(`declared in (${j.declaredIn.length}):\n`)
+          for (const f of j.declaredIn) process.stdout.write(`  · ${f}\n`)
+          process.stdout.write(`used in (${j.usedIn.length}):\n`)
+          for (const f of j.usedIn) process.stdout.write(`  · ${f}\n`)
+          if (j.declaredIn.length === 0) process.stdout.write(`\n⚠ undeclared — .env에 정의 안 됨. 배포시 실패 가능.\n`)
+          if (j.usedIn.length === 0) process.stdout.write(`\n⚠ unused — 어디서도 안 씀. .env에서 제거 후보.\n`)
+        } else {
+          // overview
+          process.stdout.write(`.env files (${j.envFiles.length}):\n`)
+          for (const e of j.envFiles) process.stdout.write(`  · ${e.id}  (${e.keyCount} keys)\n`)
+          process.stdout.write(`\nvariables: ${j.counts.total}  (ok ${j.counts.ok}  ·  unused ${j.counts.unused}  ·  undeclared ${j.counts.undeclared})\n\n`)
+          const status = (s) => s === 'ok' ? '✓' : s === 'undeclared' ? '⚠ no .env' : '⚠ unused'
+          for (const v of j.vars) {
+            process.stdout.write(`  ${status(v.status).padEnd(11)}  ${v.var.padEnd(32)}  decl=${v.declaredIn.length} used=${v.usedIn.length}\n`)
+          }
+        }
         break
       }
       case 'changes': {

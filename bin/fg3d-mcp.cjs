@@ -226,6 +226,15 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_env',
+    description: '.env 파일에 선언된 환경 변수와 소스 코드에서 실제 사용되는 환경 변수를 cross-reference. 응답: declared/used/status(ok|unused|undeclared). undeclared = 코드는 쓰는데 .env에 없음 → 배포시 실패 가능. unused = .env에는 있는데 안 씀 → 키 노출/정리 후보. var 지정시 단일 변수 상세.',
+    inputSchema: {
+      type: 'object',
+      properties: { var: { type: 'string', description: '특정 변수 이름 (대문자, 옵션)' } },
+    },
+    handler: async ({ var: v }) => (await apiReq('GET', '/env', v ? { var: v } : null)).data,
+  },
+  {
     name: 'fg3d_safety',
     description: '🟢/🟡/🔴 "AI에게 이 파일 수정시켜도 되나" 신호등. dependents/routes/외부 API/dynamic 패턴/테스트 유무를 종합. 비개발자가 AI 작업 승인 전, 또는 AI가 수정 전 self-check용. risky면 사람이 검토 권장.',
     inputSchema: {

@@ -37,6 +37,7 @@ export function parseFile(absPath, content, ext) {
           apiCalls:      extractPyApiCalls(ipy.codeContent),
           externalUrls:  extractExternalUrls(ipy.codeContent),
           dynamicPatterns: detectDynamicPatterns(ipy.codeContent, 'py'),
+          envUsage:      extractEnvUsage(ipy.codeContent, 'py'),
         }
       }
       case 'lsp': case 'dcl': case 'lisp': case 'el':
@@ -100,11 +101,13 @@ export function parseFile(absPath, content, ext) {
     }
     r.externalUrls = extractExternalUrls(content)
     r.dynamicPatterns = detectDynamicPatterns(content, ext)
+    r.envUsage = extractEnvUsage(content, ext)
     return r
   } catch {
     const g = parseGeneric(content)
     g.externalUrls = extractExternalUrls(content)
     g.dynamicPatterns = detectDynamicPatterns(content, ext)
+    g.envUsage = extractEnvUsage(content, ext)
     return g
   }
 }
@@ -545,6 +548,45 @@ function extractJSRoutes(content) {
 // duplicates collapse naturally.
 const EXT_URL_RE = /https?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+|wss?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+/g
 const URL_TRIM_RE = /[.,;:'"`)\]}>\\]+$/
+// Extract environment-variable references — `process.env.X`,
+// `os.environ['X']`, `os.Getenv("X")`, shell `${X}`, etc. We require
+// the name to start with an uppercase letter and contain only
+// uppercase/digit/underscore to keep false positives low (no random
+// `process.env.foo` from minified output, etc).
+function extractEnvUsage(content, ext) {
+  if (!content) return []
+  const found = new Set()
+  const patterns = [
+    // JS / TS / Node / Vite / Next
+    /process\.env\.([A-Z][A-Z0-9_]+)\b/g,
+    /process\.env\[['"`]([A-Z][A-Z0-9_]+)['"`]\]/g,
+    /import\.meta\.env\.([A-Z][A-Z0-9_]+)\b/g,
+    // Python
+    /os\.environ\[['"`]([A-Z][A-Z0-9_]+)['"`]\]/g,
+    /os\.environ\.get\(\s*['"`]([A-Z][A-Z0-9_]+)['"`]/g,
+    /os\.getenv\(\s*['"`]([A-Z][A-Z0-9_]+)['"`]/g,
+    // Go / Java / Rust / Ruby / C
+    /os\.Getenv\(\s*['"`]([A-Z][A-Z0-9_]+)['"`]/g,
+    /System\.getenv\(\s*['"`]([A-Z][A-Z0-9_]+)['"`]/g,
+    /env::var\(\s*['"`]([A-Z][A-Z0-9_]+)['"`]/g,
+    /ENV\[['"`]([A-Z][A-Z0-9_]+)['"`]\]/g,
+    /\bgetenv\(\s*['"`]([A-Z][A-Z0-9_]+)['"`]/g,
+  ]
+  for (const re of patterns) {
+    re.lastIndex = 0
+    let m
+    while ((m = re.exec(content))) found.add(m[1])
+  }
+  // Shell-style ${VAR} — only on shell-like files to avoid false hits
+  // from JS template literals.
+  if (ext === 'sh' || ext === 'bash' || ext === 'zsh' || ext === 'ps1' || ext === 'psm1') {
+    const sh = /\$\{?([A-Z][A-Z0-9_]+)(?::-[^}]*)?\}?/g
+    let m
+    while ((m = sh.exec(content))) found.add(m[1])
+  }
+  return [...found]
+}
+
 function extractExternalUrls(content) {
   const seen = new Map()  // url -> count
   let m

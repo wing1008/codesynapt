@@ -92,6 +92,22 @@ function matchedByRules(relPath, isDir, rules) {
   return ignored
 }
 
+// Parse a .env file and return the list of keys declared inside.
+// Keys must start with an uppercase letter (POSIX convention) to match
+// our extractEnvUsage filter on the consumption side.
+function parseEnvFileKeys(absPath) {
+  let content
+  try { content = fs.readFileSync(absPath, 'utf8') } catch { return [] }
+  const keys = []
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const m = line.match(/^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=/)
+    if (m) keys.push(m[1])
+  }
+  return keys
+}
+
 const TRACKED_EXT = new Set([
   // JS / TS family
   'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
@@ -138,6 +154,7 @@ export class Scanner extends EventEmitter {
     this.watcher = null
     this._pendingSnapshot = null
     this.gitignoreRules = loadGitignoreRules(root)
+    this.envFiles = []  // [{ id, keys: [...] }] — populated on first ready
     // Detect workspace structure once at construction. Cheap (one
     // directory walk capped at depth 6). Result feeds package-level
     // grouping in the UI and the /packages API for AI agents.
@@ -147,6 +164,31 @@ export class Scanner extends EventEmitter {
 
   toId(absPath) {
     return path.relative(this.root, absPath).split(path.sep).join('/')
+  }
+
+  // ── .env file index ───────────────────────────────────────────
+  // We don't add .env files to the graph (they're config, not code),
+  // but we DO scan them to know which env vars are declared. The
+  // server then cross-references against extractEnvUsage in source.
+  scanEnvFiles() {
+    this.envFiles = []
+    const names = ['.env', '.env.local', '.env.production', '.env.development',
+                   '.env.test', '.env.example', '.env.sample']
+    const walk = (dir, depth) => {
+      if (depth > 4) return
+      let entries
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (IGNORE_DIRS.has(e.name)) continue
+        const full = path.join(dir, e.name)
+        if (e.isDirectory()) walk(full, depth + 1)
+        else if (e.isFile() && names.includes(e.name)) {
+          const keys = parseEnvFileKeys(full)
+          this.envFiles.push({ id: this.toId(full), keys })
+        }
+      }
+    }
+    walk(this.root, 0)
   }
 
   shouldTrack(absPath) {
@@ -196,6 +238,7 @@ export class Scanner extends EventEmitter {
       .on('ready', () => {
         initial = false
         this.emit('scan-progress', { count: scanCount, done: true })
+        this.scanEnvFiles()
         this.rebuildEdges()
         this.emitSnapshot()
         this.emit('stats', { initialScanComplete: true, fileCount: this.files.size })
@@ -268,7 +311,7 @@ export class Scanner extends EventEmitter {
     let content = ''
     try { content = fs.readFileSync(absPath, 'utf8') } catch {}
     const loc = content ? content.split('\n').length : 0
-    const { imports, routes, apiCalls, externalUrls, dynamicPatterns } = parseFile(absPath, content, ext)
+    const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage } = parseFile(absPath, content, ext)
     // Tag the file with its owning package (null if outside all
     // packages or no monorepo). Used by UI for package-level grouping
     // and by API endpoints for package-level slicing.
@@ -281,6 +324,7 @@ export class Scanner extends EventEmitter {
       apiCalls:         apiCalls         || [],
       externalUrls:     externalUrls     || [],
       dynamicPatterns:  dynamicPatterns  || [],
+      envUsage:         envUsage         || [],
       pkg,
       lastSeenAt:       Date.now(),
     }
