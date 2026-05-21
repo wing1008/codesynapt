@@ -74,6 +74,10 @@ export function parseFile(absPath, content, ext) {
         r = parseClojure(content); break
       case 'rst':
         r = parseRst(content); break
+      case 'prisma':
+        // Prisma schema file: no imports we'd track, but we DO want
+        // db model extraction below. Return empty imports.
+        r = { imports: [] }; break
       case 'json': case 'yaml': case 'yml': case 'toml': case 'xml': case 'sql':
         // Skip URL grep on these — package-lock.json and YAML lockfiles
         // contain hundreds of registry URLs that drown out real API hosts.
@@ -102,12 +106,14 @@ export function parseFile(absPath, content, ext) {
     r.externalUrls = extractExternalUrls(content)
     r.dynamicPatterns = detectDynamicPatterns(content, ext)
     r.envUsage = extractEnvUsage(content, ext)
+    r.dbModels = extractDbModels(content, ext)
     return r
   } catch {
     const g = parseGeneric(content)
     g.externalUrls = extractExternalUrls(content)
     g.dynamicPatterns = detectDynamicPatterns(content, ext)
     g.envUsage = extractEnvUsage(content, ext)
+    g.dbModels = extractDbModels(content, ext)
     return g
   }
 }
@@ -548,6 +554,99 @@ function extractJSRoutes(content) {
 // duplicates collapse naturally.
 const EXT_URL_RE = /https?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+|wss?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+/g
 const URL_TRIM_RE = /[.,;:'"`)\]}>\\]+$/
+// ─── DB schema extractors ─────────────────────────────────────
+// Three ORM/schema dialects, all heuristic regex (no full parsing):
+//   - Prisma (.prisma)        `model X { name Type }`
+//   - Drizzle (TS/JS)         `pgTable('x', { ... })`
+//   - SQLAlchemy (Python)     `class X(Base): __tablename__ = '...'`
+// Returns: [{ kind, name, tableName?, fields: [{name,type}] }]
+
+function parsePrismaSchema(content) {
+  const models = []
+  // model Foo { ... } and enum Foo { ... }
+  const re = /\b(model|enum)\s+(\w+)\s*\{([^}]*)\}/g
+  let m
+  while ((m = re.exec(content))) {
+    const kind = m[1]  // 'model' | 'enum'
+    const name = m[2]
+    const fields = []
+    for (const raw of m[3].split('\n')) {
+      const line = raw.trim()
+      if (!line || line.startsWith('//') || line.startsWith('@@')) continue
+      // For enums, each non-empty line is a value
+      if (kind === 'enum') { fields.push({ name: line.split(/\s+/)[0], type: 'enum-value' }); continue }
+      const fm = line.match(/^(\w+)\s+(\w+)(\[\])?(\?)?/)
+      if (fm) fields.push({ name: fm[1], type: fm[2] + (fm[3] || '') + (fm[4] || '') })
+    }
+    models.push({ kind: 'prisma-' + kind, name, fields })
+  }
+  return models
+}
+
+function extractDrizzleTables(content) {
+  if (!/(?:pg|mysql|sqlite)Table\s*\(/.test(content)) return []
+  const tables = []
+  // pgTable('users', { id: serial('id').primaryKey(), ... })
+  // We grab the table name then walk braces manually to handle nested {}.
+  const re = /(?:export\s+(?:const|let|var)\s+(\w+)\s*=\s*)?(?:pg|mysql|sqlite)Table\s*\(\s*['"`](\w+)['"`]\s*,\s*\{/g
+  let m
+  while ((m = re.exec(content))) {
+    const varName = m[1] || m[2]
+    const tableName = m[2]
+    // Find matching }
+    const start = re.lastIndex
+    let depth = 1, i = start
+    while (i < content.length && depth > 0) {
+      const c = content[i]
+      if (c === '{') depth++
+      else if (c === '}') depth--
+      i++
+    }
+    const body = content.slice(start, i - 1)
+    const fields = []
+    const fre = /(\w+)\s*:\s*(\w+)\(/g
+    let fm
+    while ((fm = fre.exec(body))) fields.push({ name: fm[1], type: fm[2] })
+    tables.push({ kind: 'drizzle', name: varName, tableName, fields })
+  }
+  return tables
+}
+
+function extractSQLAlchemyModels(content) {
+  // class X(Base) or class X(db.Model) or class X(sa.orm.DeclarativeBase)
+  if (!/class\s+\w+\s*\(\s*(?:Base|db\.Model|DeclarativeBase|orm\.DeclarativeBase)/.test(content)) return []
+  const models = []
+  // Split on each `class ` start so the per-class body (including blank
+  // lines) is captured cleanly, rather than trying to write a regex
+  // that handles empty lines + dedent boundaries.
+  const chunks = content.split(/(?=^class\s)/m)
+  for (const chunk of chunks) {
+    const head = chunk.match(/^class\s+(\w+)\s*\(\s*(?:Base|db\.Model|sa\.orm\.DeclarativeBase|DeclarativeBase|orm\.DeclarativeBase)[^)]*\)\s*:/)
+    if (!head) continue
+    const name = head[1]
+    const body = chunk.slice(head[0].length)
+    const fields = []
+    const fre = /^\s+(\w+)\s*(?::\s*[\w[\],\s]+)?\s*=\s*(?:Column|mapped_column|Mapped|relationship)\s*\(\s*(\w+)?/gm
+    let fm
+    while ((fm = fre.exec(body))) fields.push({ name: fm[1], type: fm[2] || 'unknown' })
+    let tableName = null
+    const tn = body.match(/__tablename__\s*=\s*['"](\w+)['"]/)
+    if (tn) tableName = tn[1]
+    // Skip empty marker classes (like a project's own `class Base(DeclarativeBase)`)
+    if (fields.length === 0 && !tableName) continue
+    models.push({ kind: 'sqlalchemy', name, tableName, fields })
+  }
+  return models
+}
+
+function extractDbModels(content, ext) {
+  if (!content) return []
+  if (ext === 'prisma') return parsePrismaSchema(content)
+  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(ext)) return extractDrizzleTables(content)
+  if (ext === 'py' || ext === 'pyw') return extractSQLAlchemyModels(content)
+  return []
+}
+
 // Extract environment-variable references — `process.env.X`,
 // `os.environ['X']`, `os.Getenv("X")`, shell `${X}`, etc. We require
 // the name to start with an uppercase letter and contain only

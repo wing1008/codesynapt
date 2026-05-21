@@ -140,6 +140,8 @@ const TRACKED_EXT = new Set([
   'sh', 'bash', 'zsh', 'ps1', 'psm1',
   // Data
   'sql', 'xml',
+  // DB schema (Prisma)
+  'prisma',
   // NOTE: dwg/dxf removed — binary CAD files have no import concept,
   // scanning them just creates orphan noise.
 ])
@@ -311,7 +313,7 @@ export class Scanner extends EventEmitter {
     let content = ''
     try { content = fs.readFileSync(absPath, 'utf8') } catch {}
     const loc = content ? content.split('\n').length : 0
-    const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage } = parseFile(absPath, content, ext)
+    const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage, dbModels } = parseFile(absPath, content, ext)
     // Tag the file with its owning package (null if outside all
     // packages or no monorepo). Used by UI for package-level grouping
     // and by API endpoints for package-level slicing.
@@ -325,6 +327,7 @@ export class Scanner extends EventEmitter {
       externalUrls:     externalUrls     || [],
       dynamicPatterns:  dynamicPatterns  || [],
       envUsage:         envUsage         || [],
+      dbModels:         dbModels         || [],
       pkg,
       lastSeenAt:       Date.now(),
     }

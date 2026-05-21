@@ -226,6 +226,15 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_schema',
+    description: 'DB 모델 추출 — Prisma(.prisma), Drizzle(pgTable/mysqlTable/sqliteTable), SQLAlchemy(Base/DeclarativeBase). model 지정시 필드 + 사용처. 비개발자가 "User 모델에 필드 추가해줘" 시킬 때 AI가 먼저 호출해서 현재 스키마 + 의존하는 코드 파악.',
+    inputSchema: {
+      type: 'object',
+      properties: { model: { type: 'string', description: '모델/테이블 이름 (옵션). 없으면 전체 개요' } },
+    },
+    handler: async ({ model }) => (await apiReq('GET', '/schema', model ? { model } : null)).data,
+  },
+  {
     name: 'fg3d_preflight',
     description: '배포 전 종합 점검 체크리스트. 미선언 env 변수, 평문 http URL, 테스트 없는 hub, orphan ratio, dynamic ratio 등을 한 번에 평가. overall: ok|warn|fail. 비개발자가 "배포해도 돼?" 묻거나 CI 게이트로 사용.',
     inputSchema: { type: 'object', properties: {} },

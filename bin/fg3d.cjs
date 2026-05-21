@@ -124,6 +124,9 @@ const USAGE = `filegraph3d CLI — usage:
                               # "결제" / "auth" 같은 키워드 → 관련 파일
                               #   frontend/backend/shared 분류.
                               #   path 매칭 + 라우트 매칭 + apiCall 매칭.
+  fg3d schema [Model] [--json]
+                              # DB 모델 추출 — Prisma / Drizzle /
+                              #   SQLAlchemy. Model 지정시 필드 + 사용처.
   fg3d preflight [--strict] [--json]
                               # 배포 전 종합 점검. env 미선언, http URL,
                               #   테스트 없는 hub, orphan ratio 등.
@@ -707,6 +710,41 @@ async function main() {
         }
         process.stdout.write(`\n   AI에게 줄 때:\n`)
         process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
+        break
+      }
+      case 'schema': {
+        const asJson = args.includes('--json')
+        const model = args[0] && !args[0].startsWith('--') ? args[0] : null
+        const r = await req('GET', '/schema', model ? { model } : null)
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        if (model) {
+          // detail view
+          process.stdout.write(`📊 model: ${j.model}\n`)
+          process.stdout.write(`definitions (${j.definitions.length}):\n`)
+          for (const d of j.definitions) {
+            process.stdout.write(`  · [${d.kind}] ${d.definedIn}${d.tableName ? `  (table: ${d.tableName})` : ''}\n`)
+            for (const f of d.fields.slice(0, 30)) {
+              process.stdout.write(`      - ${f.name}: ${f.type}\n`)
+            }
+            if (d.fields.length > 30) process.stdout.write(`      … +${d.fields.length - 30} more fields\n`)
+          }
+          process.stdout.write(`\nused in ${j.usedCount} files:\n`)
+          for (const f of j.usedIn.slice(0, 30)) process.stdout.write(`  · ${f}\n`)
+          if (j.usedIn.length > 30) process.stdout.write(`  … +${j.usedIn.length - 30} more\n`)
+        } else {
+          // overview
+          process.stdout.write(`📊 DB schema overview — ${j.total} models\n`)
+          if (j.total === 0) { process.stdout.write(`  (none detected — supports Prisma .prisma / Drizzle pgTable / SQLAlchemy Base)\n`); break }
+          process.stdout.write(`  by kind: ${Object.entries(j.byKind).map(([k,v]) => `${k}=${v}`).join('  ')}\n\n`)
+          for (const f of j.files) {
+            process.stdout.write(`  ${f.file}:\n`)
+            for (const m of f.models) {
+              process.stdout.write(`    · ${m.name}${m.tableName && m.tableName !== m.name ? `  (${m.tableName})` : ''}  [${m.kind}, ${m.fieldCount} fields]\n`)
+            }
+          }
+        }
         break
       }
       case 'preflight': {
