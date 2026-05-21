@@ -50,6 +50,17 @@ function printJson(x) { process.stdout.write(JSON.stringify(x, null, 2) + '\n') 
 function die(msg) { process.stderr.write(`error: ${msg}\n`); process.exit(1) }
 
 const USAGE = `filegraph3d CLI — usage:
+
+  ── Headless (no desktop app needed) ─────────────────────────
+  fg3d scan [path] [--json]   # one-shot scan, emit graph as JSON
+  fg3d scan [path] --summary  # cheap overview (file count, top hubs)
+  fg3d serve [path] [--port N]
+                              # standalone HTTP daemon on 127.0.0.1:N
+                              #   serves /summary, /graph, /node/:id,
+                              #   /blast/:id, /packages, etc.
+                              #   no Electron window — pure CLI/MCP/CI use
+
+  ── Remote (needs the desktop app running at :7707) ──────────
   fg3d health
   fg3d summary                # cheap project overview (Layer 1)
   fg3d refresh <id>           # force re-scan of one file (defeats staleness)
@@ -92,6 +103,161 @@ const USAGE = `filegraph3d CLI — usage:
 
 Env: FG3D_PORT (default 7707)`
 
+// ── Headless: load scanner.js (ESM) and run a one-shot scan ──
+async function runHeadlessScan(args) {
+  // Parse args: scan [path] [--json|--summary] [--ext js,ts] [--min-mass N]
+  let target = null
+  let mode = 'json'  // 'json' (full) | 'summary' | 'edges' | 'files'
+  let extFilter = null, minMass = 0
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === '--json')         mode = 'json'
+    else if (a === '--summary') mode = 'summary'
+    else if (a === '--edges')   mode = 'edges'
+    else if (a === '--files')   mode = 'files'
+    else if (a === '--ext' && args[i+1])      { extFilter = args[++i] }
+    else if (a === '--min-mass' && args[i+1]) { minMass = parseInt(args[++i], 10) }
+    else if (!a.startsWith('--') && !target) { target = a }
+  }
+  target = target || process.cwd()
+  const path = require('path')
+  const fs = require('fs')
+  const abs = path.resolve(target)
+  if (!fs.existsSync(abs)) return die(`path does not exist: ${abs}`)
+  if (!fs.statSync(abs).isDirectory()) return die(`not a directory: ${abs}`)
+
+  // scanner.js is ESM; dynamic import from CJS works in Node 18+
+  const { Scanner } = await import('../scanner.js')
+  const s = new Scanner(abs)
+  return new Promise((resolve) => {
+    let emitted = false
+    s.on('snapshot', (snap) => {
+      if (emitted) return
+      emitted = true
+      let files = snap.files
+      if (extFilter) {
+        const exts = new Set(extFilter.split(',').map(x => x.trim()))
+        files = files.filter((f) => exts.has(f.ext))
+      }
+      if (minMass > 0) {
+        const inc = new Map()
+        for (const e of snap.edges) inc.set(e.t, (inc.get(e.t) || 0) + 1)
+        files = files.filter((f) => (inc.get(f.id) || 0) >= minMass)
+      }
+      if (mode === 'json') {
+        printJson({
+          root: abs,
+          files,
+          edges: snap.edges,
+          monorepo: snap.monorepo,
+          pkgEdges: snap.pkgEdges,
+          fileCount: files.length,
+          edgeCount: snap.edges.length,
+          scannedAt: Date.now(),
+        })
+      } else if (mode === 'summary') {
+        const inc = new Map()
+        for (const e of snap.edges) inc.set(e.t, (inc.get(e.t) || 0) + 1)
+        const byExt = {}
+        for (const f of files) byExt[f.ext || 'other'] = (byExt[f.ext || 'other'] || 0) + 1
+        const topHubs = files
+          .map((f) => ({ id: f.id, mass: inc.get(f.id) || 0 }))
+          .filter((h) => h.mass >= 2)
+          .sort((a, b) => b.mass - a.mass)
+          .slice(0, 10)
+        const orphans = files.filter((f) => (inc.get(f.id) || 0) === 0 && f.importCount === 0).length
+        process.stdout.write(`root: ${abs}\n`)
+        process.stdout.write(`files: ${files.length}\n`)
+        process.stdout.write(`edges: ${snap.edges.length}\n`)
+        process.stdout.write(`orphans: ${orphans}\n`)
+        if (snap.monorepo && snap.monorepo.kind !== 'none') {
+          process.stdout.write(`monorepo: ${snap.monorepo.kind} (${snap.monorepo.packages.length} packages)\n`)
+        }
+        process.stdout.write(`\next mix:\n`)
+        for (const [k, v] of Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 10)) {
+          process.stdout.write(`  .${k.padEnd(8)} ${v}\n`)
+        }
+        if (topHubs.length) {
+          process.stdout.write(`\ntop hubs:\n`)
+          for (const h of topHubs) process.stdout.write(`  m=${String(h.mass).padStart(3)}  ${h.id}\n`)
+        }
+      } else if (mode === 'edges') {
+        for (const e of snap.edges) process.stdout.write(`${e.s}\t${e.k}\t${e.t}\n`)
+      } else if (mode === 'files') {
+        for (const f of files) process.stdout.write(`${f.id}\n`)
+      }
+      s.stop()
+      resolve()
+    })
+    s.start()
+    // Safety timeout — fail loud if scan hangs (shouldn't, but CI safety)
+    setTimeout(() => {
+      if (!emitted) {
+        process.stderr.write('scan timed out after 60s\n')
+        try { s.stop() } catch {}
+        resolve()
+        process.exit(2)
+      }
+    }, 60_000)
+  })
+}
+
+// ── Headless: long-running Scanner + HTTP server ─────────────
+async function runHeadlessServe(args) {
+  let target = null
+  let port = parseInt(process.env.FG3D_PORT || '7707', 10)
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a === '--port' && args[i+1]) port = parseInt(args[++i], 10)
+    else if (!a.startsWith('--') && !target) target = a
+  }
+  target = target || process.cwd()
+  const path = require('path')
+  const fs = require('fs')
+  const abs = path.resolve(target)
+  if (!fs.existsSync(abs)) return die(`path does not exist: ${abs}`)
+  if (!fs.statSync(abs).isDirectory()) return die(`not a directory: ${abs}`)
+
+  const { Scanner } = await import('../scanner.js')
+  const { createControlServer } = require('../lib/control-server.cjs')
+
+  let currentRoot = abs
+  const scanner = new Scanner(abs)
+  const { startControlServer, stopControlServer } = createControlServer({
+    scanner,
+    getCurrentRoot: () => currentRoot,
+    // No IPC callbacks in headless mode — onBlast/onFocus/onOpen omitted
+  })
+
+  process.stderr.write(`[fg3d] scanning ${abs}\n`)
+  scanner.on('snapshot', (snap) => {
+    process.stderr.write(`[fg3d] snapshot: ${snap.files.length} files, ${snap.edges.length} edges\n`)
+  })
+  scanner.start()
+
+  try {
+    const { port: actualPort } = await startControlServer(port)
+    process.stderr.write(`[fg3d] HTTP API on http://127.0.0.1:${actualPort}\n`)
+    process.stderr.write(`[fg3d] try: curl http://127.0.0.1:${actualPort}/summary\n`)
+    process.stderr.write(`[fg3d] Ctrl-C to stop.\n`)
+  } catch (e) {
+    if (e.code === 'EADDRINUSE') return die(`port ${port} in use — pass --port N`)
+    return die(`server error: ${e.message}`)
+  }
+
+  // Block forever — graceful shutdown on SIGINT/SIGTERM
+  const shutdown = async (signal) => {
+    process.stderr.write(`\n[fg3d] ${signal} → shutting down\n`)
+    try { scanner.stop() } catch {}
+    try { await stopControlServer() } catch {}
+    process.exit(0)
+  }
+  process.on('SIGINT',  () => shutdown('SIGINT'))
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  // Keep process alive
+  return new Promise(() => {})
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2)
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
@@ -99,6 +265,20 @@ async function main() {
   }
   try {
     switch (cmd) {
+      case 'scan': {
+        // Headless one-shot scan — no desktop app required.
+        // Loads scanner.js directly, waits for the initial snapshot,
+        // emits result (full JSON or summary) and exits.
+        await runHeadlessScan(args)
+        break
+      }
+      case 'serve': {
+        // Headless long-running daemon — Scanner + HTTP API, no Electron.
+        // Drop-in replacement for the desktop app's :7707 control plane
+        // for CLI / MCP / CI usage.
+        await runHeadlessServe(args)
+        break
+      }
       case 'health': {
         const r = await req('GET', '/health')
         printJson(r.json); break
