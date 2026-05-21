@@ -23,6 +23,22 @@ export function parseFile(absPath, content, ext) {
         r = parseComponentFile(content); break
       case 'py': case 'pyw': case 'pyi':
         r = parsePython(content); break
+      case 'ipynb': {
+        // Jupyter notebook = JSON wrapper. Extract code cells and parse
+        // them as Python (typical) / generic (R/Julia/etc). Bypass the
+        // shared trailing logic because we MUST source routes/apiCalls/
+        // URLs from the extracted code only — the raw JSON contains
+        // hundreds of registry URLs from `metadata` that drown out
+        // real API hosts.
+        const ipy = parseIpynb(content)
+        return {
+          imports: ipy.imports,
+          routes:        extractPyRoutes(ipy.codeContent),
+          apiCalls:      extractPyApiCalls(ipy.codeContent),
+          externalUrls:  extractExternalUrls(ipy.codeContent),
+          dynamicPatterns: detectDynamicPatterns(ipy.codeContent, 'py'),
+        }
+      }
       case 'lsp': case 'dcl': case 'lisp': case 'el':
         r = parseLisp(content); break
       case 'css': case 'scss': case 'sass': case 'less': case 'styl':
@@ -223,6 +239,34 @@ function parsePython(content) {
     }
   }
   return { imports }
+}
+
+// ─── Jupyter notebook (.ipynb) ────────────────────────────────
+// Parse a notebook's code cells. Returns { imports, codeContent }
+// where codeContent is the concatenated source of every code cell —
+// the caller uses it for URL / route / apiCall extraction so the raw
+// JSON metadata doesn't pollute those signals.
+function parseIpynb(content) {
+  let nb
+  try { nb = JSON.parse(content) } catch { return { imports: [], codeContent: '' } }
+  if (!nb || !Array.isArray(nb.cells)) return { imports: [], codeContent: '' }
+  const lang = (nb.metadata?.kernelspec?.language || 'python').toLowerCase()
+  const parts = []
+  for (const cell of nb.cells) {
+    if (cell.cell_type !== 'code') continue
+    const src = cell.source
+    if (typeof src === 'string') parts.push(src)
+    else if (Array.isArray(src)) parts.push(src.join(''))
+  }
+  const codeContent = parts.join('\n')
+  // Strip IPython magics (% / !) so parsePython doesn't get confused.
+  // `%matplotlib inline`, `!pip install foo` etc. aren't imports we want.
+  const cleaned = codeContent.split('\n')
+    .filter((l) => !/^\s*[%!]/.test(l))
+    .join('\n')
+  // Most notebooks are Python; R/Julia fall back to generic (URL only).
+  const r = lang.startsWith('python') ? parsePython(cleaned) : parseGeneric(cleaned)
+  return { imports: r.imports || [], codeContent: cleaned }
 }
 
 // ─── Lisp / AutoLISP ──────────────────────────────────────────
@@ -681,12 +725,13 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
   if (spec.startsWith('~')) spec = spec.slice(1)
 
   // Python relative dots (`.`, `..`, `.foo`)
-  if (/^(?:py|pyw)$/.test(fromExt) && spec.startsWith('.')) {
+  // .ipynb notebooks contain Python imports, treat them the same.
+  if (/^(?:py|pyw|ipynb)$/.test(fromExt) && spec.startsWith('.')) {
     return resolvePythonRelative(fromAbsPath, spec, rootAbs, validIds)
   }
 
   // Python dotted module (a.b.c) → search from root
-  if (fromExt === 'py' && !spec.startsWith('.') && !spec.startsWith('/')) {
+  if ((fromExt === 'py' || fromExt === 'ipynb') && !spec.startsWith('.') && !spec.startsWith('/')) {
     const subPath = spec.replace(/\./g, '/')
     for (const ext of ['.py', '/__init__.py']) {
       const cand = path.join(rootAbs, subPath + ext)

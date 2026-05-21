@@ -97,6 +97,8 @@ const TRACKED_EXT = new Set([
   'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
   // Python
   'py', 'pyw', 'pyi',
+  // Jupyter — JSON wrapper around Python (usually) code cells
+  'ipynb',
   // Lisp / Scheme / Clojure / Emacs
   'lsp', 'dcl', 'lisp', 'el', 'clj', 'scm', 'cljc',
   // Styles
