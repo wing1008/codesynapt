@@ -1253,6 +1253,34 @@ function computeTraceStats(events) {
   }
 }
 
+// ─── lib/control-server delegate (Stage 1+2 endpoints) ────────
+// Lazily create a control-server instance from the shared lib module.
+// Used as a fallthrough for new endpoints (safety/bundle/env/suggest/
+// feature/preflight/schema/url/secrets) so the desktop app exposes
+// them too, without duplicating their logic here. Existing endpoints
+// remain handled by this file's own router below — append-only.
+const { createControlServer: _libCreateControlServer } = require('../lib/control-server.cjs')
+let _libControlHandler = null
+let _libScannerRef = null   // invalidate when scanner is swapped
+function _ensureLibHandler() {
+  if (!scanner) return null
+  if (_libControlHandler && _libScannerRef === scanner) return _libControlHandler
+  _libScannerRef = scanner
+  const lib = _libCreateControlServer({
+    scanner,
+    getCurrentRoot: () => currentRoot,
+    onBlast: (p) => mainWindow?.webContents.send('control:blast', p),
+    onFocus: (id) => mainWindow?.webContents.send('control:focus', { id }),
+    onOpen:  (id) => mainWindow?.webContents.send('control:open', { id }),
+  })
+  _libControlHandler = lib.handleControlRequest
+  return _libControlHandler
+}
+const _LIB_ENDPOINTS = new Set([
+  'safety', 'bundle', 'env', 'suggest', 'feature', 'preflight',
+  'schema', 'url', 'secrets',
+])
+
 function handleControlRequest(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -1267,6 +1295,13 @@ function handleControlRequest(req, res) {
   const parts = url.pathname.split('/').filter(Boolean)
   const [seg0, ...rest] = parts
   const idFromRest = () => decodeURIComponent(rest.join('/'))
+
+  // Delegate new endpoints to lib/control-server (Stage 1+2 features)
+  if (_LIB_ENDPOINTS.has(seg0)) {
+    const lib = _ensureLibHandler()
+    if (lib) return lib(req, res)
+    // If scanner isn't ready yet, fall through to 503 below
+  }
   const traceId = () => { const id = idFromRest(); emitTrace(seg0, id); return id }
 
   try {
