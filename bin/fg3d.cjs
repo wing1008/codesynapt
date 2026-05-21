@@ -124,6 +124,10 @@ const USAGE = `filegraph3d CLI — usage:
                               # "결제" / "auth" 같은 키워드 → 관련 파일
                               #   frontend/backend/shared 분류.
                               #   path 매칭 + 라우트 매칭 + apiCall 매칭.
+  fg3d preflight [--strict] [--json]
+                              # 배포 전 종합 점검. env 미선언, http URL,
+                              #   테스트 없는 hub, orphan ratio 등.
+                              #   exit 1 if fail (--strict면 warn도 fail).
   fg3d timeline               # git history → when each file first appeared
   fg3d tour                   # suggested guided tour of the project
   fg3d changes                # files modified this session
@@ -703,6 +707,37 @@ async function main() {
         }
         process.stdout.write(`\n   AI에게 줄 때:\n`)
         process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
+        break
+      }
+      case 'preflight': {
+        const asJson = args.includes('--json')
+        const strict = args.includes('--strict')
+        const r = await req('GET', '/preflight')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        const banner = j.overall === 'ok' ? '🟢 OK — 배포 가능'
+                     : j.overall === 'warn' ? '🟡 WARN — 검토 권장'
+                     : '🔴 FAIL — 배포 비추천'
+        process.stdout.write(`${banner}\n`)
+        process.stdout.write(`fail ${j.counts.fail}  ·  warn ${j.counts.warn}  ·  info ${j.counts.info}  ·  ok ${j.counts.ok}\n\n`)
+        for (const c of j.checks) {
+          const icon = c.status === 'fail' ? '✖' : c.status === 'warn' ? '⚠' : c.status === 'info' ? 'ℹ' : '✓'
+          process.stdout.write(`${icon}  ${c.title}\n`)
+          if (c.detail) process.stdout.write(`     ${c.detail}\n`)
+          if (c.evidence && c.evidence.length) {
+            const ev = c.evidence.slice(0, 5)
+            for (const e of ev) {
+              const line = typeof e === 'string' ? e : JSON.stringify(e)
+              process.stdout.write(`     · ${line}\n`)
+            }
+            if (c.evidence.length > 5) process.stdout.write(`     · … +${c.evidence.length - 5} more\n`)
+          }
+          process.stdout.write(`\n`)
+        }
+        // Exit code
+        if (j.overall === 'fail') process.exit(1)
+        if (strict && j.overall === 'warn') process.exit(1)
         break
       }
       case 'feature': {

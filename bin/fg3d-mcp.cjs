@@ -226,6 +226,12 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_preflight',
+    description: '배포 전 종합 점검 체크리스트. 미선언 env 변수, 평문 http URL, 테스트 없는 hub, orphan ratio, dynamic ratio 등을 한 번에 평가. overall: ok|warn|fail. 비개발자가 "배포해도 돼?" 묻거나 CI 게이트로 사용.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => (await apiReq('GET', '/preflight')).data,
+  },
+  {
     name: 'fg3d_feature',
     description: '키워드 → 관련 파일 클러스터링 (heuristic). 비개발자가 "결제 화면 색 바꿔줘" 같이 기능 단위로 말할 때, AI가 이 도구로 어느 파일들 봐야 할지 파악. frontend/backend/shared 자동 분류. path 매칭 + routes/apiCalls URL 매칭.',
     inputSchema: {
