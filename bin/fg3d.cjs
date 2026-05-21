@@ -127,6 +127,9 @@ const USAGE = `filegraph3d CLI — usage:
   fg3d schema [Model] [--json]
                               # DB 모델 추출 — Prisma / Drizzle /
                               #   SQLAlchemy. Model 지정시 필드 + 사용처.
+  fg3d secrets [--json]       # frontend 코드에 server-only env 변수
+                              #   노출 탐지. public prefix 없는 변수가
+                              #   브라우저 번들로 가면 키 유출.
   fg3d url [PATH] [--json]    # frontend URL → 파일 매핑.
                               #   Next app/pages, Astro, SvelteKit.
                               #   PATH 없으면 전체 등록 routes.
@@ -715,6 +718,26 @@ async function main() {
         }
         process.stdout.write(`\n   AI에게 줄 때:\n`)
         process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
+        break
+      }
+      case 'secrets': {
+        const asJson = args.includes('--json')
+        const r = await req('GET', '/secrets')
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        if (j.varCount === 0) {
+          process.stdout.write(`✓ 노출 위험 변수 없음 — frontend는 모두 public prefix 사용\n`)
+          break
+        }
+        process.stdout.write(`🔴 server-only env 변수 ${j.varCount}개가 frontend 코드에 사용됨 (총 ${j.leakCount}회)\n`)
+        process.stdout.write(`   → 브라우저 번들에 포함되어 키 노출 위험.\n\n`)
+        for (const v of j.vars) {
+          process.stdout.write(`  · ${v.var}  (${v.files.length} files)\n`)
+          for (const f of v.files.slice(0, 5)) process.stdout.write(`      - ${f}\n`)
+          if (v.files.length > 5) process.stdout.write(`      … +${v.files.length - 5} more\n`)
+        }
+        process.stdout.write(`\n  해결: 서버 전용이면 server-side route(API)로 이동, 클라이언트 노출 의도면 NEXT_PUBLIC_/VITE_ 등 prefix 추가.\n`)
         break
       }
       case 'url': {

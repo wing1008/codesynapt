@@ -226,6 +226,12 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_secrets',
+    description: 'frontend 코드에 server-only env 변수가 노출됐는지 검사. NEXT_PUBLIC_/VITE_/REACT_APP_/PUBLIC_/EXPO_PUBLIC_ 등 public prefix가 없는 변수가 client 파일에서 사용되면 → 브라우저 번들에 포함되어 키 유출 위험. 비개발자가 AI에게 env 처리 시킬 때 자동 안전망.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => (await apiReq('GET', '/secrets')).data,
+  },
+  {
     name: 'fg3d_url',
     description: 'URL/route → 파일 매핑 (file-system 라우팅). Next.js app/pages, Astro, SvelteKit 지원. dynamic segment ([slug] → :slug) + catchall ([...rest] → *) 매칭. path 없으면 전체 등록 routes 목록. 비개발자가 "/billing 화면 색 바꿔줘"라고 할 때 AI가 어느 파일 봐야 할지 확정.',
     inputSchema: {
