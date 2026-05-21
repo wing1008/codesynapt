@@ -226,6 +226,15 @@ const TOOLS = [
     ).data,
   },
   {
+    name: 'fg3d_url',
+    description: 'URL/route → 파일 매핑 (file-system 라우팅). Next.js app/pages, Astro, SvelteKit 지원. dynamic segment ([slug] → :slug) + catchall ([...rest] → *) 매칭. path 없으면 전체 등록 routes 목록. 비개발자가 "/billing 화면 색 바꿔줘"라고 할 때 AI가 어느 파일 봐야 할지 확정.',
+    inputSchema: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'URL 경로 (예: /blog/123). 없으면 전체 목록' } },
+    },
+    handler: async ({ path }) => (await apiReq('GET', '/url', path ? { path } : null)).data,
+  },
+  {
     name: 'fg3d_schema',
     description: 'DB 모델 추출 — Prisma(.prisma), Drizzle(pgTable/mysqlTable/sqliteTable), SQLAlchemy(Base/DeclarativeBase). model 지정시 필드 + 사용처. 비개발자가 "User 모델에 필드 추가해줘" 시킬 때 AI가 먼저 호출해서 현재 스키마 + 의존하는 코드 파악.',
     inputSchema: {

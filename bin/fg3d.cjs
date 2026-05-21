@@ -127,6 +127,11 @@ const USAGE = `filegraph3d CLI — usage:
   fg3d schema [Model] [--json]
                               # DB 모델 추출 — Prisma / Drizzle /
                               #   SQLAlchemy. Model 지정시 필드 + 사용처.
+  fg3d url [PATH] [--json]    # frontend URL → 파일 매핑.
+                              #   Next app/pages, Astro, SvelteKit.
+                              #   PATH 없으면 전체 등록 routes.
+                              #   PATH 있으면 매칭 파일 (dynamic seg
+                              #   처리).
   fg3d preflight [--strict] [--json]
                               # 배포 전 종합 점검. env 미선언, http URL,
                               #   테스트 없는 hub, orphan ratio 등.
@@ -710,6 +715,30 @@ async function main() {
         }
         process.stdout.write(`\n   AI에게 줄 때:\n`)
         process.stdout.write(`     "${j.seed}을 수정하기 전에 위 ${j.filesIncluded}개 파일을 모두 읽어주세요."\n`)
+        break
+      }
+      case 'url': {
+        const asJson = args.includes('--json')
+        const p = args[0] && !args[0].startsWith('--') ? args[0] : null
+        const r = await req('GET', '/url', p ? { path: p } : null)
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const j = r.json
+        if (asJson) { printJson(j); break }
+        if (p) {
+          process.stdout.write(`🔍 "${j.query}" 매칭 — ${j.count}개\n\n`)
+          if (j.count === 0) process.stdout.write(`  매칭 없음. fg3d url (인자 없이)로 등록된 route 확인.\n`)
+          for (const m of j.matches) {
+            const dyn = m.dynamicCount ? ` [dynamic ${m.dynamicCount}]` : ''
+            process.stdout.write(`  · [${m.kind.padEnd(10)}] ${m.url}  →  ${m.id}${dyn}\n`)
+          }
+        } else {
+          process.stdout.write(`🔍 frontend routes — ${j.total}개\n`)
+          process.stdout.write(`   by kind: ${Object.entries(j.byKind).map(([k,v]) => `${k}=${v}`).join('  ')}\n\n`)
+          for (const r of j.routes.slice(0, 100)) {
+            process.stdout.write(`  · [${r.kind.padEnd(10)}] ${r.url.padEnd(40)}  ${r.id}\n`)
+          }
+          if (j.routes.length > 100) process.stdout.write(`  … +${j.routes.length - 100} more\n`)
+        }
         break
       }
       case 'schema': {
