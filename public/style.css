@@ -4119,10 +4119,9 @@ body[data-theme="daylight"] .drop-message {
   z-index: 12;
   pointer-events: auto;
   cursor: grab;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid var(--border-edge);
-  border-radius: 8px;
-  backdrop-filter: blur(8px);
+  background: transparent;
+  border: none;
+  backdrop-filter: none;
 }
 #viewCubeCanvas:active { cursor: grabbing; }
 /* When left rail is hidden, snap to absolute bottom-left */

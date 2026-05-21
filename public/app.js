@@ -859,30 +859,32 @@ if (viewCubeCanvas) {
   // side, with text drawn into a canvas texture. Cube is a group of 6
   // planes (easier text orientation than CubeGeometry+texture array).
   const cubeGroup = new THREE.Group()
+  // Glass cube style: nearly-transparent faces (just a light blue tint
+  // + border + short single-letter label), with 3 colored axis lines
+  // (X=red, Y=green, Z=blue) running through the cube. Reveals
+  // orientation via the axis through-lines rather than face colors.
   const FACE_LABELS = [
-    { label: 'FRONT', pos: [0, 0,  0.5], rot: [0, 0, 0],           color: '#3a7' },
-    { label: 'BACK',  pos: [0, 0, -0.5], rot: [0, Math.PI, 0],      color: '#3a7' },
-    { label: 'RIGHT', pos: [ 0.5, 0, 0], rot: [0,  Math.PI/2, 0],   color: '#c46' },
-    { label: 'LEFT',  pos: [-0.5, 0, 0], rot: [0, -Math.PI/2, 0],   color: '#c46' },
-    { label: 'TOP',   pos: [0,  0.5, 0], rot: [-Math.PI/2, 0, 0],   color: '#48c' },
-    { label: 'BOT',   pos: [0, -0.5, 0], rot: [ Math.PI/2, 0, 0],   color: '#48c' },
+    { label: 'F', pos: [0, 0,  0.5], rot: [0, 0, 0] },
+    { label: 'B', pos: [0, 0, -0.5], rot: [0, Math.PI, 0] },
+    { label: 'R', pos: [ 0.5, 0, 0], rot: [0,  Math.PI/2, 0] },
+    { label: 'L', pos: [-0.5, 0, 0], rot: [0, -Math.PI/2, 0] },
+    { label: 'T', pos: [0,  0.5, 0], rot: [-Math.PI/2, 0, 0] },
+    { label: 'B', pos: [0, -0.5, 0], rot: [ Math.PI/2, 0, 0],
+      userLabel: 'BOT' },   // distinct snap-target name so it doesn't collide with BACK
   ]
-  function makeFaceTexture(label, color) {
+  function makeFaceTexture(label) {
     const c = document.createElement('canvas')
     c.width = c.height = 128
     const ctx = c.getContext('2d')
-    // Background gradient + subtle border
-    const grad = ctx.createLinearGradient(0, 0, 0, 128)
-    grad.addColorStop(0, color)
-    grad.addColorStop(1, '#222')
-    ctx.fillStyle = grad
+    // Transparent background with light-blue tint + border.
+    ctx.fillStyle = 'rgba(150, 200, 255, 0.04)'
     ctx.fillRect(0, 0, 128, 128)
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)'
-    ctx.lineWidth = 4
+    ctx.strokeStyle = 'rgba(150, 200, 255, 0.55)'
+    ctx.lineWidth = 3
     ctx.strokeRect(2, 2, 124, 124)
-    // Label
-    ctx.fillStyle = '#fff'
-    ctx.font = 'bold 22px monospace'
+    // Single-letter label, soft white.
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.70)'
+    ctx.font = 'bold 42px monospace'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.fillText(label, 64, 64)
@@ -893,20 +895,71 @@ if (viewCubeCanvas) {
   const planeGeo = new THREE.PlaneGeometry(1, 1)
   const faceData = []
   for (const f of FACE_LABELS) {
-    const mat = new THREE.MeshBasicMaterial({ map: makeFaceTexture(f.label, f.color), side: THREE.DoubleSide })
+    const mat = new THREE.MeshBasicMaterial({
+      map: makeFaceTexture(f.label),
+      transparent: true,
+      side: THREE.DoubleSide,
+    })
     const mesh = new THREE.Mesh(planeGeo, mat)
     mesh.position.set(...f.pos)
     mesh.rotation.set(...f.rot)
-    mesh.userData.label = f.label
+    // userLabel overrides for snap-target lookup (BOT vs the 'B'
+    // shown on top of BACK and BOTTOM faces).
+    mesh.userData.label = f.userLabel || (
+      f.label === 'F' ? 'FRONT' :
+      f.label === 'R' ? 'RIGHT' :
+      f.label === 'L' ? 'LEFT'  :
+      f.label === 'T' ? 'TOP'   :
+      'BACK'   // any other 'B' (back face)
+    )
     cubeGroup.add(mesh)
-    faceData.push({ mesh, label: f.label })
+    faceData.push({ mesh, label: mesh.userData.label })
   }
-  // Edges for definition
+  // Soft cube edges for definition (subtle)
   const edges = new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.BoxGeometry(1.01, 1.01, 1.01)),
-    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 }),
+    new THREE.LineBasicMaterial({ color: 0x96c8ff, transparent: true, opacity: 0.25 }),
   )
   cubeGroup.add(edges)
+  // Three colored axis lines passing through the cube center.
+  function makeAxisLine(color, axis) {
+    const a = 0.6  // line extends slightly past cube faces
+    const points = axis === 'x'
+      ? [new THREE.Vector3(-a, 0, 0), new THREE.Vector3(a, 0, 0)]
+      : axis === 'y'
+      ? [new THREE.Vector3(0, -a, 0), new THREE.Vector3(0, a, 0)]
+      : [new THREE.Vector3(0, 0, -a), new THREE.Vector3(0, 0, a)]
+    const geo = new THREE.BufferGeometry().setFromPoints(points)
+    const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 })
+    return new THREE.Line(geo, mat)
+  }
+  cubeGroup.add(makeAxisLine(0xff5050, 'x'))   // X — red
+  cubeGroup.add(makeAxisLine(0x60d060, 'y'))   // Y — green
+  cubeGroup.add(makeAxisLine(0x5090ff, 'z'))   // Z — blue
+  // Small colored caps at +X, +Y, +Z ends with letter labels.
+  function makeAxisCap(color, label, position) {
+    const c = document.createElement('canvas')
+    c.width = c.height = 64
+    const ctx = c.getContext('2d')
+    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0')
+    ctx.beginPath()
+    ctx.arc(32, 32, 22, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = '#fff'
+    ctx.font = 'bold 26px monospace'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(label, 32, 32)
+    const tex = new THREE.CanvasTexture(c)
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
+    const sprite = new THREE.Sprite(mat)
+    sprite.scale.set(0.22, 0.22, 1)
+    sprite.position.set(...position)
+    return sprite
+  }
+  cubeGroup.add(makeAxisCap(0xff5050, 'X', [0.65, 0, 0]))
+  cubeGroup.add(makeAxisCap(0x60d060, 'Y', [0, 0.65, 0]))
+  cubeGroup.add(makeAxisCap(0x5090ff, 'Z', [0, 0, 0.65]))
   viewCubeScene.add(cubeGroup)
   viewCubeMesh = cubeGroup
 }
@@ -937,36 +990,74 @@ function renderViewCube() {
   viewCubeRenderer.render(viewCubeScene, viewCubeCamera)
 }
 
-// Click on cube → snap main camera to that face
+// View cube interaction:
+//   - drag: rotates main camera (theta/phi)
+//   - click (no drag): snaps main camera to that face
 if (viewCubeCanvas) {
   const ray = new THREE.Raycaster()
-  viewCubeCanvas.addEventListener('click', (e) => {
-    const rect = viewCubeCanvas.getBoundingClientRect()
-    const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1
-    const my = -((e.clientY - rect.top) / rect.height) * 2 + 1
-    ray.setFromCamera({ x: mx, y: my }, viewCubeCamera)
-    // Raycast against cube faces (children of viewCubeMesh that have userData.label)
-    const targets = viewCubeMesh.children.filter((c) => c.userData?.label)
-    const hits = ray.intersectObjects(targets, false)
-    if (!hits.length) return
-    const face = hits[0].object.userData.label
-    // Snap main camera target spherical coords to the face direction.
-    // theta is yaw around Y, phi is zenith from +Y.
-    const PRE = {
-      FRONT: { theta: Math.PI / 2,      phi: Math.PI / 2 },  // looking at +Z
-      BACK:  { theta: -Math.PI / 2,     phi: Math.PI / 2 },
-      RIGHT: { theta: 0,                phi: Math.PI / 2 },
-      LEFT:  { theta: Math.PI,          phi: Math.PI / 2 },
-      TOP:   { theta: Math.PI / 2,      phi: 0.0001 },
-      BOT:   { theta: Math.PI / 2,      phi: Math.PI - 0.0001 },
+  const FACE_PRE = {
+    FRONT: { theta: Math.PI / 2,  phi: Math.PI / 2 },
+    BACK:  { theta: -Math.PI / 2, phi: Math.PI / 2 },
+    RIGHT: { theta: 0,            phi: Math.PI / 2 },
+    LEFT:  { theta: Math.PI,      phi: Math.PI / 2 },
+    TOP:   { theta: Math.PI / 2,  phi: 0.0001 },
+    BOT:   { theta: Math.PI / 2,  phi: Math.PI - 0.0001 },
+  }
+  let cubeDragging = false
+  let cubeDragMoved = false
+  let cubeStartX = 0, cubeStartY = 0
+  let cubeLastX = 0, cubeLastY = 0
+  const DRAG_THRESHOLD = 3   // px before treating as drag (vs click)
+
+  viewCubeCanvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return
+    cubeDragging = true
+    cubeDragMoved = false
+    cubeStartX = cubeLastX = e.clientX
+    cubeStartY = cubeLastY = e.clientY
+    try { viewCubeCanvas.setPointerCapture(e.pointerId) } catch {}
+  })
+  viewCubeCanvas.addEventListener('pointermove', (e) => {
+    if (!cubeDragging) return
+    const totalDx = e.clientX - cubeStartX
+    const totalDy = e.clientY - cubeStartY
+    if (!cubeDragMoved && Math.abs(totalDx) + Math.abs(totalDy) > DRAG_THRESHOLD) {
+      cubeDragMoved = true
     }
-    const p = PRE[face]
-    if (p && cam) {
-      cam.theta = p.theta
-      cam.phi = p.phi
+    if (cubeDragMoved && cam) {
+      cam.theta += (e.clientX - cubeLastX) * 0.005
+      cam.phi   -= (e.clientY - cubeLastY) * 0.005
+      cam.phi = Math.max(0.001, Math.min(Math.PI - 0.001, cam.phi))
+      cubeLastX = e.clientX
+      cubeLastY = e.clientY
       markUserInteraction?.()
     }
   })
+  function cubePointerEnd(e) {
+    if (!cubeDragging) return
+    cubeDragging = false
+    if (!cubeDragMoved) {
+      // Was a click — do face snap.
+      const rect = viewCubeCanvas.getBoundingClientRect()
+      const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1
+      const my = -((e.clientY - rect.top) / rect.height) * 2 + 1
+      ray.setFromCamera({ x: mx, y: my }, viewCubeCamera)
+      const targets = viewCubeMesh.children.filter((c) => c.userData?.label)
+      const hits = ray.intersectObjects(targets, false)
+      if (hits.length) {
+        const face = hits[0].object.userData.label
+        const p = FACE_PRE[face]
+        if (p && cam) {
+          cam.theta = p.theta
+          cam.phi = p.phi
+          markUserInteraction?.()
+        }
+      }
+    }
+    try { viewCubeCanvas.releasePointerCapture(e.pointerId) } catch {}
+  }
+  viewCubeCanvas.addEventListener('pointerup', cubePointerEnd)
+  viewCubeCanvas.addEventListener('pointercancel', cubePointerEnd)
 }
 
 // ─── Starfield background ───────────────────────────────────────
@@ -1364,6 +1455,50 @@ const cam = {
   targetGoal: new THREE.Vector3(),
 }
 
+// Trackball rotation: mouse delta interpreted in camera VIEW space.
+// Horizontal drag rotates around camera's up axis, vertical around
+// its right axis. Result feels "natural" regardless of current view
+// (no roll-when-looking-down spherical artifact). After rotation we
+// re-derive cam.theta/phi/radius so the rest of the system stays in
+// sync.
+const _tbOffset = new THREE.Vector3()
+const _tbForward = new THREE.Vector3()
+const _tbRight = new THREE.Vector3()
+const _tbUp = new THREE.Vector3()
+const _tbWorldUp = new THREE.Vector3(0, 1, 0)
+const _tbQX = new THREE.Quaternion()
+const _tbQY = new THREE.Quaternion()
+function applyTrackballRotation(dx, dy, sensitivity) {
+  const s = sensitivity != null ? sensitivity : 0.005
+  // Build offset = position - target. Note: cam.target lags toward
+  // cam.targetGoal each frame, so we use cam.target here (current).
+  _tbOffset.copy(camera.position).sub(cam.target)
+  const r = _tbOffset.length()
+  if (r < 0.0001) return
+  // Forward = direction camera is looking (target - position).
+  _tbForward.copy(_tbOffset).multiplyScalar(-1 / r)
+  // Right = forward × worldUp (handles near-pole case via fallback)
+  _tbRight.crossVectors(_tbForward, _tbWorldUp)
+  if (_tbRight.lengthSq() < 1e-6) {
+    // Camera looking straight up/down — pick arbitrary right axis.
+    _tbRight.set(1, 0, 0)
+  } else {
+    _tbRight.normalize()
+  }
+  // Up = right × forward
+  _tbUp.crossVectors(_tbRight, _tbForward).normalize()
+  // Rotate offset: dx around up (yaw in view), dy around right (pitch).
+  _tbQX.setFromAxisAngle(_tbUp,    -dx * s)
+  _tbQY.setFromAxisAngle(_tbRight, -dy * s)
+  _tbOffset.applyQuaternion(_tbQX).applyQuaternion(_tbQY)
+  // Re-derive spherical state from rotated offset.
+  const newR = _tbOffset.length()
+  cam.theta = Math.atan2(_tbOffset.x, _tbOffset.z)
+  cam.phi = Math.acos(Math.max(-1, Math.min(1, _tbOffset.y / newR)))
+  // Clamp phi just shy of poles to keep spherical math stable.
+  cam.phi = Math.max(0.001, Math.min(Math.PI - 0.001, cam.phi))
+}
+
 // Auto-frame: set camera distance so the cluster body fills the canvas.
 //
 // Node-radius distribution in force-directed graphs is heavy-tailed:
@@ -1493,6 +1628,11 @@ function stepCPU(dt) {
   const arr = state.byIdx
   const n = arr.length
   if (n === 0) return
+  // While the user is dragging a node, freeze the rest of the graph
+  // — no force-sim runs, so unrelated nodes don't drift in response
+  // to the dragged node's spring tension. The dragged node's position
+  // is updated directly by the pointermove handler.
+  if (state.draggingNode) return
 
   // Disperse animation — when folder grouping was just turned off, lerp
   // every node toward its assigned sphere target with an ease-in-out
@@ -3185,9 +3325,9 @@ function render() {
       if (bornEpoch && bornEpoch > state.timelineCutoff) visible = false
     }
 
-    // Distance-based emphasis. With no focus active, every node
-    // gets emphasis 1.0 (full brightness). With a focus, nodes
-    // get a ripple of brightness that decays with graph distance.
+    // Distance-based color emphasis: selected + neighbors brighter,
+    // unrelated nodes dimmed to 0.40 floor. Size stays constant
+    // (focusPop = 1.0 always) so the graph never thrashes physically.
     let emphasis
     if (!dists) {
       emphasis = 1.0
@@ -3261,7 +3401,10 @@ function render() {
     }
 
     const r = radiusFor(node)
-    const focusPop = (dists && dists.get(node.id) === 0) ? 1.3 : 1.0
+    // Size always stays constant — selection/hover never changes node
+    // size, which was perceived as visual "thrashing" on click.
+    // The selection signal is carried entirely by edge brightness.
+    const focusPop = 1.0
     const searchPop = node.matched ? 1.2 : 1.0
     const starPop = state.activeFiles.has(node.id) ? 1.15 : 1.0
     const tracePop = 1.0 + traceBoost * 1.4 + rippleSize
@@ -3349,12 +3492,14 @@ function render() {
     edgePositions[e*6+5] = nb.p.z
     colorBuf.set(EDGE_COLORS[edge.k] || '#888')
     if (dists) {
+      // Direct edge to the selected node? Boost brightness so the
+      // user can immediately see "what's connected to this node".
+      // Other edges dim to 15 % so they recede into the background.
       const ds = dists.get(edge.s), dt2 = dists.get(edge.t)
-      if (ds === undefined || dt2 === undefined) {
-        colorBuf.multiplyScalar(0.06)        // unreached — heavily faded
+      if (ds === 0 || dt2 === 0) {
+        colorBuf.multiplyScalar(1.5)
       } else {
-        const deepest = Math.max(ds, dt2)
-        colorBuf.multiplyScalar(emphasisFor(deepest, maxDepth))
+        colorBuf.multiplyScalar(0.15)
       }
     }
     edgeColorsBuf[e*6]   = colorBuf.r
@@ -3479,7 +3624,8 @@ function endActiveDrag() {
   if (state.draggingNode) {
     state.draggingNode = null
     state.dragPlane = null
-    reheat(0.25)
+    // No reheat — user said clicking/dragging shouldn't make
+    // the whole graph thrash. Settled positions stay put.
   }
   state.cameraDragging = false
   canvas.style.cursor = state.hoverId ? 'pointer' : 'default'
@@ -3505,7 +3651,9 @@ canvas.addEventListener('pointerdown', (e) => {
       state.dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, node.p)
       node.v.set(0, 0, 0)
       canvas.style.cursor = 'grabbing'
-      reheat(0.5)
+      // No reheat — clicking/dragging shouldn't kick the whole graph
+      // into motion. Drag follows the cursor via direct position set,
+      // not via force-sim alpha bump.
     } else {
       // Stale hover — node was removed between hover-set and click.
       // Fall through to camera drag.
@@ -3538,7 +3686,9 @@ canvas.addEventListener('pointermove', (e) => {
       state.draggingNode.p.copy(hit)
       state.draggingNode.v.set(0, 0, 0)
     }
-    reheat(0.3)
+    // No reheat — alpha accumulating during drag was causing the
+    // graph to explode after release. Dragged node moves directly;
+    // no force-sim kick needed.
   } else if (state.cameraDragging) {
     cam.theta += (e.clientX - lastX) * 0.005
     cam.phi   -= (e.clientY - lastY) * 0.005
