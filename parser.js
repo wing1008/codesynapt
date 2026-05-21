@@ -740,13 +740,43 @@ function extractJSApiCalls(content) {
     calls.push({ method, url })
   }
   // SWR / React Query convenience: useFetch('/api/x'), useSWR('/api/x')
-  const hookRe = /\buse(?:Fetch|SWR|Query|Data)\s*\(\s*['"`]([^'"`]+)['"`]/g
+  const hookRe = /\buse(?:Fetch|SWR|Query|Data|AsyncData)\s*\(\s*['"`]([^'"`]+)['"`]/g
   while ((m = hookRe.exec(content))) {
     const url = m[1]
     if (!looksLikeUrl(url)) continue
     calls.push({ method: 'GET', url })
   }
-  return calls
+  // Nuxt 3 / Nitro: $fetch('/api/x'), ofetch('/api/x')
+  const nitroRe = /(?:\$fetch|\bofetch)\s*\(\s*['"`]([^'"`]+)['"`]\s*(?:,\s*\{([^}]*)\})?/g
+  while ((m = nitroRe.exec(content))) {
+    const url = m[1]
+    if (!looksLikeUrl(url)) continue
+    let method = 'GET'
+    if (m[2]) {
+      const mm = m[2].match(/method\s*:\s*['"`](\w+)['"`]/)
+      if (mm) method = mm[1].toUpperCase()
+    }
+    calls.push({ method, url })
+  }
+  // Template literal with leading static prefix:
+  //   fetch(`/api/users/${id}`)  → emit '/api/users/'
+  // Route matching downstream treats it as a prefix that the route
+  // regex must consume. Limited to fetch/$fetch + identifier.method to
+  // bound false positives.
+  const templateRe = /\b(?:fetch|\$fetch|ofetch|axios|got|ky|api|client|http|request)(?:\.\w+)?\s*\(\s*`(\/[\w/-]+\/)\$\{/g
+  while ((m = templateRe.exec(content))) {
+    const url = m[1]   // e.g. '/api/users/'
+    if (!looksLikeUrl(url) || url.length < 5) continue
+    calls.push({ method: 'ANY', url, partial: true })
+  }
+  // Dedup (multiple extractors may match the same call — e.g. $fetch
+  // hits both fetchRe via \b and nitroRe explicitly).
+  const seen = new Set()
+  return calls.filter((c) => {
+    const k = c.method + '|' + c.url
+    if (seen.has(k)) return false
+    seen.add(k); return true
+  })
 }
 
 function extractPyRoutes(content) {
