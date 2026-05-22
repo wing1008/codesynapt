@@ -49,9 +49,20 @@ All three share the same scanner: imports across JS/TS/Vue/Svelte/Python/Go/Rust
 
 ```sh
 git clone https://github.com/wing1008/codesynapt.git
-cd codesynapt && npm install
-npm start          # desktop app + HTTP control API on :7707
+cd codesynapt
+npm install                      # full install — desktop + CLI + MCP (~700 MB w/ Electron)
+npm start                        # desktop app + HTTP control API on :7707
 ```
+
+**CLI / MCP only** (no Electron, no 3D — for CI / SSH / Docker, ~30 MB):
+
+```sh
+npm install --omit=optional --omit=dev
+node bin/codesynapt.cjs scan .   # one-shot
+node bin/codesynapt.cjs serve .  # daemon
+```
+
+`three` (3D renderer) and `ws` are `optionalDependencies`; `electron` is a devDependency. CI runners can skip the 700 MB Electron download entirely.
 
 ### Headless — no desktop window needed (CI / SSH / Docker)
 
