@@ -2,6 +2,25 @@
 
 All notable changes to CodeSynapt (formerly `CodeSynapse`, originally `filegraph3d`).
 
+## 0.14.3 — 2026-05-22 (P3 + P4·6 묶음 — locale + HTTP + auth)
+
+### Added
+- **MCP locale 응답 (P3·2)** — `/safety/:id?locale=ko`, `/preflight?locale=ko` 응답을 한국어로. MCP tool은 `locale: 'en'|'ko'` 인자. CLI는 `--locale ko`. 기본은 영어 (international AI 호환).
+- **Streamable HTTP MCP transport (P3·3)** — `codesynapt-mcp --http [--port 7708]`. POST /mcp body는 JSON-RPC, 응답도 동일. Anthropic API remote MCP / cloud-hosted client 호환.
+- **Bearer token auth (P4·6)** — `CS_AUTH_TOKEN` 환경변수 설정시 모든 control API 요청에 `Authorization: Bearer <token>` 필수.
+- **Audit log (P4·6)** — `~/.codesynapt/audit/YYYY-MM-DD.jsonl`에 모든 요청 append (ts/durMs/method/path/status/principal).
+
+### Changed
+- `three` (3D renderer) + `ws`를 **`optionalDependencies`로 이동** — CI / SSH / Docker 사용자는 `npm install --omit=optional --omit=dev`로 30 MB 설치 (vs 700 MB).
+
+### Tests
+- 63/63 (P3·2 locale 3, P4·6 auth+audit 3 추가)
+
+### Roadmap
+- 풀 monorepo 분리 (`packages/core` + `desktop`): 별도 세션
+- main.cjs full refactor: 풀 monorepo와 묶음
+- OAuth 2.1 full spec: discovery / PKCE / refresh / scoped tokens — 매출 신호 후
+
 ## 0.14.2 — 2026-05-22 (P1 + P2 묶음 — accuracy + tests)
 
 ### Accuracy (P1 + P2)
