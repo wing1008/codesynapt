@@ -47,6 +47,72 @@ function call(method, urlPath, body) {
   })
 }
 
+describe('control-server auth + audit (P4·6)', () => {
+  it('rejects requests without Bearer when authToken set', async () => {
+    const lib2 = createControlServer({
+      scanner, getCurrentRoot: () => tmpRoot,
+      authToken: 'secret-token-xyz',
+    })
+    const res = await new Promise((resolve) => {
+      const captured = []
+      lib2.handleControlRequest(
+        { method: 'GET', url: '/health', headers: { host: '127.0.0.1' }, on() {} },
+        { writeHead(s) { captured.push(s) }, end(b) { resolve({ status: captured[0], body: b }) },
+          on() {} },
+      )
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('accepts requests with matching Bearer token', async () => {
+    const lib2 = createControlServer({
+      scanner, getCurrentRoot: () => tmpRoot,
+      authToken: 'secret-token-xyz',
+    })
+    const res = await new Promise((resolve) => {
+      const captured = []
+      lib2.handleControlRequest(
+        { method: 'GET', url: '/health', headers: { host: '127.0.0.1', authorization: 'Bearer secret-token-xyz' }, on() {} },
+        { writeHead(s) { captured.push(s) }, end(b) { resolve({ status: captured[0], body: JSON.parse(b) }) },
+          on() {} },
+      )
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+  })
+
+  it('writes audit log when auditLogDir is set', async () => {
+    const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-audit-'))
+    const lib2 = createControlServer({
+      scanner, getCurrentRoot: () => tmpRoot,
+      auditLogDir: auditDir,
+    })
+    // fake req/res with finish hook
+    const listeners = []
+    await new Promise((resolve) => {
+      lib2.handleControlRequest(
+        { method: 'GET', url: '/health', headers: { host: '127.0.0.1' }, on() {} },
+        {
+          statusCode: 200,
+          writeHead(s) { this.statusCode = s },
+          end() { for (const fn of listeners) fn(); resolve() },
+          on(ev, fn) { if (ev === 'finish') listeners.push(fn) },
+        },
+      )
+    })
+    // give the audit append a tick
+    await new Promise((r) => setTimeout(r, 10))
+    const files = fs.readdirSync(auditDir).filter((f) => f.endsWith('.jsonl'))
+    expect(files.length).toBeGreaterThan(0)
+    const content = fs.readFileSync(path.join(auditDir, files[0]), 'utf8').trim()
+    const entry = JSON.parse(content.split('\n')[0])
+    expect(entry.path).toBe('/health')
+    expect(entry.method).toBe('GET')
+    expect(entry.status).toBe(200)
+    try { fs.rmSync(auditDir, { recursive: true, force: true }) } catch {}
+  })
+})
+
 describe('control-server endpoints', () => {
   it('GET / returns endpoint catalog', async () => {
     const r = await call('GET', '/')

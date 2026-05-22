@@ -1272,6 +1272,8 @@ function _ensureLibHandler() {
     onBlast: (p) => mainWindow?.webContents.send('control:blast', p),
     onFocus: (id) => mainWindow?.webContents.send('control:focus', { id }),
     onOpen:  (id) => mainWindow?.webContents.send('control:open', { id }),
+    authToken: process.env.CS_AUTH_TOKEN || null,
+    auditLogDir: path.join(app.getPath('home'), '.codesynapt', 'audit'),
   })
   _libControlHandler = lib.handleControlRequest
   return _libControlHandler

@@ -299,6 +299,8 @@ async function runHeadlessServe(args) {
     scanner,
     getCurrentRoot: () => currentRoot,
     // No IPC callbacks in headless mode — onBlast/onFocus/onOpen omitted
+    authToken: process.env.CS_AUTH_TOKEN || null,
+    auditLogDir: path.join(os.homedir(), '.codesynapt', 'audit'),
   })
 
   process.stderr.write(`[cs] scanning ${abs}\n`)
