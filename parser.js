@@ -842,14 +842,60 @@ function extractJSApiCalls(content) {
     if (!looksLikeUrl(url) || url.length < 5) continue
     calls.push({ method: 'ANY', url, partial: true })
   }
-  // Dedup (multiple extractors may match the same call — e.g. $fetch
-  // hits both fetchRe via \b and nitroRe explicitly).
-  const seen = new Set()
-  return calls.filter((c) => {
+  // ── SDK instance tracking (P2·4) ──────────────────────────
+  // axios.create() / got.extend() / ky.create() / ofetch.create():
+  //   const myClient = axios.create({ baseURL: 'https://x' })
+  //   myClient.get('/users')   ← treat the same as axios.get('/users')
+  // We collect all such variable names first, then run a second method-
+  // match pass using just those names. baseURL is intentionally ignored
+  // (mixing http://prefix and /path is fuzzy; downstream route↔fetch
+  // matcher only needs the relative path).
+  const sdkInstanceRe = /\b(?:const|let|var)\s+(\w+)\s*=\s*(?:axios|got|ky|ofetch)\.(?:create|extend)\s*\(/g
+  const sdkInstances = new Set()
+  while ((m = sdkInstanceRe.exec(content))) sdkInstances.add(m[1])
+  // Also: const api = useApi() / createApi() patterns common in Vue/React
+  // (these resolve to axios-shaped instances)
+  const factoryRe = /\b(?:const|let|var)\s+(\w+)\s*=\s*(?:useApi|createApi|createClient|useFetch)\s*\(/g
+  while ((m = factoryRe.exec(content))) sdkInstances.add(m[1])
+  for (const name of sdkInstances) {
+    const reLiteral = new RegExp(`\\b${name}\\.(${HTTP_METHODS.join('|')})\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`, 'g')
+    let mm
+    while ((mm = reLiteral.exec(content))) {
+      const url = mm[2]
+      if (!looksLikeUrl(url)) continue
+      calls.push({ method: mm[1].toUpperCase(), url, via: 'sdk-instance' })
+    }
+    // Template-literal prefix for the same instance
+    const reTpl = new RegExp(`\\b${name}\\.(${HTTP_METHODS.join('|')})\\s*\\(\\s*\`(\\/[\\w/-]+\\/)\\$\\{`, 'g')
+    while ((mm = reTpl.exec(content))) {
+      calls.push({ method: mm[1].toUpperCase(), url: mm[2], via: 'sdk-instance', partial: true })
+    }
+  }
+  // ── tRPC procedure calls (P2·4 — informational, no URL match) ──
+  // trpc.users.list.useQuery() / trpc.posts.create.mutate(...)
+  // We can't match these against server routes (URLs are implicit),
+  // but record them for visibility under apiCalls with method='RPC'.
+  const trpcRe = /\btrpc(?:\.[A-Za-z_][\w]*)+\.(?:useQuery|useMutation|query|mutate)\s*\(/g
+  while ((m = trpcRe.exec(content))) {
+    // extract "trpc.<a>.<b>....method" — keep the procedure path
+    const segs = m[0].replace(/\s*\($/, '').split('.')
+    // ['trpc', 'users', 'list', 'useQuery']
+    const proc = segs.slice(1, -1).join('.')   // 'users.list'
+    if (proc) calls.push({ method: 'RPC', url: 'trpc:' + proc, via: 'trpc' })
+  }
+  // Dedup. Same (method, url) → keep the most informative entry:
+  // an entry with `via: 'sdk-instance'` wins over the generic axiosRe
+  // match (because sdk-instance correctly attributed it to the actual
+  // SDK variable, not the bare keyword).
+  const byKey = new Map()
+  for (const c of calls) {
     const k = c.method + '|' + c.url
-    if (seen.has(k)) return false
-    seen.add(k); return true
-  })
+    const prev = byKey.get(k)
+    if (!prev) { byKey.set(k, c); continue }
+    // Prefer entries with via (sdk-instance > unmarked)
+    if (!prev.via && c.via) byKey.set(k, c)
+  }
+  return [...byKey.values()]
 }
 
 function extractPyRoutes(content) {

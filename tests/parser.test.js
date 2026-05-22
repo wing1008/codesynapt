@@ -198,6 +198,55 @@ describe('parseFile — apiCalls', () => {
   })
 })
 
+describe('parseFile — SDK instance + TRPC (P2·4)', () => {
+  it('axios.create instance variable', () => {
+    const r = parseFile('x.ts', `
+const myApi = axios.create({ baseURL: 'https://api.example.com' })
+myApi.get('/users')
+myApi.post('/users', { name: 'a' })
+`, 'ts')
+    const calls = r.apiCalls.filter((c) => c.via === 'sdk-instance')
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    expect(calls.some((c) => c.method === 'GET' && c.url === '/users')).toBe(true)
+    expect(calls.some((c) => c.method === 'POST' && c.url === '/users')).toBe(true)
+  })
+
+  it('got.extend instance variable', () => {
+    const r = parseFile('x.ts', `
+const client = got.extend({ prefixUrl: 'https://x' })
+client.delete('/items/42')
+`, 'ts')
+    expect(r.apiCalls.some((c) => c.method === 'DELETE' && c.url === '/items/42' && c.via === 'sdk-instance')).toBe(true)
+  })
+
+  it('factory-style createApi() variable', () => {
+    const r = parseFile('x.ts', `
+const svc = createApi()
+svc.get('/health')
+`, 'ts')
+    expect(r.apiCalls.some((c) => c.url === '/health' && c.via === 'sdk-instance')).toBe(true)
+  })
+
+  it('TRPC useQuery / useMutation recorded as RPC', () => {
+    const r = parseFile('x.tsx', `
+const { data } = trpc.users.list.useQuery()
+trpc.posts.create.mutate({ title: 'a' })
+`, 'tsx')
+    const rpc = r.apiCalls.filter((c) => c.method === 'RPC')
+    expect(rpc.length).toBe(2)
+    expect(rpc.some((c) => c.url === 'trpc:users.list')).toBe(true)
+    expect(rpc.some((c) => c.url === 'trpc:posts.create')).toBe(true)
+  })
+
+  it('ignores non-SDK variables', () => {
+    const r = parseFile('x.ts', `
+const random = somethingElse()
+random.get('/should-not-match')
+`, 'ts')
+    expect(r.apiCalls.some((c) => c.via === 'sdk-instance')).toBe(false)
+  })
+})
+
 describe('parseFile — confidence (P2·3)', () => {
   it('pure static imports → high', () => {
     const r = parseFile('x.ts', `import foo from './foo'\nconst a = 1`, 'ts')
