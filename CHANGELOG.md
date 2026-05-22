@@ -1,6 +1,28 @@
 # Changelog
 
-All notable changes to filegraph3d.
+All notable changes to CodeSynapse (formerly `filegraph3d`).
+
+## 0.13.0 — 2026-05-22 (Rebrand → CodeSynapse)
+
+### Renamed — BREAKING
+
+- **Package name**: `filegraph3d` → `codesynapse`
+- **GitHub repo**: `wing1008/filegraph3d` → `wing1008/codesynapse` (old URL auto-redirects)
+- **MCP tool prefix**: `fg3d_*` → `cs_*`  (e.g. `fg3d_blast` → `cs_blast`).
+  Re-register: `claude mcp add codesynapse node /abs/path/bin/fg3d-mcp.cjs`
+- **CLI alias added**: `cs` (in addition to existing `fg3d`); both invoke the same binary.
+- **`bin` field**:
+  - `codesynapse` and `cs` → `./bin/fg3d.cjs`
+  - `codesynapse-mcp` → `./bin/fg3d-mcp.cjs`
+  - (Old `fg3d` / `fg3d-mcp` bin names removed.)
+
+### Why
+- `filegraph3d` was a literal description (file + graph + 3D), hard to pronounce, not unique in search.
+- `CodeSynapse` evokes neural connections = code dependencies, AI-friendly, brandable.
+
+### Notes
+- File names `bin/fg3d.cjs` / `bin/fg3d-mcp.cjs` kept for this release to minimise diff churn — will rename to `bin/codesynapse*.cjs` in a follow-up.
+- `FG3D_PORT` env var still works; `CS_PORT` added with the same meaning.
 
 ## 0.12.0 — 2026-05-22 (포지셔닝 + 통합)
 

@@ -1,8 +1,8 @@
-# filegraph3d
+# CodeSynapse
 
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](./LICENSE)
 [![Plugin API: MIT](https://img.shields.io/badge/Plugin%20API-MIT-green.svg)](./plugin-api/LICENSE)
-[![Version](https://img.shields.io/github/package-json/v/YOUR_USER/filegraph3d?label=version&color=informational)](./CHANGELOG.md)
+[![Version](https://img.shields.io/github/package-json/v/wing1008/codesynapse?label=version&color=informational)](./CHANGELOG.md)
 [![Node ≥20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](./package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](./docs/installation.md)
 
@@ -10,7 +10,7 @@
 > The dependency map Claude Code / Cursor / any MCP agent should be
 > reading before it edits your code. Live-updating (~300 ms after a
 > save), no re-indexing, no cloud. Same scanner ships as MCP server
-> (8 intent-shaped tools), CLI (`fg3d`), and a 3D desktop window that
+> (8 intent-shaped tools), CLI (`cs`), and a 3D desktop window that
 > pulses every node the AI touches.
 
 ## Why this exists
@@ -20,11 +20,11 @@ They have no project-wide map: which files matter, what imports what,
 which routes match which fetch calls, what external services the code
 talks to, which "v2" file is the real one vs. abandoned drafts.
 
-`filegraph3d` builds that map and exposes it three ways:
+`codesynapse` builds that map and exposes it three ways:
 
 | Surface | For | Example |
 |---|---|---|
-| **MCP server** | AI coding agents | "Which files import `auth.js`?" → agent calls `fg3d_query({action:'users', id:'auth.js'})` |
+| **MCP server** | AI coding agents | "Which files import `auth.js`?" → agent calls `cs_query({action:'users', id:'auth.js'})` |
 | **CLI** (`fg3d`) | terminal users, scripts, CI | `fg3d external` — list every API/website your code talks to; `fg3d ci-diff main..HEAD` — PR blast radius as Markdown |
 | **Desktop app** | visual exploration | drop folder → 3D graph with live updates; watch the AI navigate live |
 
@@ -32,24 +32,24 @@ All three share the same scanner: imports across JS/TS/Vue/Svelte/Python/Go/Rust
 
 ## What it does well
 
-- **8 intent-shaped MCP tools** (not 37 narrow ones) — `fg3d_summary`, `fg3d_query`, `fg3d_blast`, `fg3d_intent`, `fg3d_health`, `fg3d_change`, `fg3d_trace`, `fg3d_ui`. Each takes an `action` enum. Designed so the agent picks the right one with a glance, not by scanning a wall of tool names.
+- **8 intent-shaped MCP tools** (not 37 narrow ones) — `cs_summary`, `cs_query`, `cs_blast`, `cs_intent`, `cs_health`, `cs_change`, `cs_trace`, `cs_ui`. Each takes an `action` enum. Designed so the agent picks the right one with a glance, not by scanning a wall of tool names.
 - **AI-aware response envelope** — every response includes `meta: { scannedAt, tokenEstimate, totalAvailable, truncated }`. The agent budgets tokens before drilling deeper.
-- **Blast radius before edit** — `fg3d_blast({action:'safety', id})` returns 🟢/🟡/🔴 verdict + reasons in one call; `action:'bundle'` packs the closest neighbours into a token budget so the agent reads the right context first.
+- **Blast radius before edit** — `cs_blast({action:'safety', id})` returns 🟢/🟡/🔴 verdict + reasons in one call; `action:'bundle'` packs the closest neighbours into a token budget so the agent reads the right context first.
 - **Live updates ~300 ms** — chokidar file-watcher + 60 ms snapshot debounce. No re-indexing, no manual refresh, no cloud round-trip. (Most code-intelligence tools require an explicit re-index step — this one doesn't.)
 - **Live agent visualization** — when the desktop window is open, every MCP call pulses the touched node in 3D. You see the AI navigate.
 - **Full-stack route↔fetch matching** — JS/TS, Python, Next.js file-system API routes auto-detected. Frontend `fetch('/api/billing')` linked to `app/api/billing/route.ts` automatically.
 - **Headless + CI** — `fg3d scan`, `fg3d serve`, `fg3d ci-diff main..HEAD`, `fg3d ci-gate --max-blast 50`. No Electron required for CI / SSH / Docker.
-- **Auto-history per file** (opt-in) — every save snapshots previous content (cap 3). Roll back via `fg3d_change({action:'restore'})`.
-- **External URL inventory** — `fg3d_intent({action:'external'})` lists every API host the project calls (Stripe, OpenAI, your own backend…), grouped by domain.
-- **Env / secret leak detection** — `fg3d_health({action:'secrets'})` flags server-only env vars accidentally used in client bundles.
-- **Offline by design** — no network calls, no telemetry, no cloud sync. The whole graph lives in memory + your local `.filegraph3d/` directory.
+- **Auto-history per file** (opt-in) — every save snapshots previous content (cap 3). Roll back via `cs_change({action:'restore'})`.
+- **External URL inventory** — `cs_intent({action:'external'})` lists every API host the project calls (Stripe, OpenAI, your own backend…), grouped by domain.
+- **Env / secret leak detection** — `cs_health({action:'secrets'})` flags server-only env vars accidentally used in client bundles.
+- **Offline by design** — no network calls, no telemetry, no cloud sync. The whole graph lives in memory + your local `.codesynapse/` directory.
 - **i18n** — Korean ↔ English toggle, persists.
 
 ## Quick start
 
 ```sh
-git clone https://github.com/YOUR_USER/filegraph3d.git
-cd filegraph3d && npm install
+git clone https://github.com/wing1008/codesynapse.git
+cd codesynapse && npm install
 npm start          # desktop app + HTTP control API on :7707
 ```
 
@@ -92,7 +92,7 @@ list including history, restore, refresh, tour, timeline, trace.
 Make `fg3d` globally available:
 
 ```sh
-npm link        # adds fg3d / fg3d-mcp / filegraph3d-server to PATH
+npm link        # adds fg3d / fg3d-mcp / codesynapse-server to PATH
 ```
 
 ## Hook up your AI agent
@@ -100,33 +100,33 @@ npm link        # adds fg3d / fg3d-mcp / filegraph3d-server to PATH
 ### Claude Code (one-time)
 
 ```sh
-claude mcp add filegraph3d node /absolute/path/to/filegraph3d/bin/fg3d-mcp.cjs
+claude mcp add codesynapse node /absolute/path/to/codesynapse/bin/fg3d-mcp.cjs
 ```
 
-That registers 8 intent-shaped MCP tools (all `fg3d_*`). In any
+That registers 8 intent-shaped MCP tools (all `cs_*`). In any
 session, just ask project-shape questions and Claude picks the right
 action automatically:
 
 > *"이 프로젝트가 호출하는 외부 API 다 알려줘"*
-> → `fg3d_intent({action:'external'})` → domains grouped by file caller
+> → `cs_intent({action:'external'})` → domains grouped by file caller
 
 > *"`src/auth/session.ts` 수정하면 어떤 파일들이 영향받아?"*
-> → `fg3d_blast({action:'safety', id:'src/auth/session.ts'})` → 🟡 CAUTION, 23 dependents, advice
+> → `cs_blast({action:'safety', id:'src/auth/session.ts'})` → 🟡 CAUTION, 23 dependents, advice
 
 > *"수정 전에 같이 봐야 할 파일 묶음 만들어줘"*
-> → `fg3d_blast({action:'bundle', id, budget:8000})` → packed files within token budget
+> → `cs_blast({action:'bundle', id, budget:8000})` → packed files within token budget
 
 > *"import 안 되는 잔재 파일 찾아줘"*
-> → `fg3d_health({action:'legacy'})` → orphan/path/filename/duplicate candidates with confidence
+> → `cs_health({action:'legacy'})` → orphan/path/filename/duplicate candidates with confidence
 
 > *"`/billing` 화면이 어느 파일이야?"*
-> → `fg3d_intent({action:'url', path:'/billing'})` → matched file (Next.js / Astro / SvelteKit aware)
+> → `cs_intent({action:'url', path:'/billing'})` → matched file (Next.js / Astro / SvelteKit aware)
 
 > *"src/api/payment.ts 한 시간 전 버전으로 되돌려"*
-> → `fg3d_change({action:'history', id})` → `fg3d_change({action:'restore', id, ts})`
+> → `cs_change({action:'history', id})` → `cs_change({action:'restore', id, ts})`
 
 > *"배포해도 안전한가?"*
-> → `fg3d_health({action:'preflight'})` → undeclared env / http URLs / hub tests / leaks — overall ok|warn|fail
+> → `cs_health({action:'preflight'})` → undeclared env / http URLs / hub tests / leaks — overall ok|warn|fail
 
 If the desktop app is open you'll **see** every tool call pulse the
 relevant node in 3D — a live X-ray of what the agent is doing.
@@ -139,7 +139,7 @@ Same MCP server. Standard config — see [**docs/mcp-setup.md**](./docs/mcp-setu
 
 **1. AI-assisted refactoring without breakage.** Before changing
 `src/lib/payment.ts`, ask Claude "is it safe to refactor?". Agent runs
-`fg3d_blast({action:'safety'})` → 🟢/🟡/🔴 with reasons in one call.
+`cs_blast({action:'safety'})` → 🟢/🟡/🔴 with reasons in one call.
 Follow up with `action:'bundle'` to get the closest neighbours packed
 into a token budget — the right context for the edit.
 
@@ -148,18 +148,18 @@ into a token budget — the right context for the edit.
 file changes touches >50 dependents. Or `fg3d ci-diff main..HEAD
 --format=github-comment` to post a Markdown impact report on the PR.
 
-**3. External API + secret audit.** `fg3d_intent({action:'external'})`
+**3. External API + secret audit.** `cs_intent({action:'external'})`
 lists every external host (Stripe, OpenAI…), grouped by caller — for
 security review, migration planning, API spend estimation.
-`fg3d_health({action:'secrets'})` catches server-only env vars
+`cs_health({action:'secrets'})` catches server-only env vars
 accidentally used in client bundles.
 
 **4. Cleaning up "v2" / dead files.**
-`fg3d_health({action:'legacy'})` returns confidence-scored cleanup
+`cs_health({action:'legacy'})` returns confidence-scored cleanup
 candidates across 4 categories (orphan / path / filename / duplicate),
 so you know which version is the real one before deleting.
 
-**5. Full-stack route tracing.** filegraph3d matches `fetch('/api/x')`
+**5. Full-stack route tracing.** codesynapse matches `fetch('/api/x')`
 client calls to `app.get('/api/x', …)` server routes across JS/TS and
 Python (Express, Fastify, Koa, Hono, Flask, FastAPI) — plus Next.js
 file-system API routes (`app/api/*/route.ts`, `pages/api/*`)
@@ -173,14 +173,14 @@ a trail through its navigation path. The AI trace panel logs each
 tool call live.
 
 **7. URL → file in one query.** Designer says "the /billing screen
-looks broken". `fg3d_intent({action:'url', path:'/billing'})` →
+looks broken". `cs_intent({action:'url', path:'/billing'})` →
 `src/app/(dashboard)/billing/page.tsx` (Next.js route groups + dynamic
 segments handled).
 
-**8. Onboarding a new project.** Open it in filegraph3d, hit the 🧭
+**8. Onboarding a new project.** Open it in codesynapse, hit the 🧭
 **Tour** button. The camera flies through entry points, top hubs, and
 external API integration spots. Or ask Claude: "give me the guided
-tour" → `fg3d_trace({action:'tour'})`.
+tour" → `cs_trace({action:'tour'})`.
 
 **7. Watching project evolution.** Hit the ⏱ **Time-lapse** button.
 The slider scrubs through git history — files appear at their first
@@ -204,7 +204,7 @@ Built on Electron + Three.js. Scales to 100k+ files. Features:
 - **Live AI agent visualization** — pulse + ripple + cyan-to-magenta navigation trail when MCP calls hit the graph
 - **Idle auto-rotate camera** + scene heartbeat for the "alive" feel; instantly stops on user input
 - **Inspector** with full-file editor + auto-save + connection badge + history panel + diff view
-- **Auto file history** — opt-in, max 3 versions per file under `.filegraph3d/history/`
+- **Auto file history** — opt-in, max 3 versions per file under `.codesynapse/history/`
 - **Changes panel** (📝) — every file the session has modified, with one-click line-diff
 - **Onboarding tour** (🧭) — auto-generated walkthrough of entry points + hubs + API integration
 - **Time-lapse** (⏱) — slider replays git history; files appear at their first commit
@@ -231,11 +231,11 @@ For OS-specific installation notes, see **[docs/installation.md](./docs/installa
 | Getting help or asking questions | [.github/SUPPORT.md](./.github/SUPPORT.md) |
 | Contributing code | [CONTRIBUTING.md](./CONTRIBUTING.md) |
 | Community guidelines | [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) |
-| AI coding agent guide (working ON filegraph3d) | [AGENTS.md](./AGENTS.md) |
+| AI coding agent guide (working ON codesynapse) | [AGENTS.md](./AGENTS.md) |
 
 ## License
 
-filegraph3d uses **dual licensing**:
+codesynapse uses **dual licensing**:
 
 - **Main app** ([LICENSE](./LICENSE)): [Business Source License 1.1](https://mariadb.com/bsl-faq-adopting/)
   - ✅ Free for personal, internal, academic, and research use

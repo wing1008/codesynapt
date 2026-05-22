@@ -1,20 +1,23 @@
 {
-  "name": "filegraph3d",
-  "version": "0.12.0",
+  "name": "codesynapse",
+  "version": "0.13.0",
   "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
   "license": "BUSL-1.1",
   "author": "",
-  "homepage": "https://github.com/YOUR_USER/filegraph3d#readme",
+  "homepage": "https://github.com/wing1008/codesynapse#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_USER/filegraph3d.git"
+    "url": "git+https://github.com/wing1008/codesynapse.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_USER/filegraph3d/issues"
+    "url": "https://github.com/wing1008/codesynapse/issues"
   },
   "keywords": [
     "code-visualization",
     "dependency-graph",
+    "mcp",
+    "ai-coding-agent",
+    "blast-radius",
     "3d",
     "electron",
     "three.js",
@@ -23,9 +26,10 @@
   "type": "module",
   "main": "electron/main.cjs",
   "bin": {
-    "filegraph3d-server": "./server.js",
-    "fg3d": "./bin/fg3d.cjs",
-    "fg3d-mcp": "./bin/fg3d-mcp.cjs"
+    "codesynapse-server": "./server.js",
+    "codesynapse": "./bin/fg3d.cjs",
+    "cs": "./bin/fg3d.cjs",
+    "codesynapse-mcp": "./bin/fg3d-mcp.cjs"
   },
   "scripts": {
     "postinstall": "node scripts/copy-vendor.js",
