@@ -11,7 +11,7 @@ const readline = require('readline')
 const PORT = parseInt(process.env.FG3D_PORT || '7707', 10)
 const HOST = '127.0.0.1'
 
-function apiReq(method, pathStr, query) {
+function apiReq(method, pathStr, query, body) {
   return new Promise((resolve, reject) => {
     let qs = ''
     if (query) {
@@ -21,13 +21,20 @@ function apiReq(method, pathStr, query) {
       }
       if (parts.length) qs = '?' + parts.join('&')
     }
-    const r = http.request({ host: HOST, port: PORT, path: pathStr + qs, method }, (res) => {
+    const headers = {}
+    let payload = null
+    if (body !== undefined && body !== null) {
+      payload = typeof body === 'string' ? body : JSON.stringify(body)
+      headers['Content-Type']   = 'application/json'
+      headers['Content-Length'] = Buffer.byteLength(payload)
+    }
+    const r = http.request({ host: HOST, port: PORT, path: pathStr + qs, method, headers }, (res) => {
       let chunks = []
       res.on('data', (c) => chunks.push(c))
       res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8')
-        try { resolve({ status: res.statusCode, data: JSON.parse(body) }) }
-        catch { resolve({ status: res.statusCode, data: body }) }
+        const text = Buffer.concat(chunks).toString('utf8')
+        try { resolve({ status: res.statusCode, data: JSON.parse(text) }) }
+        catch { resolve({ status: res.statusCode, data: text }) }
       })
     })
     r.on('error', (err) => {
@@ -35,405 +42,310 @@ function apiReq(method, pathStr, query) {
         reject(new Error(`filegraph3d app is not running at ${HOST}:${PORT}. Start the desktop app first. Override port via FG3D_PORT env var.`))
       } else reject(err)
     })
+    if (payload) r.write(payload)
     r.end()
   })
 }
 
 function encId(id) { return id.split('/').map(encodeURIComponent).join('/') }
+function bad(msg) { throw new Error(msg) }
 
 // ─── Tool definitions ──────────────────────────────────────────
+//
+// Consolidated from 37 narrow tools into 8 intent-shaped tools.
+// Each tool takes `action` enum that selects the underlying endpoint,
+// plus any tool-specific parameters. This matches the 2026 MCP best
+// practice: tool count low, organised by user intent rather than by
+// REST endpoint mirror. The Electron app's /<endpoint> HTTP API is
+// unchanged — only the MCP surface is consolidated.
+
 const TOOLS = [
   {
-    name: 'fg3d_health',
-    description: '현재 filegraph3d 앱 상태 — 어느 폴더 로드됐는지, 파일/엣지 수, 히스토리 활성 여부',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/health')).data,
-  },
-  {
     name: 'fg3d_summary',
-    description: 'Layer 1 프로젝트 개요 — 작업 시작 전 가장 먼저 호출하세요. fileCount/edgeCount, 상위 폴더/허브, ext mix, orphan 수, 동적 패턴 파일 수, 외부 도메인. ~2KB로 90% 컨텍스트 제공. 이걸 본 다음에 fg3d_get_node로 좁혀가세요.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/summary')).data,
-  },
-  {
-    name: 'fg3d_refresh',
-    description: '특정 파일을 강제 재스캔 — 중요 작업(삭제, 대규모 리팩토링) 직전에 호출해서 stale 데이터 위험 제거. ms 단위로 빠름. lastSeenAt이 응답 meta에 포함됨',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
-    },
-    handler: async ({ id }) => (await apiReq('POST', '/refresh/' + encId(id))).data,
-  },
-  {
-    name: 'fg3d_list_nodes',
-    description: '전체 그래프 데이터 (파일 + 엣지). 큰 프로젝트는 토큰 부담이 크니 가능하면 fg3d_summary부터 호출하고, 필요하면 limit/ext/minMass로 좁혀서 호출. 응답 meta.totalAvailable/truncated 참고',
+    description:
+      'Project structure overview. Call this FIRST when working on a new repo to know what you\'re dealing with.\n' +
+      'actions:\n' +
+      '  · project  — file count, edges, top hubs, top folders, ext mix, orphan count (cheap, Layer 1)\n' +
+      '  · health   — is the desktop app running, current root, history flag\n' +
+      '  · packages — monorepo packages with file counts and cross-package edges\n' +
+      '  · package_graph — package-to-package edge list (visual overview)\n' +
+      '  · package_detail — files + declared deps + cross-pkg edges for one package (requires name)',
     inputSchema: {
       type: 'object',
       properties: {
-        limit:   { type: 'number', description: '반환할 파일 최대 수 (생략 시 전부)' },
-        offset:  { type: 'number', description: '시작 인덱스', default: 0 },
-        ext:     { type: 'string', description: '확장자 필터 (예: "ts")' },
-        minMass: { type: 'number', description: '최소 import 수 (허브 파일만 보기)' },
-        sort:    { type: 'string', description: '정렬: mass:desc(기본) / size:desc / loc:desc / id:asc / insertion', default: 'mass:desc' },
+        action: { type: 'string', enum: ['project', 'health', 'packages', 'package_graph', 'package_detail'] },
+        name:   { type: 'string', description: 'package_detail action — package name from packages list' },
       },
+      required: ['action'],
     },
-    handler: async ({ limit, offset, ext, minMass, sort } = {}) => (
-      await apiReq('GET', '/graph', { limit, offset, ext, minMass, sort })
-    ).data,
-  },
-  {
-    name: 'fg3d_get_node',
-    description: '특정 파일 노드의 상세 정보 (확장자, LOC, 사이즈, mass, imports, importedBy)',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string', description: '루트 기준 상대 파일 경로 (예: src/utils/helper.js)' } },
-      required: ['id'],
+    handler: async ({ action, name }) => {
+      switch (action) {
+        case 'health':         return (await apiReq('GET', '/health')).data
+        case 'project':        return (await apiReq('GET', '/summary')).data
+        case 'packages':       return (await apiReq('GET', '/packages')).data
+        case 'package_graph':  return (await apiReq('GET', '/package-graph')).data
+        case 'package_detail':
+          if (!name) bad('package_detail requires { name }')
+          return (await apiReq('GET', '/package/' + encodeURIComponent(name))).data
+        default: bad('unknown action: ' + action)
+      }
     },
-    handler: async ({ id }) => (await apiReq('GET', '/node/' + encId(id))).data,
   },
+
   {
-    name: 'fg3d_read_file',
-    description: '파일 내용 읽기 (2MB 초과 시 거부). 클로드 코드의 Read 도구와 같지만 filegraph3d가 인식하는 현재 활성 폴더 기준',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string', description: '루트 기준 상대 경로' } },
-      required: ['id'],
-    },
-    handler: async ({ id }) => (await apiReq('GET', '/file/' + encId(id))).data,
-  },
-  {
-    name: 'fg3d_get_deps',
-    description: '이 파일이 import하는 파일들 (outgoing edges). 어떤 라이브러리/모듈을 쓰는지 확인',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
-    },
-    handler: async ({ id }) => (await apiReq('GET', '/deps/' + encId(id))).data,
-  },
-  {
-    name: 'fg3d_get_users',
-    description: '이 파일을 import하는 파일들 (incoming edges). "이 파일 수정하면 어디가 영향받는가" 추적',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
-    },
-    handler: async ({ id }) => (await apiReq('GET', '/users/' + encId(id))).data,
-  },
-  {
-    name: 'fg3d_find',
-    description: '파일 ID에 부분 문자열이 포함된 노드 검색 (최대 100개)',
-    inputSchema: {
-      type: 'object',
-      properties: { q: { type: 'string', description: '검색어' } },
-      required: ['q'],
-    },
-    handler: async ({ q }) => (await apiReq('GET', '/find', { q })).data,
-  },
-  {
-    name: 'fg3d_focus',
-    description: 'filegraph3d UI에서 특정 노드로 카메라 포커스 이동 (사용자에게 시각적으로 보임)',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
-    },
-    handler: async ({ id }) => (await apiReq('POST', '/focus/' + encId(id))).data,
-  },
-  {
-    name: 'fg3d_open',
-    description: 'filegraph3d UI에서 파일 인스펙터 패널 열기 (파일 내용이 화면에 표시됨)',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
-    },
-    handler: async ({ id }) => (await apiReq('POST', '/open/' + encId(id))).data,
-  },
-  {
-    name: 'fg3d_history',
-    description: '파일의 자동 히스토리 스냅샷 목록 (최대 3개). 각 항목 { ts, size }',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
-    },
-    handler: async ({ id }) => (await apiReq('GET', '/history/' + encId(id))).data,
-  },
-  {
-    name: 'fg3d_restore',
-    description: '파일을 특정 시점의 히스토리 스냅샷으로 복원 (디스크에 덮어쓰기)',
+    name: 'fg3d_query',
+    description:
+      'Code exploration — look up files, dependencies, content.\n' +
+      'actions:\n' +
+      '  · list   — paginated graph (filter by ext / minMass; sort=mass:desc default). Big repos: use limit.\n' +
+      '  · node   — one file\'s metadata + imports + importedBy (requires id)\n' +
+      '  · deps   — what this file imports (requires id)\n' +
+      '  · users  — what imports this file = blast surface (requires id)\n' +
+      '  · find   — substring search across file ids (requires q)\n' +
+      '  · read   — file content, up to 2 MB (requires id)',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string' },
-        ts: { type: 'number', description: 'fg3d_history가 반환한 타임스탬프 값' },
+        action: { type: 'string', enum: ['list', 'node', 'deps', 'users', 'find', 'read'] },
+        id:     { type: 'string', description: 'file id, root-relative (e.g. src/auth.ts)' },
+        q:      { type: 'string', description: 'find action — substring' },
+        limit:  { type: 'number', description: 'list action — page size (0 = all)' },
+        offset: { type: 'number', description: 'list action — pagination offset' },
+        ext:    { type: 'string', description: 'list action — filter by extension (e.g. "ts")' },
+        minMass:{ type: 'number', description: 'list action — only files with ≥ N importers' },
+        sort:   { type: 'string', description: 'list action — mass:desc | size:desc | loc:desc | id:asc | insertion' },
       },
-      required: ['id', 'ts'],
+      required: ['action'],
     },
-    handler: async ({ id, ts }) => (await apiReq('POST', '/restore/' + encId(id), { ts })).data,
-  },
-  {
-    name: 'fg3d_external_urls',
-    description: '프로젝트가 호출하는 외부 웹사이트/API 목록. 도메인별로 그룹화되어 어떤 외부 서비스를 쓰는지, 어느 파일에서 호출하는지 확인 가능',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/external')).data,
-  },
-  {
-    name: 'fg3d_session_changes',
-    description: '이번 세션 동안 수정된 파일 목록 (AI 에이전트가 편집한 파일들). 각 항목: id, 첫/마지막 변경 시각, 변경 횟수, 사이즈/LOC 증감',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/changes')).data,
-  },
-  {
-    name: 'fg3d_session_diff',
-    description: '특정 파일의 첫 감지 시점부터 현재까지의 변경 내용 (line-by-line diff). 이번 세션 중 AI가 정확히 뭘 바꿨는지 확인',
-    inputSchema: {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
+    handler: async ({ action, id, q, limit, offset, ext, minMass, sort }) => {
+      switch (action) {
+        case 'list':
+          return (await apiReq('GET', '/graph', {
+            limit: limit ?? 0, offset: offset ?? 0, ext, minMass, sort,
+          })).data
+        case 'node':  if (!id) bad('node requires id');  return (await apiReq('GET', '/node/' + encId(id))).data
+        case 'deps':  if (!id) bad('deps requires id');  return (await apiReq('GET', '/deps/' + encId(id))).data
+        case 'users': if (!id) bad('users requires id'); return (await apiReq('GET', '/users/' + encId(id))).data
+        case 'find':  if (!q)  bad('find requires q');   return (await apiReq('GET', '/find', { q })).data
+        case 'read':  if (!id) bad('read requires id');  return (await apiReq('GET', '/file/' + encId(id))).data
+        default: bad('unknown action: ' + action)
+      }
     },
-    handler: async ({ id }) => (await apiReq('GET', '/changes/' + encId(id))).data,
   },
+
   {
-    name: 'fg3d_tour',
-    description: '프로젝트 가이드 투어 — 진입점, 허브 파일, 외부 API 통합 지점 등 핵심 파일들을 순서대로 알려주는 학습 시작점. 새 프로젝트 처음 볼 때, AI가 사용자에게 "이 프로젝트는 이렇게 생겼다" 설명할 때 사용',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/tour')).data,
-  },
-  {
-    name: 'fg3d_timeline',
-    description: '프로젝트의 git 히스토리 타임라인 — 각 파일이 언제 처음 추가됐는지 (`git log --diff-filter=A` 기반). 첫 호출은 느릴 수 있고 (큰 리포는 수 초), 이후엔 캐시됨. 프로젝트 진화 분석에 사용',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/timeline')).data,
-  },
-  {
-    name: 'fg3d_blast_radius',
-    description: '파일 수정 영향도 예측 — 이 파일을 고치면 어떤 파일들이 영향받는지 BFS로 추적. 토큰 비용 추정 + 파일 카테고리 분류(테스트/소스/설정/문서). 작업 시작 전 스코프 파악에 사용',
+    name: 'fg3d_blast',
+    description:
+      'Impact analysis before editing — answers "is it safe to change this file?".\n' +
+      'actions:\n' +
+      '  · radius — transitive dependents/dependencies via BFS, with token estimate (id, depth=3, dir=users|deps)\n' +
+      '  · safety — 🟢/🟡/🔴 verdict + reasons + one-line advice (id, deep=true returns full file list)\n' +
+      '  · bundle — pack closest neighbours within token budget, ready to feed to the editor (id, budget=8000, depth=3)\n' +
+      'Call `safety` before any edit; `bundle` before reading neighbour context; `radius` for deeper analysis.',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: '대상 파일 ID' },
-        depth: { type: 'number', description: 'BFS 깊이 (기본 3, 1-10)', default: 3 },
-        direction: { type: 'string', enum: ['users', 'deps'], description: 'users = 이 파일을 import하는 것들 추적 (영향 범위) / deps = 이 파일이 import하는 것들 추적 (의존성 클로저)', default: 'users' },
+        action: { type: 'string', enum: ['radius', 'safety', 'bundle'] },
+        id:     { type: 'string' },
+        depth:  { type: 'number', description: 'radius / bundle BFS depth (1-10, default 3)' },
+        dir:    { type: 'string', enum: ['users', 'deps'], description: 'radius direction (default users)' },
+        deep:   { type: 'boolean', description: 'safety — include full impacted file list' },
+        budget: { type: 'number', description: 'bundle — token budget (default 8000)' },
       },
-      required: ['id'],
+      required: ['action', 'id'],
     },
-    handler: async ({ id, depth, direction }) => (
-      await apiReq('GET', '/blast/' + encId(id), { depth: depth ?? 3, dir: direction ?? 'users' })
-    ).data,
-  },
-  {
-    name: 'fg3d_secrets',
-    description: 'frontend 코드에 server-only env 변수가 노출됐는지 검사. NEXT_PUBLIC_/VITE_/REACT_APP_/PUBLIC_/EXPO_PUBLIC_ 등 public prefix가 없는 변수가 client 파일에서 사용되면 → 브라우저 번들에 포함되어 키 유출 위험. 비개발자가 AI에게 env 처리 시킬 때 자동 안전망.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/secrets')).data,
-  },
-  {
-    name: 'fg3d_url',
-    description: 'URL/route → 파일 매핑 (file-system 라우팅). Next.js app/pages, Astro, SvelteKit 지원. dynamic segment ([slug] → :slug) + catchall ([...rest] → *) 매칭. path 없으면 전체 등록 routes 목록. 비개발자가 "/billing 화면 색 바꿔줘"라고 할 때 AI가 어느 파일 봐야 할지 확정.',
-    inputSchema: {
-      type: 'object',
-      properties: { path: { type: 'string', description: 'URL 경로 (예: /blog/123). 없으면 전체 목록' } },
+    handler: async ({ action, id, depth, dir, deep, budget }) => {
+      if (!id) bad('id is required')
+      switch (action) {
+        case 'radius':
+          return (await apiReq('GET', '/blast/' + encId(id), { depth: depth ?? 3, dir: dir ?? 'users' })).data
+        case 'safety':
+          return (await apiReq('GET', '/safety/' + encId(id), { deep: deep ? '1' : null })).data
+        case 'bundle':
+          return (await apiReq('GET', '/bundle/' + encId(id), { budget: budget ?? 8000, depth: depth ?? 3 })).data
+        default: bad('unknown action: ' + action)
+      }
     },
-    handler: async ({ path }) => (await apiReq('GET', '/url', path ? { path } : null)).data,
   },
+
   {
-    name: 'fg3d_schema',
-    description: 'DB 모델 추출 — Prisma(.prisma), Drizzle(pgTable/mysqlTable/sqliteTable), SQLAlchemy(Base/DeclarativeBase). model 지정시 필드 + 사용처. 비개발자가 "User 모델에 필드 추가해줘" 시킬 때 AI가 먼저 호출해서 현재 스키마 + 의존하는 코드 파악.',
-    inputSchema: {
-      type: 'object',
-      properties: { model: { type: 'string', description: '모델/테이블 이름 (옵션). 없으면 전체 개요' } },
-    },
-    handler: async ({ model }) => (await apiReq('GET', '/schema', model ? { model } : null)).data,
-  },
-  {
-    name: 'fg3d_preflight',
-    description: '배포 전 종합 점검 체크리스트. 미선언 env 변수, 평문 http URL, 테스트 없는 hub, orphan ratio, dynamic ratio 등을 한 번에 평가. overall: ok|warn|fail. 비개발자가 "배포해도 돼?" 묻거나 CI 게이트로 사용.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/preflight')).data,
-  },
-  {
-    name: 'fg3d_feature',
-    description: '키워드 → 관련 파일 클러스터링 (heuristic). 비개발자가 "결제 화면 색 바꿔줘" 같이 기능 단위로 말할 때, AI가 이 도구로 어느 파일들 봐야 할지 파악. frontend/backend/shared 자동 분류. path 매칭 + routes/apiCalls URL 매칭.',
-    inputSchema: {
-      type: 'object',
-      properties: { keyword: { type: 'string', description: '기능 키워드 (예: payment, auth, checkout, signup)' } },
-      required: ['keyword'],
-    },
-    handler: async ({ keyword }) => (await apiReq('GET', '/feature/' + encodeURIComponent(keyword))).data,
-  },
-  {
-    name: 'fg3d_suggest',
-    description: '현재 코드 상태를 보고 "AI에게 다음에 시킬 작업"을 우선순위 순으로 추천. high/medium/low priority. 규칙: 미선언 환경 변수, 테스트 없는 hub 파일, 고립(죽은) 파일, 사용 안 되는 환경 변수, 동적 import 비중. 비개발자가 "다음 뭐 시켜?" 막힐 때 첫 호출 추천.',
-    inputSchema: {
-      type: 'object',
-      properties: { top: { type: 'number', description: '최대 추천 수 (기본 10)', default: 10 } },
-    },
-    handler: async ({ top }) => (await apiReq('GET', '/suggest', { top: top ?? 10 })).data,
-  },
-  {
-    name: 'fg3d_env',
-    description: '.env 파일에 선언된 환경 변수와 소스 코드에서 실제 사용되는 환경 변수를 cross-reference. 응답: declared/used/status(ok|unused|undeclared). undeclared = 코드는 쓰는데 .env에 없음 → 배포시 실패 가능. unused = .env에는 있는데 안 씀 → 키 노출/정리 후보. var 지정시 단일 변수 상세.',
-    inputSchema: {
-      type: 'object',
-      properties: { var: { type: 'string', description: '특정 변수 이름 (대문자, 옵션)' } },
-    },
-    handler: async ({ var: v }) => (await apiReq('GET', '/env', v ? { var: v } : null)).data,
-  },
-  {
-    name: 'fg3d_safety',
-    description: '🟢/🟡/🔴 "AI에게 이 파일 수정시켜도 되나" 신호등. dependents/routes/외부 API/dynamic 패턴/테스트 유무를 종합. 비개발자가 AI 작업 승인 전, 또는 AI가 수정 전 self-check용. risky면 사람이 검토 권장.',
+    name: 'fg3d_intent',
+    description:
+      'Mapping from human intent ("payment feature", "/billing URL", "User model") to source files.\n' +
+      'actions:\n' +
+      '  · feature  — keyword → frontend/backend/shared file clusters (requires keyword)\n' +
+      '  · url      — URL path → file (Next.js app/pages, Astro, SvelteKit). Without path returns all routes. (path optional)\n' +
+      '  · schema   — DB models (Prisma / Drizzle / SQLAlchemy). With model returns definition + usage. (model optional)\n' +
+      '  · external — every external URL the project calls (grouped by domain)\n' +
+      'Use when the user describes something by domain language rather than file name.',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: '대상 파일 ID' },
-        deep: { type: 'boolean', description: 'true면 영향받는 파일 전체 리스트도 반환', default: false },
+        action:  { type: 'string', enum: ['feature', 'url', 'schema', 'external'] },
+        keyword: { type: 'string', description: 'feature action' },
+        path:    { type: 'string', description: 'url action (optional — overview if omitted)' },
+        model:   { type: 'string', description: 'schema action (optional — overview if omitted)' },
       },
-      required: ['id'],
+      required: ['action'],
     },
-    handler: async ({ id, deep }) => (await apiReq('GET', '/safety/' + encId(id), { deep: deep ? '1' : null })).data,
+    handler: async ({ action, keyword, path, model }) => {
+      switch (action) {
+        case 'feature':
+          if (!keyword) bad('feature requires keyword')
+          return (await apiReq('GET', '/feature/' + encodeURIComponent(keyword))).data
+        case 'url':       return (await apiReq('GET', '/url',    path  ? { path }  : null)).data
+        case 'schema':    return (await apiReq('GET', '/schema', model ? { model } : null)).data
+        case 'external':  return (await apiReq('GET', '/external')).data
+        default: bad('unknown action: ' + action)
+      }
+    },
   },
+
   {
-    name: 'fg3d_bundle',
-    description: '파일 수정 전 함께 읽어야 할 의존 파일을 token 예산 안에서 자동 추출. AI가 "X 고쳐줘" 요청 받았을 때, 이 도구로 컨텍스트를 먼저 묶고 그 파일들을 읽은 뒤 수정. depth 안에서 mass 높은 파일 우선 선택.',
+    name: 'fg3d_health',
+    description:
+      'Project health checks + next-step recommendations. Use before deploys or when "what should I work on next?".\n' +
+      'actions:\n' +
+      '  · env       — env vars: declared vs used cross-reference (var optional — overview if omitted)\n' +
+      '  · secrets   — server-only env leaked into frontend bundles (security check)\n' +
+      '  · preflight — comprehensive deploy-readiness (undeclared env / http URLs / hub tests / orphans / dynamic / leaks)\n' +
+      '  · suggest   — rule-based "next thing to ask the AI to fix" (high/medium/low). Best opening move when stuck.\n' +
+      '  · legacy    — orphan/path/filename/duplicate cleanup candidates with confidence scores (type optional)',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: '수정 대상 파일 ID' },
-        budget: { type: 'number', description: '토큰 예산 (기본 8000)', default: 8000 },
-        depth: { type: 'number', description: 'BFS 깊이 (1-10, 기본 3)', default: 3 },
+        action: { type: 'string', enum: ['env', 'secrets', 'preflight', 'suggest', 'legacy'] },
+        var:    { type: 'string', description: 'env action — single variable focus' },
+        top:    { type: 'number', description: 'suggest — max suggestions (default 10)' },
+        type:   { type: 'string', enum: ['orphan', 'path', 'filename', 'duplicate'], description: 'legacy — filter to one category' },
       },
-      required: ['id'],
+      required: ['action'],
     },
-    handler: async ({ id, budget, depth }) => (await apiReq('GET', '/bundle/' + encId(id), { budget: budget ?? 8000, depth: depth ?? 3 })).data,
-  },
-  {
-    name: 'fg3d_list_packages',
-    description: '모노레포의 패키지 목록 조회. 응답에 kind(pnpm/npm-workspaces/yarn/lerna/turbo/nx/python-uv/multi-package/single/none), 각 패키지의 name/relRoot/fileCount/loc/cross-package edges 포함. 모노레포 아니면 packages가 빈 배열. 모노레포 작업 시작 시 가장 먼저 호출하세요.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/packages')).data,
-  },
-  {
-    name: 'fg3d_get_package',
-    description: '특정 패키지 상세 정보 — 파일 목록(mass 정렬), 선언된 의존성(package.json), cross-package imports/dependents. 패키지 하나 리팩토링 전에 호출해서 외부 의존 표면 파악.',
-    inputSchema: {
-      type: 'object',
-      properties: { name: { type: 'string', description: '패키지 이름 (fg3d_list_packages 응답의 name 필드)' } },
-      required: ['name'],
+    handler: async ({ action, var: v, top, type }) => {
+      switch (action) {
+        case 'env':       return (await apiReq('GET', '/env', v ? { var: v } : null)).data
+        case 'secrets':   return (await apiReq('GET', '/secrets')).data
+        case 'preflight': return (await apiReq('GET', '/preflight')).data
+        case 'suggest':   return (await apiReq('GET', '/suggest', { top: top ?? 10 })).data
+        case 'legacy':    return (await apiReq('GET', '/legacy', type ? { type } : null)).data
+        default: bad('unknown action: ' + action)
+      }
     },
-    handler: async ({ name }) => (await apiReq('GET', '/package/' + encodeURIComponent(name))).data,
   },
+
   {
-    name: 'fg3d_package_graph',
-    description: '패키지 단위 의존성 그래프 — 패키지간 엣지 목록(count 내림차순). 어떤 패키지가 어떤 패키지를 얼마나 많이 import하는지 한눈에. 패키지 분리/병합 결정 전 사용.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/package-graph')).data,
-  },
-  {
-    name: 'fg3d_write_file',
-    description: '파일 전체를 새 내용으로 덮어쓰기 (디스크 저장 + 자동 히스토리 스냅샷 + 3D 시각 트레이스). 작은 파일이나 완전 재작성용. 라인 일부만 바꾸려면 fg3d_edit_file 사용 권장. **주의**: 이 도구는 디스크에 실제 변경을 가하므로 사용자가 작업 폴더를 트러스트한 상태에서만 호출. 응답에 size 포함. fg3d UI에서 해당 노드가 초록색 펄스로 표시되어 사용자가 어떤 파일이 수정됐는지 즉시 봅니다.',
+    name: 'fg3d_change',
+    description:
+      'File modifications + history. All writes are auto-snapshotted (if history enabled) and pulse green in the 3D view.\n' +
+      'actions:\n' +
+      '  · write   — overwrite file entirely (id, content). For full rewrites or small files.\n' +
+      '  · edit    — precise find→replace (id, find, replace, replaceAll). Like Claude Code Edit tool.\n' +
+      '              Errors: 404=find not found, 409=ambiguous (count>1 without replaceAll).\n' +
+      '  · refresh — force re-parse one file (id). Use after external tools modified the file.\n' +
+      '  · history — list auto-snapshots for a file (id)\n' +
+      '  · restore — roll a file back to a snapshot (id, ts)',
     inputSchema: {
       type: 'object',
       properties: {
-        id:      { type: 'string', description: '루트 기준 상대 파일 경로 (예: src/auth.js)' },
-        content: { type: 'string', description: '파일 새 전체 내용' },
+        action:     { type: 'string', enum: ['write', 'edit', 'refresh', 'history', 'restore'] },
+        id:         { type: 'string' },
+        content:    { type: 'string', description: 'write action — new full content' },
+        find:       { type: 'string', description: 'edit action — exact string to replace (whitespace-sensitive)' },
+        replace:    { type: 'string', description: 'edit action — new string' },
+        replaceAll: { type: 'boolean', description: 'edit action — replace every occurrence (default false → must be unique)' },
+        ts:         { type: 'number', description: 'restore action — snapshot timestamp from history' },
       },
-      required: ['id', 'content'],
+      required: ['action', 'id'],
     },
-    handler: async ({ id, content }) => {
-      return new Promise((resolve, reject) => {
-        const body = JSON.stringify({ content })
-        const r = http.request({
-          host: HOST, port: PORT,
-          path: '/write/' + encId(id),
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        }, (res) => {
-          let chunks = []
-          res.on('data', (c) => chunks.push(c))
-          res.on('end', () => {
-            const text = Buffer.concat(chunks).toString('utf8')
-            try { resolve(JSON.parse(text)) } catch { resolve(text) }
-          })
-        })
-        r.on('error', (e) => reject(e))
-        r.write(body); r.end()
-      })
+    handler: async ({ action, id, content, find, replace, replaceAll, ts }) => {
+      if (!id) bad('id is required')
+      switch (action) {
+        case 'write':
+          if (typeof content !== 'string') bad('write requires content')
+          return (await apiReq('POST', '/write/' + encId(id), null, { content })).data
+        case 'edit':
+          if (typeof find !== 'string' || typeof replace !== 'string') bad('edit requires find and replace')
+          return (await apiReq('POST', '/edit/' + encId(id), null, { find, replace, replaceAll: replaceAll === true })).data
+        case 'refresh':
+          return (await apiReq('POST', '/refresh/' + encId(id))).data
+        case 'history':
+          return (await apiReq('GET', '/history/' + encId(id))).data
+        case 'restore':
+          if (!ts) bad('restore requires ts')
+          return (await apiReq('POST', '/restore/' + encId(id), { ts })).data
+        default: bad('unknown action: ' + action)
+      }
     },
   },
+
   {
-    name: 'fg3d_edit_file',
-    description: '파일 일부만 정밀 편집 — Claude Code의 Edit 도구와 동일한 의미: find 문자열을 replace로 교체. find가 파일 내 유일해야 안전 (여러 번 등장하면 replaceAll:true 명시 또는 더 구체적 find로). **응답 에러 코드**: 404 = find not found, 409 = ambiguous (count > 1). 라인 단위가 아니라 정확한 문자열 매치이므로 들여쓰기·공백 포함해서 전달. 히스토리·트레이스 자동 기록. write_file보다 토큰 효율적이고 의도 보존 잘 됨.',
+    name: 'fg3d_trace',
+    description:
+      'AI session traces + project history — review what an AI did, navigate the codebase chronologically.\n' +
+      'actions:\n' +
+      '  · log      — current session events (tool, id, ts). Filters: limit, tool.\n' +
+      '  · stats    — top files / tool breakdown / duration for current session\n' +
+      '  · sessions — past sessions saved on disk (.filegraph3d/traces)\n' +
+      '  · session  — one past session detail (requires sessionId)\n' +
+      '  · clear    — start a fresh session (previous archived)\n' +
+      '  · changes  — files modified this session (with current vs first-seen size/loc)\n' +
+      '  · diff     — first-seen → current diff for one file (requires id)\n' +
+      '  · tour     — heuristic guided tour of the project (entry points + hubs + API hotspots)\n' +
+      '  · timeline — git history → when each tracked file first appeared',
     inputSchema: {
       type: 'object',
       properties: {
-        id:         { type: 'string', description: '루트 기준 상대 경로' },
-        find:       { type: 'string', description: '교체할 정확한 문자열 (공백·들여쓰기 포함)' },
-        replace:    { type: 'string', description: '새 문자열' },
-        replaceAll: { type: 'boolean', description: 'find가 여러 번 등장할 때 모두 교체 (기본 false → 유일성 강제)', default: false },
+        action:    { type: 'string', enum: ['log', 'stats', 'sessions', 'session', 'clear', 'changes', 'diff', 'tour', 'timeline'] },
+        limit:     { type: 'number', description: 'log — only the most recent N' },
+        tool:      { type: 'string', description: 'log — filter by tool name' },
+        sessionId: { type: 'number', description: 'session — past session id from sessions list' },
+        id:        { type: 'string', description: 'diff — file id' },
       },
-      required: ['id', 'find', 'replace'],
+      required: ['action'],
     },
-    handler: async ({ id, find, replace, replaceAll }) => {
-      return new Promise((resolve, reject) => {
-        const body = JSON.stringify({ find, replace, replaceAll: replaceAll === true })
-        const r = http.request({
-          host: HOST, port: PORT,
-          path: '/edit/' + encId(id),
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        }, (res) => {
-          let chunks = []
-          res.on('data', (c) => chunks.push(c))
-          res.on('end', () => {
-            const text = Buffer.concat(chunks).toString('utf8')
-            try { resolve(JSON.parse(text)) } catch { resolve(text) }
-          })
-        })
-        r.on('error', (e) => reject(e))
-        r.write(body); r.end()
-      })
+    handler: async ({ action, limit, tool, sessionId, id }) => {
+      switch (action) {
+        case 'log':       return (await apiReq('GET', '/trace', { limit, tool })).data
+        case 'stats':     return (await apiReq('GET', '/trace/stats')).data
+        case 'sessions':  return (await apiReq('GET', '/trace/sessions')).data
+        case 'session':
+          if (!sessionId) bad('session requires sessionId')
+          return (await apiReq('GET', '/trace/session/' + sessionId)).data
+        case 'clear':     return (await apiReq('POST', '/trace/clear')).data
+        case 'changes':   return (await apiReq('GET', '/changes')).data
+        case 'diff':
+          if (!id) bad('diff requires id')
+          return (await apiReq('GET', '/changes/' + encId(id))).data
+        case 'tour':      return (await apiReq('GET', '/tour')).data
+        case 'timeline':  return (await apiReq('GET', '/timeline')).data
+        default: bad('unknown action: ' + action)
+      }
     },
   },
+
   {
-    name: 'fg3d_trace_log',
-    description: '현재 AI 세션의 트레이스 로그 — 어떤 도구가 어떤 파일을 언제 만졌는지 시간순. fg3d_summary 호출 후 "방금 내가 본 파일들 다시 정리"용. tool/limit 필터.',
+    name: 'fg3d_ui',
+    description:
+      'Desktop app UI control — focus the camera on a node, or open the inspector. Desktop-only side effect.\n' +
+      'actions:\n' +
+      '  · focus — move the 3D camera to a node and highlight it (requires id)\n' +
+      '  · open  — open the inspector panel for a node (requires id)',
     inputSchema: {
       type: 'object',
       properties: {
-        limit: { type: 'number', description: '최근 N개만 (생략 시 전체)' },
-        tool:  { type: 'string', description: '특정 도구만 (예: read, focus, blast)' },
+        action: { type: 'string', enum: ['focus', 'open'] },
+        id:     { type: 'string' },
       },
+      required: ['action', 'id'],
     },
-    handler: async ({ limit, tool } = {}) => (await apiReq('GET', '/trace', { limit, tool })).data,
-  },
-  {
-    name: 'fg3d_trace_stats',
-    description: '현재 세션 통계 — 어떤 파일을 가장 많이 봤는지(topFiles), 도구별 분포(byTool), 세션 시작·종료 시각, 시간 히스토그램. 작업 마무리 시 "오늘 뭘 했나" 보고용.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/trace/stats')).data,
-  },
-  {
-    name: 'fg3d_trace_sessions',
-    description: '이전 트레이스 세션 목록 — `.filegraph3d/traces/`에 저장된 과거 세션들. 이전 작업 다시 보고 싶을 때 호출 후 sessionId를 fg3d_trace_session에 전달.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: async () => (await apiReq('GET', '/trace/sessions')).data,
-  },
-  {
-    name: 'fg3d_legacy_audit',
-    description: '레거시/마이그레이션 감사 — 정리 후보 파일을 4종 카테고리로 분류하고 confidence(0..1) 점수 부여. orphan(고립 파일), path(_legacy/_archive/etc 경로), filename(_old/_v1/.bak 등 이름), duplicate(같은 logical-name + legacy 표식). 각 항목에 reason 포함. confidence > 0.85는 대체로 안전, 0.5~0.85는 확인 필요. summary.topCandidates 100개로 한눈 파악. 큰 프로젝트 청소 시작 시 1순위 호출.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        type: { type: 'string', enum: ['orphan', 'path', 'filename', 'duplicate'], description: '특정 카테고리만 보고 싶을 때 (생략 시 전부)' },
-      },
+    handler: async ({ action, id }) => {
+      if (!id) bad('id is required')
+      switch (action) {
+        case 'focus': return (await apiReq('POST', '/focus/' + encId(id))).data
+        case 'open':  return (await apiReq('POST', '/open/'  + encId(id))).data
+        default: bad('unknown action: ' + action)
+      }
     },
-    handler: async ({ type } = {}) => (
-      await apiReq('GET', '/legacy', type ? { type } : null)
-    ).data,
   },
 ]
 
@@ -456,7 +368,7 @@ async function handle(msg) {
       return respond(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'filegraph3d', version: '0.1.0' },
+        serverInfo: { name: 'filegraph3d', version: '0.2.0' },
       })
     }
     if (method === 'notifications/initialized') {
