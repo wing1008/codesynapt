@@ -84,6 +84,19 @@ function loadGitignoreRules(root) {
   return []
 }
 
+// Project-local fg3d-specific ignore. Same syntax as .gitignore.
+// Use when you want to keep a folder in git but hide it from the
+// graph (e.g. vendored third-party code you don't edit).
+function loadFg3dIgnoreRules(root) {
+  const file = path.join(root, '.fg3dignore')
+  try {
+    if (fs.existsSync(file)) {
+      return parseGitignore(fs.readFileSync(file, 'utf8'))
+    }
+  } catch { /* ignore */ }
+  return []
+}
+
 function matchedByRules(relPath, isDir, rules) {
   let ignored = false
   for (const rule of rules) {
@@ -174,6 +187,7 @@ export class Scanner extends EventEmitter {
     this.watcher = null
     this._pendingSnapshot = null
     this.gitignoreRules = loadGitignoreRules(root)
+    this.fg3dIgnoreRules = loadFg3dIgnoreRules(root)
     this.envFiles = []  // [{ id, keys: [...] }] — populated on first ready
     // Detect workspace structure once at construction. Cheap (one
     // directory walk capped at depth 6). Result feeds package-level
@@ -219,6 +233,7 @@ export class Scanner extends EventEmitter {
   start() {
     const root = this.root
     const rules = this.gitignoreRules
+    const fg3dRules = this.fg3dIgnoreRules
     this.watcher = chokidar.watch(root, {
       ignored: (p, stats) => {
         const rel = path.relative(root, p)
@@ -229,6 +244,7 @@ export class Scanner extends EventEmitter {
         const relPosix = segments.join('/')
         const isDir = stats?.isDirectory() ?? false
         if (matchedByRules(relPosix, isDir, rules)) return true
+        if (fg3dRules.length && matchedByRules(relPosix, isDir, fg3dRules)) return true
         return false
       },
       ignoreInitial: false,
