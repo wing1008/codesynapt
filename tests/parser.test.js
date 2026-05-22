@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { parseFile, resolveImport, extractNextApiRoutes } from '../parser.js'
+import { parseFile, resolveImport, extractNextApiRoutes,
+         extractNuxtServerRoutes, extractSvelteKitServerRoutes } from '../parser.js'
 
 describe('parseFile — JS/TS imports', () => {
   it('extracts ES module imports', () => {
@@ -128,6 +129,51 @@ export async function POST(req) { return Response.json({}) }
 
   it('ignores non-api files', () => {
     const r = extractNextApiRoutes('src/app/users/page.tsx', `export default function Page() {}`)
+    expect(r.length).toBe(0)
+  })
+})
+
+describe('extractNuxtServerRoutes — Nuxt 3 / Nitro', () => {
+  it('server/api/<seg>.ts with defineEventHandler default', () => {
+    const r = extractNuxtServerRoutes('server/api/users.ts', `export default defineEventHandler(async (event) => ({}))`)
+    expect(r).toEqual([{ method: 'ANY', path: '/api/users' }])
+  })
+
+  it('method suffix in filename: foo.post.ts → POST /api/foo', () => {
+    const r = extractNuxtServerRoutes('server/api/foo.post.ts', `export default defineEventHandler(() => {})`)
+    expect(r).toEqual([{ method: 'POST', path: '/api/foo' }])
+  })
+
+  it('defineEventHandler({ method: "PUT" }) object form', () => {
+    const r = extractNuxtServerRoutes('server/api/users/[id].ts',
+      `export default defineEventHandler({ method: 'PUT', handler() {} })`)
+    expect(r[0].method).toBe('PUT')
+    expect(r[0].path).toBe('/api/users/:id')
+  })
+
+  it('ignores non-server/ files', () => {
+    const r = extractNuxtServerRoutes('pages/index.vue', `<script>export default {}</script>`)
+    expect(r.length).toBe(0)
+  })
+})
+
+describe('extractSvelteKitServerRoutes — SvelteKit', () => {
+  it('src/routes/<seg>/+server.ts with GET/POST exports', () => {
+    const r = extractSvelteKitServerRoutes('src/routes/api/users/+server.ts', `
+export async function GET({ url }) {}
+export async function POST({ request }) {}
+`)
+    const paths = r.map((rt) => `${rt.method} ${rt.path}`).sort()
+    expect(paths).toEqual(['GET /api/users', 'POST /api/users'])
+  })
+
+  it('handles dynamic [id] segments', () => {
+    const r = extractSvelteKitServerRoutes('src/routes/api/users/[id]/+server.ts', `export const GET = () => {}`)
+    expect(r[0].path).toBe('/api/users/:id')
+  })
+
+  it('ignores non +server files', () => {
+    const r = extractSvelteKitServerRoutes('src/routes/api/users/+page.svelte', `<script>`)
     expect(r.length).toBe(0)
   })
 })

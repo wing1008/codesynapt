@@ -849,42 +849,83 @@ function extractPyRoutes(content) {
   return routes
 }
 
-// Next.js file-system API routes — derive route path + methods from
-// file location + exported handler names. Conservative: only triggers
-// when the id matches an app/api or pages/api pattern.
+// File-system server-route extractors for popular meta-frameworks.
+// Each helper looks at the path id to decide if a file is a route,
+// then peeks at the content for method-specific exports.
+
+const HTTP_VERBS_FS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+
+function methodsExportedFromContent(content) {
+  const found = []
+  for (const verb of HTTP_VERBS_FS) {
+    const re = new RegExp(`export\\s+(?:async\\s+)?(?:function\\s+${verb}\\b|const\\s+${verb}\\s*=)`)
+    if (re.test(content)) found.push(verb)
+  }
+  return found
+}
+function normalizeFsDynamic(p) {
+  return p.replace(/\[\.\.\.(\w+)\]/g, '*').replace(/\[(\w+)\]/g, ':$1')
+}
+
+// Next.js: src/app/api/<seg>/route.<ext>  or  src/pages/api/<seg>.<ext>
 export function extractNextApiRoutes(id, content) {
   if (!id || !content) return []
-  // app router: src/app/api/<seg>/route.<ext>  OR  app/api/.../route.<ext>
   let m, basePath
   if ((m = id.match(/^(?:src\/)?app\/(api\/.+)\/route\.(?:tsx|jsx|ts|js)$/))) {
     basePath = '/' + m[1]
-  }
-  // pages router: src/pages/api/<seg>.<ext>
-  else if ((m = id.match(/^(?:src\/)?pages\/(api\/.+)\.(?:tsx|jsx|ts|js)$/))) {
+  } else if ((m = id.match(/^(?:src\/)?pages\/(api\/.+)\.(?:tsx|jsx|ts|js)$/))) {
     basePath = '/' + m[1].replace(/\/index$/, '')
   }
   if (!basePath) return []
-  // Normalize Next dynamic segments [id] → :id, [...rest] → *
-  basePath = basePath.replace(/\[\.\.\.(\w+)\]/g, '*').replace(/\[(\w+)\]/g, ':$1')
-
-  // App router exports per-method handlers
-  const methodsExported = []
-  for (const verb of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']) {
-    // export async function GET(...)  OR  export const GET = ...
-    const re = new RegExp(`export\\s+(?:async\\s+)?(?:function\\s+${verb}\\b|const\\s+${verb}\\s*=)`)
-    if (re.test(content)) methodsExported.push(verb)
-  }
-  if (methodsExported.length > 0) {
-    return methodsExported.map((method) => ({ method, path: basePath }))
-  }
-  // Pages router: `export default function handler(req, res)`.
-  // Method is decided by req.method at runtime; record ANY (we'd emit
-  // 'GET' as conservative default, but ANY lets the route↔fetch matcher
-  // match calls with any method).
+  basePath = normalizeFsDynamic(basePath)
+  const methods = methodsExportedFromContent(content)
+  if (methods.length > 0) return methods.map((method) => ({ method, path: basePath }))
   if (/export\s+default\s+(?:async\s+)?function/.test(content)) {
     return [{ method: 'ANY', path: basePath }]
   }
   return []
+}
+
+// Nuxt 3 / Nitro: server/api/<seg>.<ext>  or  server/routes/<seg>.<ext>
+// Filename suffix can carry method: `foo.post.ts` → POST /api/foo
+// Otherwise body: `defineEventHandler({ method: 'X' })` or default ANY.
+export function extractNuxtServerRoutes(id, content) {
+  if (!id || !content) return []
+  const m = id.match(/^server\/(api|routes)\/(.+)\.(?:ts|js|mts|cts)$/)
+  if (!m) return []
+  let basePath = '/' + m[1] + '/' + m[2].replace(/\/index$/, '')
+  // Method suffix in filename
+  const suffixMatch = basePath.match(/^(.*)\.(get|post|put|patch|delete|head|options)$/)
+  let methodFromName = null
+  if (suffixMatch) { basePath = suffixMatch[1]; methodFromName = suffixMatch[2].toUpperCase() }
+  basePath = normalizeFsDynamic(basePath)
+  if (methodFromName) return [{ method: methodFromName, path: basePath }]
+  // defineEventHandler({ method: 'POST', ... })
+  const verbs = []
+  const objRe = /defineEventHandler\s*\(\s*\{[^}]*?method\s*:\s*['"`](\w+)['"`]/g
+  let mm
+  while ((mm = objRe.exec(content))) verbs.push(mm[1].toUpperCase())
+  if (verbs.length > 0) return verbs.map((method) => ({ method, path: basePath }))
+  if (/(?:export\s+default\s+)?defineEventHandler/.test(content)) {
+    return [{ method: 'ANY', path: basePath }]
+  }
+  return []
+}
+
+// SvelteKit: src/routes/<seg>/+server.<ext>  or  src/routes/+server.<ext>
+export function extractSvelteKitServerRoutes(id, content) {
+  if (!id || !content) return []
+  let m, basePath
+  if ((m = id.match(/^(?:src\/)?routes\/(.+)\/\+server\.(?:ts|js)$/))) {
+    basePath = '/' + m[1]
+  } else if (/^(?:src\/)?routes\/\+server\.(?:ts|js)$/.test(id)) {
+    basePath = '/'
+  }
+  if (!basePath) return []
+  basePath = normalizeFsDynamic(basePath)
+  const methods = methodsExportedFromContent(content)
+  if (methods.length === 0) return []
+  return methods.map((method) => ({ method, path: basePath }))
 }
 
 function extractPyApiCalls(content) {
