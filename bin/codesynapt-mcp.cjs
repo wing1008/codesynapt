@@ -168,16 +168,17 @@ const TOOLS = [
         dir:    { type: 'string', enum: ['users', 'deps'], description: 'radius direction (default users)' },
         deep:   { type: 'boolean', description: 'safety — include full impacted file list' },
         budget: { type: 'number', description: 'bundle — token budget (default 8000)' },
+        locale: { type: 'string', enum: ['en', 'ko'], description: 'safety — response language (reasons + advice). default en.' },
       },
       required: ['action', 'id'],
     },
-    handler: async ({ action, id, depth, dir, deep, budget }) => {
+    handler: async ({ action, id, depth, dir, deep, budget, locale }) => {
       if (!id) bad('id is required')
       switch (action) {
         case 'radius':
           return (await apiReq('GET', '/blast/' + encId(id), { depth: depth ?? 3, dir: dir ?? 'users' })).data
         case 'safety':
-          return (await apiReq('GET', '/safety/' + encId(id), { deep: deep ? '1' : null })).data
+          return (await apiReq('GET', '/safety/' + encId(id), { deep: deep ? '1' : null, locale })).data
         case 'bundle':
           return (await apiReq('GET', '/bundle/' + encId(id), { budget: budget ?? 8000, depth: depth ?? 3 })).data
         default: bad('unknown action: ' + action)
@@ -236,15 +237,16 @@ const TOOLS = [
         var:    { type: 'string', description: 'env action — single variable focus' },
         top:    { type: 'number', description: 'suggest — max suggestions (default 10)' },
         type:   { type: 'string', enum: ['orphan', 'path', 'filename', 'duplicate'], description: 'legacy — filter to one category' },
+        locale: { type: 'string', enum: ['en', 'ko'], description: 'preflight — response language. default en.' },
       },
       required: ['action'],
     },
-    handler: async ({ action, var: v, top, type }) => {
+    handler: async ({ action, var: v, top, type, locale }) => {
       switch (action) {
         case 'env':       return (await apiReq('GET', '/env', v ? { var: v } : null)).data
         case 'secrets':   return (await apiReq('GET', '/secrets')).data
         case 'vendors':   return (await apiReq('GET', '/vendors')).data
-        case 'preflight': return (await apiReq('GET', '/preflight')).data
+        case 'preflight': return (await apiReq('GET', '/preflight', locale ? { locale } : null)).data
         case 'suggest':   return (await apiReq('GET', '/suggest', { top: top ?? 10 })).data
         case 'legacy':    return (await apiReq('GET', '/legacy', type ? { type } : null)).data
         default: bad('unknown action: ' + action)

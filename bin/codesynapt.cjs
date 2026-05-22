@@ -705,11 +705,13 @@ async function main() {
         break
       }
       case 'safety': {
-        if (!args[0]) return die('usage: fg3d safety <id> [--deep] [--json]')
+        if (!args[0]) return die('usage: fg3d safety <id> [--deep] [--json] [--locale ko|en]')
         const id = args[0]
         const deep = args.includes('--deep') ? '1' : null
         const asJson = args.includes('--json')
-        const r = await req('GET', '/safety/' + encId(id), { deep })
+        let locale = null
+        for (let i = 0; i < args.length; i++) if (args[i] === '--locale' && args[i+1]) locale = args[++i]
+        const r = await req('GET', '/safety/' + encId(id), { deep, locale })
         if (r.status !== 200) return die(r.json?.error || 'failed')
         const j = r.json
         if (asJson) { printJson(j); break }
@@ -1065,7 +1067,9 @@ async function main() {
       case 'preflight': {
         const asJson = args.includes('--json')
         const strict = args.includes('--strict')
-        const r = await req('GET', '/preflight')
+        let locale = null
+        for (let i = 0; i < args.length; i++) if (args[i] === '--locale' && args[i+1]) locale = args[++i]
+        const r = await req('GET', '/preflight', locale ? { locale } : null)
         if (r.status !== 200) return die(r.json?.error || 'failed')
         const j = r.json
         if (asJson) { printJson(j); break }

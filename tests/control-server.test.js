@@ -95,6 +95,25 @@ describe('control-server endpoints', () => {
     expect(['safe', 'caution', 'risky']).toContain(r.level)
   })
 
+  it('GET /safety/:id?locale=ko returns Korean reasons (P3·2)', async () => {
+    const r = await call('GET', '/safety/src/foo.ts?locale=ko')
+    expect(['safe', 'caution', 'risky']).toContain(r.level)
+    const text = (r.reasons || []).join(' ') + ' ' + (r.advice || '')
+    expect(text).toMatch(/[가-힣]/)
+  })
+
+  it('GET /preflight?locale=ko returns Korean check titles (P3·2)', async () => {
+    const r = await call('GET', '/preflight?locale=ko')
+    const text = (r.checks || []).map((c) => (c.title || '') + ' ' + (c.detail || '')).join(' ')
+    expect(text).toMatch(/[가-힣]/)
+  })
+
+  it('GET /safety/:id default locale = en', async () => {
+    const r = await call('GET', '/safety/src/foo.ts')
+    const text = (r.reasons || []).join(' ') + ' ' + (r.advice || '')
+    expect(text).not.toMatch(/[가-힣]/)
+  })
+
   it('GET /preflight returns overall verdict', async () => {
     const r = await call('GET', '/preflight')
     expect(['ok', 'warn', 'fail']).toContain(r.overall)
