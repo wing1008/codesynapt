@@ -6,11 +6,12 @@
 [![Node ≥20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](./package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](./docs/installation.md)
 
-> **The dependency graph your AI coding agent should be reading.**
-> A 3D code-graph visualizer + CLI + MCP server, in one package.
-> Same scanner, three surfaces: a desktop window for humans, a CLI for
-> terminals, and an MCP server so Claude Code / Cursor / any MCP client
-> can query the graph (and watch the result) as a first-class tool.
+> **MCP-native code graph for AI agents — see blast radius live.**
+> The dependency map Claude Code / Cursor / any MCP agent should be
+> reading before it edits your code. Live-updating (~300 ms after a
+> save), no re-indexing, no cloud. Same scanner ships as MCP server
+> (8 intent-shaped tools), CLI (`fg3d`), and a 3D desktop window that
+> pulses every node the AI touches.
 
 ## Why this exists
 
@@ -23,23 +24,26 @@ talks to, which "v2" file is the real one vs. abandoned drafts.
 
 | Surface | For | Example |
 |---|---|---|
-| **MCP server** | AI coding agents | "Which files import `auth.js`?" → agent calls `fg3d_get_users` |
-| **CLI** (`fg3d`) | terminal users, scripts, CI | `fg3d external` — list every API/website your code talks to |
+| **MCP server** | AI coding agents | "Which files import `auth.js`?" → agent calls `fg3d_query({action:'users', id:'auth.js'})` |
+| **CLI** (`fg3d`) | terminal users, scripts, CI | `fg3d external` — list every API/website your code talks to; `fg3d ci-diff main..HEAD` — PR blast radius as Markdown |
 | **Desktop app** | visual exploration | drop folder → 3D graph with live updates; watch the AI navigate live |
 
 All three share the same scanner: imports across JS/TS/Vue/Svelte/Python/Go/Rust/Ruby/PHP/C/C++, plus route↔fetch matching for full-stack monorepos, plus external URL inventory, plus dynamic-pattern detection.
 
 ## What it does well
 
-- **AI-aware tool design** — every response includes `meta: { scannedAt, tokenEstimate, totalAvailable, truncated }`. The agent can decide if data is fresh enough and budget tokens before drilling deeper.
-- **Layer-1 summary** (`fg3d_summary`, ~300 tokens) — agents call this first to get project shape (file count, top hubs, orphans, external services, dynamic-pattern count) before any narrow query.
-- **Connection-aware orphan detection** — files with no incoming imports are flagged so AI doesn't edit abandoned versions.
-- **Blast radius prediction** — `fg3d_blast_radius` returns BFS impact + token-cost estimate so the agent can scope a refactor before starting.
-- **Live agent visualization** — when the desktop window is open, every MCP call pulses the touched node in 3D + draws a trail through visited files. You can literally see the AI navigate the codebase.
-- **Auto-history per file** (opt-in) — every save snapshots the previous content (cap 3). Roll back from the inspector or via `fg3d_restore`.
-- **External URL inventory** — `fg3d external` lists every API host the project calls (Stripe, OpenAI, your own backend…), grouped by domain.
-- **Time-lapse + onboarding tour** — replay project's git history at the timeline slider; auto-generated guided tour of entry points and hubs.
-- **i18n** — toggle Korean ↔ English with one button (`EN` / `한`); persists across sessions.
+- **8 intent-shaped MCP tools** (not 37 narrow ones) — `fg3d_summary`, `fg3d_query`, `fg3d_blast`, `fg3d_intent`, `fg3d_health`, `fg3d_change`, `fg3d_trace`, `fg3d_ui`. Each takes an `action` enum. Designed so the agent picks the right one with a glance, not by scanning a wall of tool names.
+- **AI-aware response envelope** — every response includes `meta: { scannedAt, tokenEstimate, totalAvailable, truncated }`. The agent budgets tokens before drilling deeper.
+- **Blast radius before edit** — `fg3d_blast({action:'safety', id})` returns 🟢/🟡/🔴 verdict + reasons in one call; `action:'bundle'` packs the closest neighbours into a token budget so the agent reads the right context first.
+- **Live updates ~300 ms** — chokidar file-watcher + 60 ms snapshot debounce. No re-indexing, no manual refresh, no cloud round-trip. (Most code-intelligence tools require an explicit re-index step — this one doesn't.)
+- **Live agent visualization** — when the desktop window is open, every MCP call pulses the touched node in 3D. You see the AI navigate.
+- **Full-stack route↔fetch matching** — JS/TS, Python, Next.js file-system API routes auto-detected. Frontend `fetch('/api/billing')` linked to `app/api/billing/route.ts` automatically.
+- **Headless + CI** — `fg3d scan`, `fg3d serve`, `fg3d ci-diff main..HEAD`, `fg3d ci-gate --max-blast 50`. No Electron required for CI / SSH / Docker.
+- **Auto-history per file** (opt-in) — every save snapshots previous content (cap 3). Roll back via `fg3d_change({action:'restore'})`.
+- **External URL inventory** — `fg3d_intent({action:'external'})` lists every API host the project calls (Stripe, OpenAI, your own backend…), grouped by domain.
+- **Env / secret leak detection** — `fg3d_health({action:'secrets'})` flags server-only env vars accidentally used in client bundles.
+- **Offline by design** — no network calls, no telemetry, no cloud sync. The whole graph lives in memory + your local `.filegraph3d/` directory.
+- **i18n** — Korean ↔ English toggle, persists.
 
 ## Quick start
 
@@ -49,30 +53,41 @@ cd filegraph3d && npm install
 npm start          # desktop app + HTTP control API on :7707
 ```
 
-In another terminal:
+### Headless — no desktop window needed (CI / SSH / Docker)
 
 ```sh
-# CLI — 19 commands. Most useful first:
-node bin/fg3d.cjs health                        # is the app running? which folder?
-node bin/fg3d.cjs summary                       # cheap project overview (Layer 1)
-node bin/fg3d.cjs ls --limit 10                 # top 10 most-imported files
-node bin/fg3d.cjs deps src/x.ts                 # what does x.ts import?
-node bin/fg3d.cjs users src/x.ts                # who imports x.ts? (blast radius)
-node bin/fg3d.cjs blast src/x.ts 3              # 3-hop dependents + token estimate
-node bin/fg3d.cjs external                      # external APIs/websites by domain
-node bin/fg3d.cjs find auth                     # substring search
-node bin/fg3d.cjs focus src/x.ts                # move desktop camera to node
-node bin/fg3d.cjs open  src/x.ts                # open inspector with file content
-node bin/fg3d.cjs changes                       # files modified this session
-node bin/fg3d.cjs diff src/x.ts                 # first-seen → now line diff
-node bin/fg3d.cjs tour                          # suggested guided tour
-node bin/fg3d.cjs timeline                      # git history (file birth times)
-node bin/fg3d.cjs history src/x.ts              # auto-history snapshots
-node bin/fg3d.cjs restore src/x.ts <ts>         # restore from snapshot
-node bin/fg3d.cjs refresh src/x.ts              # force re-scan one file
-node bin/fg3d.cjs show src/x.ts                 # node detail + meta
-node bin/fg3d.cjs read src/x.ts                 # file content
+node bin/fg3d.cjs scan [path] --summary         # one-shot project overview
+node bin/fg3d.cjs scan [path] --json            # full graph as JSON
+node bin/fg3d.cjs serve [path] --port 7707      # long-running HTTP API daemon
+node bin/fg3d.cjs ci-diff main..HEAD            # PR impact report (Markdown by default)
+node bin/fg3d.cjs ci-gate main..HEAD --max-blast 50   # CI gate, exits 1 on breach
 ```
+
+### Connected — talks to a running desktop app or `serve` daemon at :7707
+
+```sh
+# Most useful first:
+node bin/fg3d.cjs summary                       # cheap project overview (Layer 1)
+node bin/fg3d.cjs safety src/x.ts               # 🟢/🟡/🔴 + one-line advice
+node bin/fg3d.cjs bundle src/x.ts --budget 8000 # pack neighbours into token budget
+node bin/fg3d.cjs blast  src/x.ts 3             # transitive dependents + token estimate
+node bin/fg3d.cjs suggest                       # "what to ask the AI next" recommendations
+node bin/fg3d.cjs preflight                     # deploy-readiness check
+node bin/fg3d.cjs env [VAR]                     # .env declared vs used
+node bin/fg3d.cjs secrets                       # server-only env leaked to client?
+node bin/fg3d.cjs feature payment               # keyword → FE/BE/shared cluster
+node bin/fg3d.cjs url /billing                  # URL → file (Next.js/Astro/SvelteKit)
+node bin/fg3d.cjs schema [Model]                # DB models (Prisma/Drizzle/SQLAlchemy)
+node bin/fg3d.cjs external                      # external APIs/websites by domain
+node bin/fg3d.cjs deps  src/x.ts                # what does x.ts import?
+node bin/fg3d.cjs users src/x.ts                # who imports x.ts?
+node bin/fg3d.cjs find  auth                    # substring search across file ids
+node bin/fg3d.cjs ls    --limit 10              # top 10 most-imported files
+node bin/fg3d.cjs focus src/x.ts                # move desktop camera (desktop only)
+```
+
+The desktop app exposes ~30 endpoints. Run `fg3d --help` for the full
+list including history, restore, refresh, tour, timeline, trace.
 
 Make `fg3d` globally available:
 
@@ -88,20 +103,30 @@ npm link        # adds fg3d / fg3d-mcp / filegraph3d-server to PATH
 claude mcp add filegraph3d node /absolute/path/to/filegraph3d/bin/fg3d-mcp.cjs
 ```
 
-That registers 19 MCP tools (all `fg3d_*`). In any session, just ask
-project-shape questions and Claude picks the right tool automatically:
+That registers 8 intent-shaped MCP tools (all `fg3d_*`). In any
+session, just ask project-shape questions and Claude picks the right
+action automatically:
 
 > *"이 프로젝트가 호출하는 외부 API 다 알려줘"*
-> → `fg3d_external_urls` → returns domains grouped by file caller
+> → `fg3d_intent({action:'external'})` → domains grouped by file caller
 
 > *"`src/auth/session.ts` 수정하면 어떤 파일들이 영향받아?"*
-> → `fg3d_blast_radius` → 23 files, est. 9.5k tokens to read all
+> → `fg3d_blast({action:'safety', id:'src/auth/session.ts'})` → 🟡 CAUTION, 23 dependents, advice
+
+> *"수정 전에 같이 봐야 할 파일 묶음 만들어줘"*
+> → `fg3d_blast({action:'bundle', id, budget:8000})` → packed files within token budget
 
 > *"import 안 되는 잔재 파일 찾아줘"*
-> → `fg3d_summary` (sees `orphanCount: 12`) → `fg3d_list_nodes` filtered by `minMass=0`
+> → `fg3d_health({action:'legacy'})` → orphan/path/filename/duplicate candidates with confidence
+
+> *"`/billing` 화면이 어느 파일이야?"*
+> → `fg3d_intent({action:'url', path:'/billing'})` → matched file (Next.js / Astro / SvelteKit aware)
 
 > *"src/api/payment.ts 한 시간 전 버전으로 되돌려"*
-> → `fg3d_history` → `fg3d_restore` with the matching timestamp
+> → `fg3d_change({action:'history', id})` → `fg3d_change({action:'restore', id, ts})`
+
+> *"배포해도 안전한가?"*
+> → `fg3d_health({action:'preflight'})` → undeclared env / http URLs / hub tests / leaks — overall ok|warn|fail
 
 If the desktop app is open you'll **see** every tool call pulse the
 relevant node in 3D — a live X-ray of what the agent is doing.
@@ -113,35 +138,49 @@ Same MCP server. Standard config — see [**docs/mcp-setup.md**](./docs/mcp-setu
 ## Use cases
 
 **1. AI-assisted refactoring without breakage.** Before changing
-`src/lib/payment.ts`, ask Claude "blast radius". Agent runs
-`fg3d_blast_radius` → tells you "23 files affected, ~9.5k tokens, 12
-are tests". You decide scope before any code changes.
+`src/lib/payment.ts`, ask Claude "is it safe to refactor?". Agent runs
+`fg3d_blast({action:'safety'})` → 🟢/🟡/🔴 with reasons in one call.
+Follow up with `action:'bundle'` to get the closest neighbours packed
+into a token budget — the right context for the edit.
 
-**2. External API audit.** `fg3d external` lists every external host
-the project calls. Useful for security review, migration planning
-(e.g. "swap Stripe → Toss"), or estimating monthly API spend.
+**2. CI gate for impact-risky PRs.** Add one line to your CI:
+`fg3d ci-gate main..HEAD --max-blast 50` fails the build if a single
+file changes touches >50 dependents. Or `fg3d ci-diff main..HEAD
+--format=github-comment` to post a Markdown impact report on the PR.
 
-**3. Cleaning up "v2" files.** Open the desktop app. Files in the
-inspector get a 🟠 `orphan` / 🟡 `no incoming` / 🟢 `connected` badge
-based on actual import graph — so you know which version is the real
-one before you delete.
+**3. External API + secret audit.** `fg3d_intent({action:'external'})`
+lists every external host (Stripe, OpenAI…), grouped by caller — for
+security review, migration planning, API spend estimation.
+`fg3d_health({action:'secrets'})` catches server-only env vars
+accidentally used in client bundles.
 
-**4. Full-stack route tracing.** filegraph3d matches `fetch('/api/x')`
+**4. Cleaning up "v2" / dead files.**
+`fg3d_health({action:'legacy'})` returns confidence-scored cleanup
+candidates across 4 categories (orphan / path / filename / duplicate),
+so you know which version is the real one before deleting.
+
+**5. Full-stack route tracing.** filegraph3d matches `fetch('/api/x')`
 client calls to `app.get('/api/x', …)` server routes across JS/TS and
-Python (Express, Fastify, Koa, Hono, Flask, FastAPI). The graph shows
-client→server lines so the AI can answer "which UI calls this
-endpoint?"
+Python (Express, Fastify, Koa, Hono, Flask, FastAPI) — plus Next.js
+file-system API routes (`app/api/*/route.ts`, `pages/api/*`)
+auto-detected. The graph shows client→server lines so the AI can
+answer "which UI calls this endpoint?"
 
-**5. Watching the AI think.** Open the desktop app, start a Claude
+**6. Watching the AI think.** Open the desktop app, start a Claude
 Code session in your terminal, ask the agent to do something
 non-trivial. The graph pulses every file the agent inspects + draws
 a trail through its navigation path. The AI trace panel logs each
 tool call live.
 
-**6. Onboarding a new project.** Open it in filegraph3d, hit the 🧭
+**7. URL → file in one query.** Designer says "the /billing screen
+looks broken". `fg3d_intent({action:'url', path:'/billing'})` →
+`src/app/(dashboard)/billing/page.tsx` (Next.js route groups + dynamic
+segments handled).
+
+**8. Onboarding a new project.** Open it in filegraph3d, hit the 🧭
 **Tour** button. The camera flies through entry points, top hubs, and
 external API integration spots. Or ask Claude: "give me the guided
-tour" → calls `fg3d_tour`.
+tour" → `fg3d_trace({action:'tour'})`.
 
 **7. Watching project evolution.** Hit the ⏱ **Time-lapse** button.
 The slider scrubs through git history — files appear at their first
