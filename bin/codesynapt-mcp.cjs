@@ -417,10 +417,78 @@ async function handle(msg) {
   }
 }
 
-const rl = readline.createInterface({ input: process.stdin })
-rl.on('line', (line) => {
-  if (!line.trim()) return
-  let msg
-  try { msg = JSON.parse(line) } catch { return }
-  handle(msg)
-})
+// ─── Transports: stdio (default) or HTTP (--http) ──────────────
+//
+// stdio is the default MCP transport (Claude Code, Cursor, Continue).
+// HTTP is the 2026 MCP standard "Streamable HTTP" — POST /mcp body
+// is a JSON-RPC request, response is the JSON-RPC response. Used by
+// remote / cloud-hosted MCP clients that can't spawn a subprocess.
+//
+// Usage:
+//   codesynapt-mcp                       # stdio (default)
+//   codesynapt-mcp --http                # HTTP on default port 7708
+//   codesynapt-mcp --http --port 9999    # HTTP on custom port
+
+const cliArgs = process.argv.slice(2)
+const isHttp = cliArgs.includes('--http')
+let httpPort = 7708   // distinct from control API's 7707
+for (let i = 0; i < cliArgs.length; i++) {
+  if (cliArgs[i] === '--port' && cliArgs[i+1]) httpPort = parseInt(cliArgs[++i], 10)
+}
+
+if (isHttp) {
+  // HTTP transport — POST /mcp with JSON-RPC body
+  const server = http.createServer(async (req, res) => {
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin',  '*')
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end() }
+    if (req.method === 'GET' && req.url === '/') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({
+        name: 'codesynapt-mcp',
+        transport: 'streamable-http',
+        version: '0.1.0',
+        endpoints: ['POST /mcp', 'GET /mcp/events (SSE)'],
+        toolCount: TOOLS.length,
+      }))
+    }
+    if (req.method === 'POST' && req.url === '/mcp') {
+      let chunks = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', async () => {
+        let msg
+        try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+        catch { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":"invalid json"}') }
+        // Capture the response from handle() instead of writing to stdout
+        const captured = await new Promise((resolve) => {
+          const original = process.stdout.write
+          let buf = ''
+          process.stdout.write = (s) => { buf += s; return true }
+          handle(msg).finally(() => {
+            process.stdout.write = original
+            resolve(buf.trim())
+          })
+        })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(captured || '{}')
+      })
+      return
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end('{"error":"not found"}')
+  })
+  server.listen(httpPort, '127.0.0.1', () => {
+    process.stderr.write(`[cs-mcp] HTTP transport on http://127.0.0.1:${httpPort}/mcp\n`)
+  })
+} else {
+  // stdio transport (default)
+  const rl = readline.createInterface({ input: process.stdin })
+  rl.on('line', (line) => {
+    if (!line.trim()) return
+    let msg
+    try { msg = JSON.parse(line) } catch { return }
+    handle(msg)
+  })
+}
