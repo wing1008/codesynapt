@@ -764,7 +764,8 @@ async function main() {
         if (!fs.existsSync(abs)) return die(`path: ${abs} not found`)
 
         process.stdout.write(`📊 CodeSynapt benchmark — ${abs}\n\n`)
-        // 1. Standalone scan timing
+        // 1. Standalone scan timing + memory delta
+        const memBefore = process.memoryUsage()
         const t0 = Date.now()
         const { Scanner } = await import('../scanner.js')
         const s = new Scanner(abs)
@@ -772,8 +773,12 @@ async function main() {
           s.once('snapshot', resolve); s.start()
         })
         const scanMs = Date.now() - t0
+        const memAfter = process.memoryUsage()
+        const heapDeltaMB = ((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(1)
+        const rssMB = (memAfter.rss / 1024 / 1024).toFixed(1)
         try { s.stop() } catch {}
         process.stdout.write(`  scan (headless):              ${String(scanMs).padStart(6)} ms  (${snap.files.length} files / ${snap.edges.length} edges)\n`)
+        process.stdout.write(`  memory after scan:            heap +${heapDeltaMB} MB   ·   RSS ${rssMB} MB\n`)
 
         // 2. Per-endpoint timing (only if server reachable)
         let serverUp = true
@@ -1127,9 +1132,12 @@ async function main() {
       }
       case 'suggest': {
         const asJson = args.includes('--json')
-        let top = '10'
-        for (let i = 0; i < args.length; i++) if (args[i] === '--top' && args[i+1]) top = args[++i]
-        const r = await req('GET', '/suggest', { top })
+        let top = '10', locale = null
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '--top' && args[i+1]) top = args[++i]
+          else if (args[i] === '--locale' && args[i+1]) locale = args[++i]
+        }
+        const r = await req('GET', '/suggest', { top, locale })
         if (r.status !== 200) return die(r.json?.error || 'failed')
         const j = r.json
         if (asJson) { printJson(j); break }

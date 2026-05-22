@@ -157,6 +157,19 @@ describe('extractNuxtServerRoutes — Nuxt 3 / Nitro', () => {
   })
 })
 
+describe('Astro server endpoints (covered by Next.js pages pattern)', () => {
+  // Astro `src/pages/api/*.ts` with `export const GET/POST` matches the
+  // same regex as Next.js pages router → extractNextApiRoutes handles it.
+  it('Astro src/pages/api/users.ts with method exports', () => {
+    const r = extractNextApiRoutes('src/pages/api/users.ts', `
+export const GET = async ({ request }) => new Response('ok')
+export const POST = async ({ request }) => new Response('ok')
+`)
+    expect(r.some((rt) => rt.method === 'GET' && rt.path === '/api/users')).toBe(true)
+    expect(r.some((rt) => rt.method === 'POST' && rt.path === '/api/users')).toBe(true)
+  })
+})
+
 describe('extractSvelteKitServerRoutes — SvelteKit', () => {
   it('src/routes/<seg>/+server.ts with GET/POST exports', () => {
     const r = extractSvelteKitServerRoutes('src/routes/api/users/+server.ts', `

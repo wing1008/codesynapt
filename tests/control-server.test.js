@@ -180,6 +180,18 @@ describe('control-server endpoints', () => {
     expect(text).not.toMatch(/[가-힣]/)
   })
 
+  it('GET /suggest default = English advice', async () => {
+    const r = await call('GET', '/suggest?top=20')
+    const text = (r.suggestions || []).map((s) => (s.title || '') + ' ' + (s.advice || '')).join(' ')
+    expect(text).not.toMatch(/[가-힣]/)
+  })
+
+  it('GET /suggest?locale=ko = Korean advice (P3·2 ext)', async () => {
+    const r = await call('GET', '/suggest?top=20&locale=ko')
+    const text = (r.suggestions || []).map((s) => (s.title || '') + ' ' + (s.advice || '')).join(' ')
+    expect(text).toMatch(/[가-힣]/)
+  })
+
   it('GET /preflight returns overall verdict', async () => {
     const r = await call('GET', '/preflight')
     expect(['ok', 'warn', 'fail']).toContain(r.overall)

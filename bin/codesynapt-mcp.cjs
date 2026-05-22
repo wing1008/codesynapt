@@ -237,7 +237,7 @@ const TOOLS = [
         var:    { type: 'string', description: 'env action — single variable focus' },
         top:    { type: 'number', description: 'suggest — max suggestions (default 10)' },
         type:   { type: 'string', enum: ['orphan', 'path', 'filename', 'duplicate'], description: 'legacy — filter to one category' },
-        locale: { type: 'string', enum: ['en', 'ko'], description: 'preflight — response language. default en.' },
+        locale: { type: 'string', enum: ['en', 'ko'], description: 'preflight / suggest — response language. default en.' },
       },
       required: ['action'],
     },
@@ -247,7 +247,7 @@ const TOOLS = [
         case 'secrets':   return (await apiReq('GET', '/secrets')).data
         case 'vendors':   return (await apiReq('GET', '/vendors')).data
         case 'preflight': return (await apiReq('GET', '/preflight', locale ? { locale } : null)).data
-        case 'suggest':   return (await apiReq('GET', '/suggest', { top: top ?? 10 })).data
+        case 'suggest':   return (await apiReq('GET', '/suggest', { top: top ?? 10, locale })).data
         case 'legacy':    return (await apiReq('GET', '/legacy', type ? { type } : null)).data
         default: bad('unknown action: ' + action)
       }
