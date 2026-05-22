@@ -2,6 +2,102 @@
 
 All notable changes to filegraph3d.
 
+## 0.12.0 — 2026-05-22 (포지셔닝 + 통합)
+
+### Repositioned
+- README headline → **"MCP-native code graph for AI agents — see blast radius live"**
+- ~300 ms incremental update SLA documented (chokidar + 60 ms debounce)
+- "no re-indexing, no cloud" differentiator (the gap Ry Walker's
+  code-intelligence comparison flagged across 13 tools).
+
+### Changed — BREAKING
+
+- **MCP tools: 37 → 8 intent-shaped tools.** Each takes an `action`
+  enum that selects the underlying endpoint.
+  - `fg3d_summary` (project / health / packages / package_graph / package_detail)
+  - `fg3d_query`   (list / node / deps / users / find / read)
+  - `fg3d_blast`   (radius / safety / bundle)
+  - `fg3d_intent`  (feature / url / schema / external)
+  - `fg3d_health`  (env / secrets / preflight / suggest / legacy)
+  - `fg3d_change`  (write / edit / refresh / history / restore)
+  - `fg3d_trace`   (log / stats / sessions / session / clear / changes / diff / tour / timeline)
+  - `fg3d_ui`      (focus / open) — desktop only
+  - Old names (`fg3d_blast_radius`, `fg3d_safety`, `fg3d_external_urls`…) **removed**.
+    Re-register: `claude mcp add filegraph3d node /abs/path/bin/fg3d-mcp.cjs`.
+
+### Added — headless / CI / context
+
+- **`fg3d scan [path]`** — one-shot headless scan (JSON / summary /
+  edges / files). No desktop window needed.
+- **`fg3d serve [path] --port N`** — standalone HTTP API daemon. Same
+  endpoint surface as the Electron app, for CI / SSH / Docker.
+- **`fg3d ci-diff <base..head>`** — PR impact report
+  (`--format=github-comment | json | plain`). Pulls git diff,
+  computes per-file blast radius, emits Markdown ready to drop into
+  a PR comment.
+- **`fg3d ci-gate <base..head>`** — same data, exits 1 on threshold
+  breach (`--max-blast N` / `--max-changed N`). For CI step.
+- **`.github/actions/blast-radius/`** — composite GitHub Action that
+  posts/updates a single Markdown PR comment per push + optional gate.
+- **`fg3d context [--output FILE]`** — aggregates summary + packages +
+  url + schema + env + external + legacy into a single Markdown
+  context file. Drop into project root as `CLAUDE.md` / `AGENTS.md` /
+  `.cursor/rules` for AI agents to load on each turn.
+
+### Added — new MCP / CLI capabilities
+
+- **`fg3d safety`** — 🟢/🟡/🔴 "is it safe for AI to edit this?" verdict
+  in one call (dependents + routes + external APIs + dynamic patterns
+  + test coverage).
+- **`fg3d bundle`** — pack closest neighbours into a token budget;
+  ready to feed to the editor before a refactor.
+- **`fg3d env [VAR]`** — `.env` cross-reference: declared vs used,
+  status `ok | unused | undeclared` (catches deploy-time bombs).
+- **`fg3d secrets`** — server-only env vars accidentally used in
+  frontend code (security check, integrated into preflight).
+- **`fg3d suggest`** — rule-based "next thing to ask the AI to fix",
+  priority sorted, includes copy-pasteable prompts.
+- **`fg3d feature <keyword>`** — keyword → frontend / backend / shared
+  file cluster (heuristic).
+- **`fg3d url [PATH]`** — URL ↔ file mapping (Next.js app + pages
+  router, Astro, SvelteKit; route groups + dynamic segments handled).
+- **`fg3d schema [Model]`** — DB model extraction (Prisma / Drizzle /
+  SQLAlchemy) with field list + usage cross-reference.
+- **`fg3d preflight`** — comprehensive deploy-readiness check
+  (undeclared env / http URLs / hub tests / orphans / dynamic / leaks).
+
+### Added — language support
+
+- **C# / Swift / PowerShell / Clojure / RST** — real parsers replace
+  the previous TRACKED_EXT-only stubs (no more silently-zero imports).
+- **`.ipynb` (Jupyter)** — extract code cells, dispatch to Python
+  parser, route external URLs from cell content only (no JSON
+  metadata noise).
+- **Dart (Flutter)** — import / export / part / part-of, `dart:` /
+  `package:` skipped, relative paths from current file.
+- **Next.js file-system API routes** auto-detected
+  (`app/api/*/route.ts` + `pages/api/*`). Restores ~30% of cross-stack
+  edges (94 → 123 on a real Next.js app).
+
+### Improved — apiCalls extraction
+
+- `$fetch` / `ofetch` / `useAsyncData` (Nuxt 3 / Nitro)
+- template literal prefix (`fetch(\`/api/users/\${id}\`)` → `/api/users/`)
+- dedup (method + url) to prevent double-counting when both fetch and
+  nitro regexes match the same call.
+
+### Refactored
+
+- **`lib/control-server.cjs`** — extracted control-plane factory used
+  by both Electron and `fg3d serve`. Same HTTP surface, no logic
+  duplicated between desktop and headless. (Partial — main.cjs still
+  owns the legacy endpoints; full migration planned.)
+
+### Compatibility note
+
+The MCP tool rename is the only breaking change. CLI commands and HTTP
+endpoints unchanged.
+
 ## Unreleased — 2026-05-18 session
 
 ### Added — AI agent integration

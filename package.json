@@ -1,7 +1,7 @@
 {
   "name": "filegraph3d",
-  "version": "0.11.1",
-  "description": "Real-time 3D code dependency visualizer — active-set curation, file tree, minimap, scales to 100k+ files",
+  "version": "0.12.0",
+  "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
   "license": "BUSL-1.1",
   "author": "",
   "homepage": "https://github.com/YOUR_USER/filegraph3d#readme",
