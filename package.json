@@ -1,6 +1,6 @@
 {
   "name": "codesynapt",
-  "version": "0.14.3",
+  "version": "0.14.4",
   "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
   "license": "BUSL-1.1",
   "author": "",

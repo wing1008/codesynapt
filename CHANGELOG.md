@@ -2,6 +2,20 @@
 
 All notable changes to CodeSynapt (formerly `CodeSynapse`, originally `filegraph3d`).
 
+## 0.14.4 — 2026-05-22 (CI matrix + bench memory + suggest i18n + content hash)
+
+### Added
+- **GitHub Actions CI matrix** — Node 20 + 22 × Ubuntu / macOS / Windows = 6 조합. `npm ci --omit=optional --omit=dev`로 CLI/MCP-only 설치 경로도 검증. smoke test + vitest 모두 실행.
+- **`cs bench` 메모리 측정** — scan 후 heap delta + RSS (MB) 출력.
+- **`/suggest?locale=ko`** (i18n 확장) — buildSuggestions에 locale 적용. SUGGEST_STRINGS table (en/ko, 6 categories). CLI `cs suggest --locale ko`.
+- **컨텐츠 해시 (P4·3)** — `/file/:id` + `/node/:id` 응답에 `contentHash` (SHA-256). AI가 자기 Read 결과와 비교해 fresh 확정. Lazy (요청 시 계산, scan 시간 영향 없음). 캐싱 (lastSeenAt 기반).
+
+### Tests
+- 68/68 (suggest locale 2 + Astro 1 + contentHash 2 추가)
+
+### Decided
+- **Stage 3 F2 (2D 다이어그램) 폐기** — 타깃이 CLI/MCP 위주, 3D는 마케팅 자산. Sourcetrail/CodeSee 시장 죽음. 유지보수 부담만 큼.
+
 ## 0.14.3 — 2026-05-22 (P3 + P4·6 묶음 — locale + HTTP + auth)
 
 ### Added

@@ -192,6 +192,19 @@ describe('control-server endpoints', () => {
     expect(text).toMatch(/[가-힣]/)
   })
 
+  it('GET /file/:id includes SHA-256 contentHash (P4·3)', async () => {
+    const r = await call('GET', '/file/src/foo.ts')
+    expect(r.contentHash).toMatch(/^[0-9a-f]{64}$/)
+    // hash matches actual content
+    const expected = require('crypto').createHash('sha256').update(r.content).digest('hex')
+    expect(r.contentHash).toBe(expected)
+  })
+
+  it('GET /node/:id includes contentHash', async () => {
+    const r = await call('GET', '/node/src/foo.ts')
+    expect(r.contentHash).toMatch(/^[0-9a-f]{64}$/)
+  })
+
   it('GET /preflight returns overall verdict', async () => {
     const r = await call('GET', '/preflight')
     expect(['ok', 'warn', 'fail']).toContain(r.overall)
