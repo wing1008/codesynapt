@@ -2,6 +2,20 @@
 
 All notable changes to CodeSynapt (formerly `CodeSynapse`, originally `filegraph3d`).
 
+## 0.14.1 — 2026-05-22 (post-rebrand cleanup)
+
+### Fixed — root-cause fixes (not workarounds)
+
+- **Port 7707 in-use no longer disables the control API.** `startControlServer` now tries the 10 ports `7707..7716` and writes the winning port to `~/.codesynapt/port` (a lock file). CLI / MCP read that file to find the live server. Multiple instances (e.g. desktop app + one-off `cs serve`) now coexist instead of one silently disabling the other.
+- **Bin file names** match the package: `bin/fg3d.cjs` → `bin/codesynapt.cjs`, `bin/fg3d-mcp.cjs` → `bin/codesynapt-mcp.cjs`. `package.json` `bin` paths updated; all docs (`README.md`, `CLAUDE.md`, `AGENTS.md`, `docs/`, GitHub Action) updated.
+- **Error messages and log prefix** no longer leak the old name. `[fg3d]` console prefix → `[cs]`. `"filegraph3d app is not running"` → `"codesynapt server is not running"`.
+- **`claude mcp add codesynapt`** registration string in README and Action README now points at `bin/codesynapt-mcp.cjs`.
+
+### Compatibility
+
+- `FG3D_PORT` env var still works (legacy fallback).
+- Old `bin/fg3d.cjs` / `bin/fg3d-mcp.cjs` paths **removed** — re-run `npm install` (or `npm link` for global use) to register the new bin names.
+
 ## 0.14.0 — 2026-05-22 (Re-rebrand: CodeSynapse → CodeSynapt, npm collision fix)
 
 ### Why

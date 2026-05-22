@@ -1664,20 +1664,53 @@ function handleControlRequest(req, res) {
   }
 }
 
-function startControlServer(port = controlPort) {
+// Try `startPort` first, then increment up to `maxTries-1` more.
+// On success: write port to lock file so CLI / MCP can find us.
+// On exhaustion: log + give up (control API disabled).
+const CONTROL_PORT_MAX_TRIES = 10
+function getLockFilePath() {
+  // ~/.codesynapt/port — CLI/MCP looks here when no env var set
+  const homeDir = app.getPath('home')
+  return path.join(homeDir, '.codesynapt', 'port')
+}
+function writeLockFile(port) {
+  try {
+    const file = getLockFilePath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, String(port), 'utf8')
+  } catch (e) {
+    console.warn('[cs] could not write port lock file:', e.message)
+  }
+}
+function clearLockFile() {
+  try { fs.unlinkSync(getLockFilePath()) } catch {}
+}
+function startControlServer(startPort = controlPort, attempt = 0) {
   if (controlServer) return
-  controlServer = http.createServer(handleControlRequest)
-  controlServer.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.warn(`[fg3d] control port ${port} in use — control API disabled. Set FG3D_PORT to override.`)
+  const port = startPort + attempt
+  const server = http.createServer(handleControlRequest)
+  server.once('error', (err) => {
+    if (err.code === 'EADDRINUSE' && attempt < CONTROL_PORT_MAX_TRIES - 1) {
+      // Try next port. Recurse without setting controlServer yet.
+      try { server.close() } catch {}
+      startControlServer(startPort, attempt + 1)
+    } else if (err.code === 'EADDRINUSE') {
+      console.warn(`[cs] all control ports ${startPort}..${startPort + CONTROL_PORT_MAX_TRIES - 1} in use — control API disabled. Set CS_PORT to override.`)
       controlServer = null
     } else {
-      console.error('[fg3d] control server error:', err)
+      console.error('[cs] control server error:', err)
+      controlServer = null
     }
   })
-  controlServer.listen(port, '127.0.0.1', () => {
+  server.listen(port, '127.0.0.1', () => {
+    controlServer = server
     controlPort = port
-    console.log(`[fg3d] control API listening on http://127.0.0.1:${port}`)
+    writeLockFile(port)
+    if (port !== startPort) {
+      console.log(`[cs] control API listening on http://127.0.0.1:${port}  (fallback — ${startPort} was in use)`)
+    } else {
+      console.log(`[cs] control API listening on http://127.0.0.1:${port}`)
+    }
   })
 }
 function stopControlServer() {
@@ -1685,6 +1718,7 @@ function stopControlServer() {
     try { controlServer.close() } catch {}
     controlServer = null
   }
+  clearLockFile()
 }
 ipcMain.handle('control-port', () => controlPort)
 

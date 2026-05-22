@@ -1,6 +1,6 @@
-name: 'fg3d blast radius'
+name: 'codesynapt blast radius'
 description: 'Post a Markdown PR comment summarising the dependency blast radius of every changed file. Optionally fail the build if a threshold is breached.'
-author: 'filegraph3d'
+author: 'codesynapt'
 branding:
   icon: 'git-pull-request'
   color: 'purple'
@@ -72,7 +72,7 @@ runs:
         echo "base=$base" >> $GITHUB_OUTPUT
         echo "head=$head" >> $GITHUB_OUTPUT
 
-    - name: Install filegraph3d
+    - name: Install codesynapt
       shell: bash
       run: |
         if [ ! -d "${{ github.action_path }}/../../../node_modules" ]; then
@@ -87,7 +87,7 @@ runs:
         cd "$GITHUB_WORKSPACE"
         # Ensure full history for the diff
         git fetch --no-tags --prune --depth=10000 origin "${{ steps.refs.outputs.base }}" || true
-        FG3D="${{ github.action_path }}/../../../bin/fg3d.cjs"
+        FG3D="${{ github.action_path }}/../../../bin/codesynapt.cjs"
         node "$FG3D" ci-diff "${{ steps.refs.outputs.base }}..${{ steps.refs.outputs.head }}" --depth ${{ inputs.depth }} --format=github-comment > /tmp/fg3d-comment.md
         # Also emit JSON for outputs
         node "$FG3D" ci-diff "${{ steps.refs.outputs.base }}..${{ steps.refs.outputs.head }}" --depth ${{ inputs.depth }} --format=json > /tmp/fg3d-result.json
@@ -118,7 +118,7 @@ runs:
       if: ${{ inputs.max-blast != '0' || inputs.max-changed != '0' }}
       shell: bash
       run: |
-        FG3D="${{ github.action_path }}/../../../bin/fg3d.cjs"
+        FG3D="${{ github.action_path }}/../../../bin/codesynapt.cjs"
         ARGS=("${{ steps.refs.outputs.base }}..${{ steps.refs.outputs.head }}")
         [ "${{ inputs.max-blast }}" != "0" ]   && ARGS+=(--max-blast "${{ inputs.max-blast }}")
         [ "${{ inputs.max-changed }}" != "0" ] && ARGS+=(--max-changed "${{ inputs.max-changed }}")

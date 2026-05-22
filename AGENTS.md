@@ -120,14 +120,14 @@ docs/                 User-facing docs
 ## Three surfaces, one scanner
 
 `electron/main.cjs` boots the desktop UI **and** a tiny HTTP server on
-`127.0.0.1:7707` (override via `FG3D_PORT`). The CLI (`bin/fg3d.cjs`)
-and MCP server (`bin/fg3d-mcp.cjs`) are both thin wrappers around
+`127.0.0.1:7707` (override via `FG3D_PORT`). The CLI (`bin/codesynapt.cjs`)
+and MCP server (`bin/codesynapt-mcp.cjs`) are both thin wrappers around
 that HTTP API — they don't talk to the scanner directly. This means:
 
 - The desktop app must be running for CLI / MCP to work
 - Adding a new graph capability = add an HTTP endpoint in `main.cjs`,
-  then surface it in both `bin/fg3d.cjs` (command) and
-  `bin/fg3d-mcp.cjs` (tool definition)
+  then surface it in both `bin/codesynapt.cjs` (command) and
+  `bin/codesynapt-mcp.cjs` (tool definition)
 - UI control commands (`POST /focus/:id`, `/open/:id`) relay through
   `mainWindow.webContents.send('control:focus'|'control:open'|...)`
   → renderer listens via the preload `onControl` bridge
@@ -241,7 +241,7 @@ For any change, before you finish:
 ☐ If plugin API change, update plugin-api/docs/ AND types.d.ts
 ☐ If new CSS variable, define in all 7 themes
 ☐ If new IPC channel, add to BOTH electron/main.cjs AND electron/preload.cjs
-☐ If new HTTP endpoint, surface in BOTH bin/fg3d.cjs AND bin/fg3d-mcp.cjs
+☐ If new HTTP endpoint, surface in BOTH bin/codesynapt.cjs AND bin/codesynapt-mcp.cjs
    (otherwise CLI/AI users can't reach it). Use withMeta() in the response.
 ☐ If new visible UI string, add a `data-i18n` attribute (HTML) or
    `t('key')` call (JS) AND add the key to BOTH T.ko and T.en in app.js

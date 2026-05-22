@@ -1,14 +1,31 @@
 #!/usr/bin/env node
-// filegraph3d MCP server — stdio JSON-RPC 2.0. Bridges Claude Code (or
-// any MCP client) to the running Electron app's localhost:7707 API.
+// CodeSynapt MCP server — stdio JSON-RPC 2.0. Bridges Claude Code (or
+// any MCP client) to the running Electron app's localhost control API.
 //
 // Register with Claude Code:
-//   claude mcp add filegraph3d node /absolute/path/to/bin/fg3d-mcp.cjs
+//   claude mcp add codesynapt node /absolute/path/to/bin/codesynapt-mcp.cjs
 
 const http = require('http')
 const readline = require('readline')
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
 
-const PORT = parseInt(process.env.CS_PORT || process.env.FG3D_PORT || '7707', 10)
+// Resolve which port the running server is on.
+// Priority: explicit env var > lock file (written by server) > default 7707.
+function resolvePort() {
+  const envPort = process.env.CS_PORT || process.env.FG3D_PORT
+  if (envPort) return parseInt(envPort, 10)
+  try {
+    const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
+    if (fs.existsSync(lockPath)) {
+      const p = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10)
+      if (p > 0 && p < 65536) return p
+    }
+  } catch { /* fall through */ }
+  return 7707
+}
+const PORT = resolvePort()
 const HOST = '127.0.0.1'
 
 function apiReq(method, pathStr, query, body) {
@@ -39,7 +56,7 @@ function apiReq(method, pathStr, query, body) {
     })
     r.on('error', (err) => {
       if (err.code === 'ECONNREFUSED') {
-        reject(new Error(`filegraph3d app is not running at ${HOST}:${PORT}. Start the desktop app first. Override port via FG3D_PORT env var.`))
+        reject(new Error(`codesynapt server is not running at ${HOST}:${PORT}. Start the desktop app first, or run 'cs serve'. Override port via CS_PORT.`))
       } else reject(err)
     })
     if (payload) r.write(payload)

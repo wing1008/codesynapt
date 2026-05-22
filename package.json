@@ -1,6 +1,6 @@
 {
   "name": "codesynapt",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
   "license": "BUSL-1.1",
   "author": "",
@@ -27,10 +27,26 @@
   "main": "electron/main.cjs",
   "bin": {
     "codesynapt-server": "./server.js",
-    "codesynapt": "./bin/fg3d.cjs",
-    "cs": "./bin/fg3d.cjs",
-    "codesynapt-mcp": "./bin/fg3d-mcp.cjs"
+    "codesynapt": "./bin/codesynapt.cjs",
+    "cs": "./bin/codesynapt.cjs",
+    "codesynapt-mcp": "./bin/codesynapt-mcp.cjs"
   },
+  "files": [
+    "bin/",
+    "electron/",
+    "lib/",
+    "public/",
+    "scripts/",
+    "plugin-api/",
+    "parser.js",
+    "scanner.js",
+    "monorepo.js",
+    "server.js",
+    "LICENSE",
+    "LICENSES.md",
+    "CHANGELOG.md",
+    "README.md"
+  ],
   "scripts": {
     "postinstall": "node scripts/copy-vendor.js",
     "start": "electron .",

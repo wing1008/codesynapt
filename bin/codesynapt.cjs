@@ -1,11 +1,28 @@
 #!/usr/bin/env node
-// filegraph3d CLI — thin wrapper around the running Electron app's
-// localhost:7707 control API. Run filegraph3d in the background; then
-// use `fg3d <cmd>` from any terminal to inspect / control it.
+// CodeSynapt CLI — thin wrapper around the running Electron app's
+// localhost control API. Run the desktop app or `cs serve` in the
+// background; then use `cs <cmd>` from any terminal to inspect / control it.
 
 const http = require('http')
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
 
-const PORT = parseInt(process.env.CS_PORT || process.env.FG3D_PORT || '7707', 10)
+// Resolve which port the running server is on.
+// Priority: explicit env var > lock file (written by server) > default 7707.
+function resolvePort() {
+  const envPort = process.env.CS_PORT || process.env.FG3D_PORT
+  if (envPort) return parseInt(envPort, 10)
+  try {
+    const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
+    if (fs.existsSync(lockPath)) {
+      const p = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10)
+      if (p > 0 && p < 65536) return p
+    }
+  } catch { /* fall through */ }
+  return 7707
+}
+const PORT = resolvePort()
 const HOST = '127.0.0.1'
 
 function req(method, pathStr, query, body) {
@@ -36,7 +53,7 @@ function req(method, pathStr, query, body) {
     })
     r.on('error', (err) => {
       if (err.code === 'ECONNREFUSED') {
-        reject(new Error(`filegraph3d app is not running at ${HOST}:${PORT}. Start the desktop app first (npm start, or open the installed app). Override port with FG3D_PORT=...`))
+        reject(new Error(`codesynapt server is not running at ${HOST}:${PORT}. Start the desktop app first (npm start), or run 'cs serve'. Override port via CS_PORT.`))
       } else reject(err)
     })
     if (payload) r.write(payload)
@@ -278,17 +295,17 @@ async function runHeadlessServe(args) {
     // No IPC callbacks in headless mode — onBlast/onFocus/onOpen omitted
   })
 
-  process.stderr.write(`[fg3d] scanning ${abs}\n`)
+  process.stderr.write(`[cs] scanning ${abs}\n`)
   scanner.on('snapshot', (snap) => {
-    process.stderr.write(`[fg3d] snapshot: ${snap.files.length} files, ${snap.edges.length} edges\n`)
+    process.stderr.write(`[cs] snapshot: ${snap.files.length} files, ${snap.edges.length} edges\n`)
   })
   scanner.start()
 
   try {
     const { port: actualPort } = await startControlServer(port)
-    process.stderr.write(`[fg3d] HTTP API on http://127.0.0.1:${actualPort}\n`)
-    process.stderr.write(`[fg3d] try: curl http://127.0.0.1:${actualPort}/summary\n`)
-    process.stderr.write(`[fg3d] Ctrl-C to stop.\n`)
+    process.stderr.write(`[cs] HTTP API on http://127.0.0.1:${actualPort}\n`)
+    process.stderr.write(`[cs] try: curl http://127.0.0.1:${actualPort}/summary\n`)
+    process.stderr.write(`[cs] Ctrl-C to stop.\n`)
   } catch (e) {
     if (e.code === 'EADDRINUSE') return die(`port ${port} in use — pass --port N`)
     return die(`server error: ${e.message}`)
@@ -296,7 +313,7 @@ async function runHeadlessServe(args) {
 
   // Block forever — graceful shutdown on SIGINT/SIGTERM
   const shutdown = async (signal) => {
-    process.stderr.write(`\n[fg3d] ${signal} → shutting down\n`)
+    process.stderr.write(`\n[cs] ${signal} → shutting down\n`)
     try { scanner.stop() } catch {}
     try { await stopControlServer() } catch {}
     process.exit(0)
