@@ -525,17 +525,54 @@ const HTTP_METHODS = ['get','post','put','patch','delete','head','options','all'
 
 function extractJSRoutes(content) {
   const routes = []
-  // Express / Hono / Koa-router / Fastify shorthand:
-  //   app.get('/users', ...)
-  //   router.post('/users/:id', ...)
-  //   fastify.delete('/users/:id', ...)
+  // First pass: collect Express-style mount prefixes within this file.
+  // Example:
+  //   const usersRouter = express.Router()
+  //   usersRouter.get('/list', ...)              ← path is '/list'
+  //   app.use('/api/users', usersRouter)         ← gives prefix '/api/users'
+  // → emit one route { method:'GET', path:'/api/users/list' }
+  //
+  // Same-file only — cross-file router mount resolution would need
+  // a global pass (deferred).
+  const mountRe = /\b(?:app|server|router|api)\.use\s*\(\s*['"`](\/[^'"`]*)['"`]\s*,\s*(\w+)\s*\)/g
+  const mounts = new Map()  // varName -> prefix
+  let mm
+  while ((mm = mountRe.exec(content))) {
+    const prefix = mm[1].replace(/\/$/, '')   // strip trailing slash
+    mounts.set(mm[2], prefix)
+  }
+
+  // Method handlers — capture the receiver name too so we can resolve
+  // its mount prefix from `mounts`.
   const methodRe = new RegExp(
-    `\\b(?:app|router|api|server|fastify|hono|express|route)\\.(${HTTP_METHODS.join('|')})\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`,
+    `\\b(\\w+)\\.(${HTTP_METHODS.join('|')})\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`,
     'g'
   )
+  // Only treat the call as a route if the receiver looks like a
+  // router/app variable. We accept:
+  //   - well-known names: app, router, server, api, fastify, hono, express, route
+  //   - any variable that is the target of a `<name>.use('/prefix', X)`
+  //     mount (those *receive* sub-routes after mounting)
+  //   - any variable assigned from `express.Router()` / `Router()` / `Hono()` / `new Hono()`
+  const knownReceivers = new Set(['app', 'router', 'server', 'api', 'fastify', 'hono', 'express', 'route'])
+  const factoryRe = /\b(?:const|let|var)\s+(\w+)\s*=\s*(?:new\s+)?(?:express\.Router|Router|Hono)\s*\(/g
+  let fm
+  while ((fm = factoryRe.exec(content))) knownReceivers.add(fm[1])
+  // mounted variables (X in app.use('/p', X)) are also valid receivers
+  for (const v of mounts.keys()) knownReceivers.add(v)
+
   let m
   while ((m = methodRe.exec(content))) {
-    routes.push({ method: m[1].toUpperCase(), path: m[2] })
+    const receiver = m[1]
+    if (!knownReceivers.has(receiver)) continue
+    const method = m[2].toUpperCase()
+    const localPath = m[3]
+    // If this receiver is a mounted router, prepend its prefix
+    const prefix = mounts.get(receiver) || ''
+    const full = prefix && localPath.startsWith('/')
+      ? prefix + (localPath === '/' ? '' : localPath)
+      : localPath
+    routes.push({ method, path: full })
   }
   // Fastify object form: fastify.route({ method: 'GET', url: '/users' })
   const fastifyObjRe = /\.route\s*\(\s*\{[^}]*?method\s*:\s*['"`](\w+)['"`][^}]*?url\s*:\s*['"`]([^'"`]+)['"`]/g

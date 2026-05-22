@@ -225,13 +225,14 @@ const TOOLS = [
       'actions:\n' +
       '  · env       — env vars: declared vs used cross-reference (var optional — overview if omitted)\n' +
       '  · secrets   — server-only env leaked into frontend bundles (security check)\n' +
+      '  · vendors   — third-party folder auto-detect (LICENSE / own manifest / nested .git / conventional name). Suggests .fg3dignore entries.\n' +
       '  · preflight — comprehensive deploy-readiness (undeclared env / http URLs / hub tests / orphans / dynamic / leaks)\n' +
       '  · suggest   — rule-based "next thing to ask the AI to fix" (high/medium/low). Best opening move when stuck.\n' +
       '  · legacy    — orphan/path/filename/duplicate cleanup candidates with confidence scores (type optional)',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['env', 'secrets', 'preflight', 'suggest', 'legacy'] },
+        action: { type: 'string', enum: ['env', 'secrets', 'vendors', 'preflight', 'suggest', 'legacy'] },
         var:    { type: 'string', description: 'env action — single variable focus' },
         top:    { type: 'number', description: 'suggest — max suggestions (default 10)' },
         type:   { type: 'string', enum: ['orphan', 'path', 'filename', 'duplicate'], description: 'legacy — filter to one category' },
@@ -242,6 +243,7 @@ const TOOLS = [
       switch (action) {
         case 'env':       return (await apiReq('GET', '/env', v ? { var: v } : null)).data
         case 'secrets':   return (await apiReq('GET', '/secrets')).data
+        case 'vendors':   return (await apiReq('GET', '/vendors')).data
         case 'preflight': return (await apiReq('GET', '/preflight')).data
         case 'suggest':   return (await apiReq('GET', '/suggest', { top: top ?? 10 })).data
         case 'legacy':    return (await apiReq('GET', '/legacy', type ? { type } : null)).data

@@ -200,6 +200,82 @@ export class Scanner extends EventEmitter {
     return path.relative(this.root, absPath).split(path.sep).join('/')
   }
 
+  // ── Third-party folder auto-detection ────────────────────────
+  // Heuristic: a sub-folder is "vendored" / "third-party" if it shows
+  // any of these signals (combined for confidence):
+  //   - .git/ subdirectory (nested repo / submodule)              +0.5
+  //   - LICENSE/LICENCE/COPYING file at folder root               +0.2
+  //   - own package.json / pyproject.toml / Cargo.toml /
+  //     go.mod / Gemfile / pom.xml + the parent has its own       +0.3
+  //   - conventional name: vendor / vendors / third_party /       +0.2
+  //     third-party / external / deps / submodules / tools
+  //
+  // We only report folders, never auto-ignore — the user can copy
+  // suggested entries into `.fg3dignore`. Reported via `vendorCandidates`
+  // on the snapshot.
+  scanVendorCandidates() {
+    this.vendorCandidates = []
+    const CONVENTIONAL_NAMES = new Set([
+      'vendor', 'vendors', 'third_party', 'third-party',
+      'external', 'externals', 'deps', 'submodules',
+    ])
+    const ROOT_HAS_MANIFEST = (() => {
+      for (const name of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'Gemfile', 'pom.xml']) {
+        if (fs.existsSync(path.join(this.root, name))) return true
+      }
+      return false
+    })()
+    const seen = new Set()
+    const walk = (dir, depth, relParts) => {
+      if (depth > 3) return    // shallow only — vendored libs usually at depth 1-2
+      let entries
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (!e.isDirectory()) continue
+        if (IGNORE_DIRS.has(e.name) || isIgnoredDir(e.name)) continue
+        const full = path.join(dir, e.name)
+        const rel  = [...relParts, e.name].join('/')
+        if (seen.has(rel)) continue
+        seen.add(rel)
+
+        let confidence = 0
+        const reasons = []
+        try {
+          if (fs.existsSync(path.join(full, '.git'))) {
+            confidence += 0.5; reasons.push('nested .git (submodule or sub-repo)')
+          }
+          for (const lic of ['LICENSE', 'LICENCE', 'COPYING', 'LICENSE.md', 'LICENSE.txt']) {
+            if (fs.existsSync(path.join(full, lic))) { confidence += 0.2; reasons.push(`has ${lic}`); break }
+          }
+          if (ROOT_HAS_MANIFEST) {
+            for (const mf of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'Gemfile', 'pom.xml']) {
+              if (fs.existsSync(path.join(full, mf))) {
+                confidence += 0.3; reasons.push(`own ${mf} (sub-project)`); break
+              }
+            }
+          }
+          if (CONVENTIONAL_NAMES.has(e.name.toLowerCase())) {
+            confidence += 0.2; reasons.push('conventional vendor folder name')
+          }
+        } catch {}
+
+        if (confidence >= 0.3) {
+          this.vendorCandidates.push({
+            path: rel,
+            confidence: Math.min(1, +confidence.toFixed(2)),
+            reasons,
+          })
+        } else {
+          // Only recurse into non-obvious folders. Don't dive into
+          // anything already flagged (its children would inherit).
+          walk(full, depth + 1, [...relParts, e.name])
+        }
+      }
+    }
+    walk(this.root, 0, [])
+    this.vendorCandidates.sort((a, b) => b.confidence - a.confidence)
+  }
+
   // ── .env file index ───────────────────────────────────────────
   // We don't add .env files to the graph (they're config, not code),
   // but we DO scan them to know which env vars are declared. The
@@ -275,6 +351,7 @@ export class Scanner extends EventEmitter {
         initial = false
         this.emit('scan-progress', { count: scanCount, done: true })
         this.scanEnvFiles()
+        this.scanVendorCandidates()
         this.rebuildEdges()
         this.emitSnapshot()
         this.emit('stats', { initialScanComplete: true, fileCount: this.files.size })
