@@ -2,6 +2,31 @@
 
 All notable changes to CodeSynapt (formerly `CodeSynapse`, originally `filegraph3d`).
 
+## 0.14.2 — 2026-05-22 (P1 + P2 묶음 — accuracy + tests)
+
+### Accuracy (P1 + P2)
+- **Express `app.use('/api', router)` prefix 인지 (P1·1)** — `usersRouter.get('/list')` + `app.use('/api/users', usersRouter)` → `/api/users/list` 자동. knownReceivers는 app/router/server/api/fastify/hono/express + Router()/Hono() 팩토리 변수 + 모든 `app.use('/x', X)` 마운트 변수.
+- **Nuxt 3 / SvelteKit / Astro file-system server routes (P2·2)** — `server/api/<seg>.ts` (default ANY / `foo.post.ts` suffix / `defineEventHandler({ method })`), `src/routes/.../+server.ts` (named GET/POST exports).
+- **SDK instance 추적 (P2·4)** — `const myApi = axios.create(...)` → `myApi.get('/users')` 자동 매칭. got.extend / ky.create / ofetch.create / 팩토리 useApi/createApi/createClient/useFetch도 인지.
+- **TRPC procedure 인지 (P2·4)** — `trpc.users.list.useQuery()` → `{ method: 'RPC', url: 'trpc:users.list' }`. 풀스택 매칭에 자동 안 되지만 가시성 확보.
+
+### Reliability
+- **vitest framework + 57 테스트 (P2·1)** — parser/scanner/control-server endpoint. CI 매트릭스 준비 완료.
+- **Dynamic 신뢰도 점수 (P2·3)** — 각 파일에 `confidence: high | medium | low`.
+  - low: eval/new Function/Reflect/exec, @Injectable/@Module/@Controller, container.resolve, `inject<T>('TOKEN')`
+  - medium: 그 외 dynamic 패턴
+  - high: pure static
+  - `/summary.confidence` + `/node/:id.confidence` 노출
+- **Third-party 폴더 자동 감지 (P1·2)** — LICENSE+manifest+nested .git+conventional name 휴리스틱. `cs vendors` / `cs_health { action: 'vendors' }`. suggest 규칙에도 medium-priority 추가.
+
+### Developer UX
+- **`cs context --watch` (P1·3)** — 파일 변경시 자동 재생성 (5s polling). `--output FILE` 필수.
+- **`cs bench` (P1·4)** — scan + 6 endpoint median/p95 측정. README의 "~300 ms SLA" 검증 가능.
+
+### Compatibility
+- `~/.codesynapt/port` lock file은 v0.14.1과 동일.
+- 모든 v0.14.1 명령 / endpoint 호환.
+
 ## 0.14.1 — 2026-05-22 (post-rebrand cleanup)
 
 ### Fixed — root-cause fixes (not workarounds)
