@@ -431,7 +431,7 @@ export class Scanner extends EventEmitter {
     let content = ''
     try { content = fs.readFileSync(absPath, 'utf8') } catch {}
     const loc = content ? content.split('\n').length : 0
-    const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage, dbModels } = parseFile(absPath, content, ext)
+    const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage, dbModels, confidence } = parseFile(absPath, content, ext)
     // Augment with file-system server routes (Next.js / Nuxt 3 /
     // SvelteKit). Conservative: append-only.
     let finalRoutes = routes || []
@@ -457,6 +457,7 @@ export class Scanner extends EventEmitter {
       dynamicPatterns:  dynamicPatterns  || [],
       envUsage:         envUsage         || [],
       dbModels:         dbModels         || [],
+      confidence:       confidence       || 'high',
       pkg,
       lastSeenAt:       Date.now(),
     }

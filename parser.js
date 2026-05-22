@@ -107,6 +107,7 @@ export function parseFile(absPath, content, ext) {
     r.dynamicPatterns = detectDynamicPatterns(content, ext)
     r.envUsage = extractEnvUsage(content, ext)
     r.dbModels = extractDbModels(content, ext)
+    r.confidence = confidenceFor(r.dynamicPatterns, content, ext)
     return r
   } catch {
     const g = parseGeneric(content)
@@ -114,8 +115,43 @@ export function parseFile(absPath, content, ext) {
     g.dynamicPatterns = detectDynamicPatterns(content, ext)
     g.envUsage = extractEnvUsage(content, ext)
     g.dbModels = extractDbModels(content, ext)
+    g.confidence = confidenceFor(g.dynamicPatterns, content, ext)
     return g
   }
+}
+
+// Graph completeness signal per file. Three buckets so the AI can
+// decide how much to trust the import graph for this file:
+//   - high   : pure static imports, no dynamic patterns
+//   - medium : dynamic patterns present but bounded
+//              (require(expr) / import(expr) / template literal)
+//   - low    : reflection / eval / Function-constructor / DI markers —
+//              the graph likely misses real edges from this file
+//
+// DI markers (NestJS/Angular decorators, tsyringe inject) are also
+// strong "graph incomplete" signals because DI resolves dependencies
+// at runtime via metadata.
+function confidenceFor(dynamicPatterns, content, ext) {
+  const patterns = dynamicPatterns || []
+  // 1. Hard "low" signals from dynamic patterns
+  const HARD = new Set(['eval', 'new Function', 'Reflect', 'exec'])
+  if (patterns.some((p) => HARD.has(p))) return 'low'
+  // 2. DI framework hints (low even with zero dynamic patterns) — JS/TS only
+  const jsLike = ['js','jsx','mjs','cjs','ts','tsx','vue','svelte','astro'].includes(ext)
+  if (jsLike && content) {
+    // NestJS / Angular decorators: @Injectable / @Component (with parens)
+    // also React's bare @Component but those are typed-decorators of classes.
+    if (/@\s*(?:Injectable|Module|Controller)\s*\(/.test(content)) return 'low'
+    if (/@\s*Component\s*\(/.test(content) &&
+        /(?:^|\s)import[^;]*(?:@angular|@nestjs)\b/.test(content)) return 'low'
+    // tsyringe / typed-inject: `inject<T>('TOKEN')` or `container.resolve(...)`
+    if (/\b(?:container|resolver)\.(?:resolve|inject)\s*\(/.test(content)) return 'low'
+    if (/\binject\s*<[^>]+>\s*\(/.test(content)) return 'low'
+  }
+  // 3. Other dynamic patterns → medium
+  if (patterns.length > 0) return 'medium'
+  // 4. Pure static → high
+  return 'high'
 }
 
 // Detect patterns where modules/files are loaded dynamically — these

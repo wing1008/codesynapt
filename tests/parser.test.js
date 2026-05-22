@@ -198,6 +198,43 @@ describe('parseFile — apiCalls', () => {
   })
 })
 
+describe('parseFile — confidence (P2·3)', () => {
+  it('pure static imports → high', () => {
+    const r = parseFile('x.ts', `import foo from './foo'\nconst a = 1`, 'ts')
+    expect(r.confidence).toBe('high')
+  })
+
+  it('dynamic require/import → medium', () => {
+    const r = parseFile('x.ts', `const m = require(name)\nimport(path)`, 'ts')
+    expect(r.confidence).toBe('medium')
+  })
+
+  it('eval / new Function → low', () => {
+    const r = parseFile('x.js', `eval('alert(1)')`, 'js')
+    expect(r.confidence).toBe('low')
+  })
+
+  it('Reflect.* → low', () => {
+    const r = parseFile('x.ts', `Reflect.apply(fn, null, [])`, 'ts')
+    expect(r.confidence).toBe('low')
+  })
+
+  it('NestJS @Injectable decorator → low', () => {
+    const r = parseFile('x.ts', `@Injectable() export class Foo { constructor(private bar: Bar) {} }`, 'ts')
+    expect(r.confidence).toBe('low')
+  })
+
+  it('tsyringe container.resolve → low', () => {
+    const r = parseFile('x.ts', `const svc = container.resolve(MyService)`, 'ts')
+    expect(r.confidence).toBe('low')
+  })
+
+  it('Python exec/eval → low', () => {
+    const r = parseFile('x.py', `exec('print(1)')`, 'py')
+    expect(r.confidence).toBe('low')
+  })
+})
+
 describe('resolveImport', () => {
   it('resolves Python dotted module to file', () => {
     const ids = new Set(['utils.py', 'data/loader.py'])
