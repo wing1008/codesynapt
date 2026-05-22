@@ -668,7 +668,7 @@ ipcMain.handle('rename-project', (_e, payload) => {
 // Exposes read-only graph queries and UI control actions on
 // http://127.0.0.1:PORT (default 7707). Local-only. Port and
 // enable/disable are configurable via env vars and persistent settings.
-const CONTROL_DEFAULT_PORT = parseInt(process.env.FG3D_PORT || '7707', 10)
+const CONTROL_DEFAULT_PORT = parseInt(process.env.CS_PORT || process.env.FG3D_PORT || '7707', 10)
 let controlServer = null
 let controlPort = CONTROL_DEFAULT_PORT
 

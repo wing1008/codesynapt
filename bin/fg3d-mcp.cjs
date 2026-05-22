@@ -8,7 +8,7 @@
 const http = require('http')
 const readline = require('readline')
 
-const PORT = parseInt(process.env.FG3D_PORT || '7707', 10)
+const PORT = parseInt(process.env.CS_PORT || process.env.FG3D_PORT || '7707', 10)
 const HOST = '127.0.0.1'
 
 function apiReq(method, pathStr, query, body) {
@@ -61,7 +61,7 @@ function bad(msg) { throw new Error(msg) }
 
 const TOOLS = [
   {
-    name: 'fg3d_summary',
+    name: 'cs_summary',
     description:
       'Project structure overview. Call this FIRST when working on a new repo to know what you\'re dealing with.\n' +
       'actions:\n' +
@@ -93,7 +93,7 @@ const TOOLS = [
   },
 
   {
-    name: 'fg3d_query',
+    name: 'cs_query',
     description:
       'Code exploration — look up files, dependencies, content.\n' +
       'actions:\n' +
@@ -134,7 +134,7 @@ const TOOLS = [
   },
 
   {
-    name: 'fg3d_blast',
+    name: 'cs_blast',
     description:
       'Impact analysis before editing — answers "is it safe to change this file?".\n' +
       'actions:\n' +
@@ -169,7 +169,7 @@ const TOOLS = [
   },
 
   {
-    name: 'fg3d_intent',
+    name: 'cs_intent',
     description:
       'Mapping from human intent ("payment feature", "/billing URL", "User model") to source files.\n' +
       'actions:\n' +
@@ -202,7 +202,7 @@ const TOOLS = [
   },
 
   {
-    name: 'fg3d_health',
+    name: 'cs_health',
     description:
       'Project health checks + next-step recommendations. Use before deploys or when "what should I work on next?".\n' +
       'actions:\n' +
@@ -234,7 +234,7 @@ const TOOLS = [
   },
 
   {
-    name: 'fg3d_change',
+    name: 'cs_change',
     description:
       'File modifications + history. All writes are auto-snapshotted (if history enabled) and pulse green in the 3D view.\n' +
       'actions:\n' +
@@ -279,7 +279,7 @@ const TOOLS = [
   },
 
   {
-    name: 'fg3d_trace',
+    name: 'cs_trace',
     description:
       'AI session traces + project history — review what an AI did, navigate the codebase chronologically.\n' +
       'actions:\n' +
@@ -324,7 +324,7 @@ const TOOLS = [
   },
 
   {
-    name: 'fg3d_ui',
+    name: 'cs_ui',
     description:
       'Desktop app UI control — focus the camera on a node, or open the inspector. Desktop-only side effect.\n' +
       'actions:\n' +

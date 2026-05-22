@@ -5,7 +5,7 @@
 
 const http = require('http')
 
-const PORT = parseInt(process.env.FG3D_PORT || '7707', 10)
+const PORT = parseInt(process.env.CS_PORT || process.env.FG3D_PORT || '7707', 10)
 const HOST = '127.0.0.1'
 
 function req(method, pathStr, query, body) {
@@ -254,7 +254,7 @@ async function runHeadlessScan(args) {
 // ── Headless: long-running Scanner + HTTP server ─────────────
 async function runHeadlessServe(args) {
   let target = null
-  let port = parseInt(process.env.FG3D_PORT || '7707', 10)
+  let port = parseInt(process.env.CS_PORT || process.env.FG3D_PORT || '7707', 10)
   for (let i = 0; i < args.length; i++) {
     const a = args[i]
     if (a === '--port' && args[i+1]) port = parseInt(args[++i], 10)
