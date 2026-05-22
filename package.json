@@ -1,16 +1,16 @@
 {
-  "name": "codesynapse",
-  "version": "0.13.0",
+  "name": "codesynapt",
+  "version": "0.14.0",
   "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
   "license": "BUSL-1.1",
   "author": "",
-  "homepage": "https://github.com/wing1008/codesynapse#readme",
+  "homepage": "https://github.com/wing1008/codesynapt#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wing1008/codesynapse.git"
+    "url": "git+https://github.com/wing1008/codesynapt.git"
   },
   "bugs": {
-    "url": "https://github.com/wing1008/codesynapse/issues"
+    "url": "https://github.com/wing1008/codesynapt/issues"
   },
   "keywords": [
     "code-visualization",
@@ -26,10 +26,10 @@
   "type": "module",
   "main": "electron/main.cjs",
   "bin": {
-    "codesynapse-server": "./server.js",
-    "codesynapse": "./bin/fg3d.cjs",
+    "codesynapt-server": "./server.js",
+    "codesynapt": "./bin/fg3d.cjs",
     "cs": "./bin/fg3d.cjs",
-    "codesynapse-mcp": "./bin/fg3d-mcp.cjs"
+    "codesynapt-mcp": "./bin/fg3d-mcp.cjs"
   },
   "scripts": {
     "postinstall": "node scripts/copy-vendor.js",

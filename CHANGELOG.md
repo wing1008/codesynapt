@@ -1,6 +1,28 @@
 # Changelog
 
-All notable changes to CodeSynapse (formerly `filegraph3d`).
+All notable changes to CodeSynapt (formerly `CodeSynapse`, originally `filegraph3d`).
+
+## 0.14.0 — 2026-05-22 (Re-rebrand: CodeSynapse → CodeSynapt, npm collision fix)
+
+### Why
+Discovered `codesynapse@1.1.1` already on npm (christianjohnson, MIT) —
+a real-time codebase visualization tool with 3D graph, very similar
+concept. Three months old, 7 versions. Publishing under the same name
+would have caused search collisions and made us look like a fork.
+
+Renamed to **CodeSynapt** — same neural-network metaphor, distinct
+identifier. npm + GitHub + Google search all clean.
+
+### Renamed — BREAKING
+
+- **Package name**: `codesynapse` → `codesynapt`
+- **GitHub repo**: `wing1008/codesynapse` → `wing1008/codesynapt` (old URL auto-redirects)
+- **CLI bin**: `codesynapse` → `codesynapt` (the `cs` alias unchanged)
+- **MCP server bin**: `codesynapse-mcp` → `codesynapt-mcp`
+- **MCP tool prefix** (`cs_*`) — unchanged ("cs" = Code Synapt, same as Code Synapse)
+- **Env var** (`CS_PORT`) — unchanged
+
+Re-register: `claude mcp add codesynapt node /abs/path/bin/fg3d-mcp.cjs`
 
 ## 0.13.0 — 2026-05-22 (Rebrand → CodeSynapse)
 
@@ -19,9 +41,10 @@ All notable changes to CodeSynapse (formerly `filegraph3d`).
 ### Why
 - `filegraph3d` was a literal description (file + graph + 3D), hard to pronounce, not unique in search.
 - `CodeSynapse` evokes neural connections = code dependencies, AI-friendly, brandable.
+- _(See 0.14.0 above — turned out npm `codesynapse` was already taken.)_
 
 ### Notes
-- File names `bin/fg3d.cjs` / `bin/fg3d-mcp.cjs` kept for this release to minimise diff churn — will rename to `bin/codesynapse*.cjs` in a follow-up.
+- File names `bin/fg3d.cjs` / `bin/fg3d-mcp.cjs` kept for this release to minimise diff churn.
 - `FG3D_PORT` env var still works; `CS_PORT` added with the same meaning.
 
 ## 0.12.0 — 2026-05-22 (포지셔닝 + 통합)

@@ -1,8 +1,8 @@
-# CodeSynapse
+# CodeSynapt
 
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](./LICENSE)
 [![Plugin API: MIT](https://img.shields.io/badge/Plugin%20API-MIT-green.svg)](./plugin-api/LICENSE)
-[![Version](https://img.shields.io/github/package-json/v/wing1008/codesynapse?label=version&color=informational)](./CHANGELOG.md)
+[![Version](https://img.shields.io/github/package-json/v/wing1008/codesynapt?label=version&color=informational)](./CHANGELOG.md)
 [![Node ≥20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](./package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](./docs/installation.md)
 
@@ -20,7 +20,7 @@ They have no project-wide map: which files matter, what imports what,
 which routes match which fetch calls, what external services the code
 talks to, which "v2" file is the real one vs. abandoned drafts.
 
-`codesynapse` builds that map and exposes it three ways:
+`codesynapt` builds that map and exposes it three ways:
 
 | Surface | For | Example |
 |---|---|---|
@@ -42,14 +42,14 @@ All three share the same scanner: imports across JS/TS/Vue/Svelte/Python/Go/Rust
 - **Auto-history per file** (opt-in) — every save snapshots previous content (cap 3). Roll back via `cs_change({action:'restore'})`.
 - **External URL inventory** — `cs_intent({action:'external'})` lists every API host the project calls (Stripe, OpenAI, your own backend…), grouped by domain.
 - **Env / secret leak detection** — `cs_health({action:'secrets'})` flags server-only env vars accidentally used in client bundles.
-- **Offline by design** — no network calls, no telemetry, no cloud sync. The whole graph lives in memory + your local `.codesynapse/` directory.
+- **Offline by design** — no network calls, no telemetry, no cloud sync. The whole graph lives in memory + your local `.codesynapt/` directory.
 - **i18n** — Korean ↔ English toggle, persists.
 
 ## Quick start
 
 ```sh
-git clone https://github.com/wing1008/codesynapse.git
-cd codesynapse && npm install
+git clone https://github.com/wing1008/codesynapt.git
+cd codesynapt && npm install
 npm start          # desktop app + HTTP control API on :7707
 ```
 
@@ -92,7 +92,7 @@ list including history, restore, refresh, tour, timeline, trace.
 Make `fg3d` globally available:
 
 ```sh
-npm link        # adds fg3d / fg3d-mcp / codesynapse-server to PATH
+npm link        # adds fg3d / fg3d-mcp / codesynapt-server to PATH
 ```
 
 ## Hook up your AI agent
@@ -100,7 +100,7 @@ npm link        # adds fg3d / fg3d-mcp / codesynapse-server to PATH
 ### Claude Code (one-time)
 
 ```sh
-claude mcp add codesynapse node /absolute/path/to/codesynapse/bin/fg3d-mcp.cjs
+claude mcp add codesynapt node /absolute/path/to/codesynapt/bin/fg3d-mcp.cjs
 ```
 
 That registers 8 intent-shaped MCP tools (all `cs_*`). In any
@@ -159,7 +159,7 @@ accidentally used in client bundles.
 candidates across 4 categories (orphan / path / filename / duplicate),
 so you know which version is the real one before deleting.
 
-**5. Full-stack route tracing.** codesynapse matches `fetch('/api/x')`
+**5. Full-stack route tracing.** codesynapt matches `fetch('/api/x')`
 client calls to `app.get('/api/x', …)` server routes across JS/TS and
 Python (Express, Fastify, Koa, Hono, Flask, FastAPI) — plus Next.js
 file-system API routes (`app/api/*/route.ts`, `pages/api/*`)
@@ -177,7 +177,7 @@ looks broken". `cs_intent({action:'url', path:'/billing'})` →
 `src/app/(dashboard)/billing/page.tsx` (Next.js route groups + dynamic
 segments handled).
 
-**8. Onboarding a new project.** Open it in codesynapse, hit the 🧭
+**8. Onboarding a new project.** Open it in codesynapt, hit the 🧭
 **Tour** button. The camera flies through entry points, top hubs, and
 external API integration spots. Or ask Claude: "give me the guided
 tour" → `cs_trace({action:'tour'})`.
@@ -204,7 +204,7 @@ Built on Electron + Three.js. Scales to 100k+ files. Features:
 - **Live AI agent visualization** — pulse + ripple + cyan-to-magenta navigation trail when MCP calls hit the graph
 - **Idle auto-rotate camera** + scene heartbeat for the "alive" feel; instantly stops on user input
 - **Inspector** with full-file editor + auto-save + connection badge + history panel + diff view
-- **Auto file history** — opt-in, max 3 versions per file under `.codesynapse/history/`
+- **Auto file history** — opt-in, max 3 versions per file under `.codesynapt/history/`
 - **Changes panel** (📝) — every file the session has modified, with one-click line-diff
 - **Onboarding tour** (🧭) — auto-generated walkthrough of entry points + hubs + API integration
 - **Time-lapse** (⏱) — slider replays git history; files appear at their first commit
@@ -231,11 +231,11 @@ For OS-specific installation notes, see **[docs/installation.md](./docs/installa
 | Getting help or asking questions | [.github/SUPPORT.md](./.github/SUPPORT.md) |
 | Contributing code | [CONTRIBUTING.md](./CONTRIBUTING.md) |
 | Community guidelines | [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) |
-| AI coding agent guide (working ON codesynapse) | [AGENTS.md](./AGENTS.md) |
+| AI coding agent guide (working ON codesynapt) | [AGENTS.md](./AGENTS.md) |
 
 ## License
 
-codesynapse uses **dual licensing**:
+codesynapt uses **dual licensing**:
 
 - **Main app** ([LICENSE](./LICENSE)): [Business Source License 1.1](https://mariadb.com/bsl-faq-adopting/)
   - ✅ Free for personal, internal, academic, and research use
