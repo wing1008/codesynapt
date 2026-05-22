@@ -52,7 +52,9 @@
     "start": "electron .",
     "electron": "electron .",
     "server": "node server.js",
-    "test": "node test.js && node /tmp/test-scanner.mjs 2>/dev/null || true",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:smoke": "node test.js",
     "license-check": "node scripts/license-check.js",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
@@ -68,7 +70,8 @@
   },
   "devDependencies": {
     "electron": "^41.0.0",
-    "electron-builder": "^25.0.0"
+    "electron-builder": "^25.0.0",
+    "vitest": "^2.1.9"
   },
   "build": {
     "appId": "io.filegraph3d.app",
@@ -91,8 +94,20 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] },
-        { "target": "zip", "arch": ["x64", "arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
@@ -101,8 +116,18 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -112,9 +137,24 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] },
-        { "target": "tar.gz", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Development",
       "synopsis": "Real-time 3D code dependency visualizer",

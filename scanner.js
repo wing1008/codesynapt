@@ -225,6 +225,10 @@ export class Scanner extends EventEmitter {
       }
       return false
     })()
+    // Folders we'd normally ignore in scanning but want to walk INTO
+    // when looking for vendor candidates (the whole point of this scan).
+    const VENDOR_OK = new Set(['vendor', 'vendors', 'third_party', 'third-party',
+                                'external', 'externals', 'deps', 'submodules', 'tools'])
     const seen = new Set()
     const walk = (dir, depth, relParts) => {
       if (depth > 3) return    // shallow only — vendored libs usually at depth 1-2
@@ -232,7 +236,9 @@ export class Scanner extends EventEmitter {
       try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
       for (const e of entries) {
         if (!e.isDirectory()) continue
-        if (IGNORE_DIRS.has(e.name) || isIgnoredDir(e.name)) continue
+        // Skip hard-ignores (node_modules, .git, .venv*, etc.) but keep
+        // conventional vendor names — those are what we're looking for.
+        if (!VENDOR_OK.has(e.name) && (IGNORE_DIRS.has(e.name) || isIgnoredDir(e.name))) continue
         const full = path.join(dir, e.name)
         const rel  = [...relParts, e.name].join('/')
         if (seen.has(rel)) continue
