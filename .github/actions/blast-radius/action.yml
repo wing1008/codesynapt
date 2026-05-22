@@ -1,0 +1,125 @@
+name: 'fg3d blast radius'
+description: 'Post a Markdown PR comment summarising the dependency blast radius of every changed file. Optionally fail the build if a threshold is breached.'
+author: 'filegraph3d'
+branding:
+  icon: 'git-pull-request'
+  color: 'purple'
+
+inputs:
+  base:
+    description: 'Base ref to diff against (default: github.event.pull_request.base.sha)'
+    required: false
+    default: ''
+  head:
+    description: 'Head ref (default: github.event.pull_request.head.sha or HEAD)'
+    required: false
+    default: 'HEAD'
+  depth:
+    description: 'BFS depth for blast radius (default 3)'
+    required: false
+    default: '3'
+  max-blast:
+    description: 'Fail the build if the largest single-file blast exceeds this number (0 = no gate)'
+    required: false
+    default: '0'
+  max-changed:
+    description: 'Fail the build if changed-file count exceeds this (0 = no gate)'
+    required: false
+    default: '0'
+  comment:
+    description: 'Post a Markdown comment on the PR (true/false)'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'GITHUB_TOKEN with pull-requests:write permission (only needed if comment=true)'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  changed:
+    description: 'Number of tracked files changed'
+    value: ${{ steps.diff.outputs.changed }}
+  max-blast:
+    description: 'Largest single-file blast (dependents)'
+    value: ${{ steps.diff.outputs.max-blast }}
+  tests-touched:
+    description: 'Number of test files inside the blast set'
+    value: ${{ steps.diff.outputs.tests-touched }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve base ref
+      id: refs
+      shell: bash
+      run: |
+        base="${{ inputs.base }}"
+        head="${{ inputs.head }}"
+        if [ -z "$base" ]; then
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+        fi
+        if [ -z "$head" ] || [ "$head" = "HEAD" ]; then
+          if [ -n "${{ github.event.pull_request.head.sha }}" ]; then
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            head="HEAD"
+          fi
+        fi
+        echo "base=$base" >> $GITHUB_OUTPUT
+        echo "head=$head" >> $GITHUB_OUTPUT
+
+    - name: Install filegraph3d
+      shell: bash
+      run: |
+        if [ ! -d "${{ github.action_path }}/../../../node_modules" ]; then
+          cd "${{ github.action_path }}/../../.."
+          npm ci --omit=dev
+        fi
+
+    - name: Run ci-diff (Markdown)
+      id: diff
+      shell: bash
+      run: |
+        cd "$GITHUB_WORKSPACE"
+        # Ensure full history for the diff
+        git fetch --no-tags --prune --depth=10000 origin "${{ steps.refs.outputs.base }}" || true
+        FG3D="${{ github.action_path }}/../../../bin/fg3d.cjs"
+        node "$FG3D" ci-diff "${{ steps.refs.outputs.base }}..${{ steps.refs.outputs.head }}" --depth ${{ inputs.depth }} --format=github-comment > /tmp/fg3d-comment.md
+        # Also emit JSON for outputs
+        node "$FG3D" ci-diff "${{ steps.refs.outputs.base }}..${{ steps.refs.outputs.head }}" --depth ${{ inputs.depth }} --format=json > /tmp/fg3d-result.json
+        node -e "const r=require('/tmp/fg3d-result.json'); console.log('changed='+r.trackedCount); console.log('max-blast='+r.maxBlast); console.log('tests-touched='+r.totalTests)" >> $GITHUB_OUTPUT
+
+    - name: Post / update PR comment
+      if: ${{ inputs.comment == 'true' && github.event.pull_request.number }}
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs')
+          const body = fs.readFileSync('/tmp/fg3d-comment.md', 'utf8')
+          const marker = '<!-- fg3d-blast-radius -->'
+          const owner = context.repo.owner
+          const repo  = context.repo.repo
+          const issue_number = context.payload.pull_request.number
+          const comments = await github.rest.issues.listComments({ owner, repo, issue_number })
+          const existing = comments.data.find(c => c.body && c.body.includes(marker))
+          const finalBody = marker + '\n' + body
+          if (existing) {
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: finalBody })
+          } else {
+            await github.rest.issues.createComment({ owner, repo, issue_number, body: finalBody })
+          }
+
+    - name: Gate (--max-blast / --max-changed)
+      if: ${{ inputs.max-blast != '0' || inputs.max-changed != '0' }}
+      shell: bash
+      run: |
+        FG3D="${{ github.action_path }}/../../../bin/fg3d.cjs"
+        ARGS=("${{ steps.refs.outputs.base }}..${{ steps.refs.outputs.head }}")
+        [ "${{ inputs.max-blast }}" != "0" ]   && ARGS+=(--max-blast "${{ inputs.max-blast }}")
+        [ "${{ inputs.max-changed }}" != "0" ] && ARGS+=(--max-changed "${{ inputs.max-changed }}")
+        node "$FG3D" ci-gate "${ARGS[@]}"
