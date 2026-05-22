@@ -7,14 +7,32 @@ import { detectMonorepo, packageForFile } from './monorepo.js'
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg',
-  'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.vercel',
+  'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.vercel', '.svelte-kit',
   '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
-  'venv', '.venv', 'env',
+  'venv', '.venv', 'env', 'site-packages', '.tox',
   'target', '.cache', '.parcel-cache',
   '.idea', '.vscode', '.DS_Store',
   'coverage', '.nyc_output',
   '.filegraph3d',
+  // Editor/note vaults: Obsidian, etc. — third-party plugin/theme code
+  // would otherwise dominate hub/orphan/url stats.
+  '.obsidian', '.logseq', '.foam',
+  // Mobile / native deps
+  'Pods', 'DerivedData', '.gradle',
+  // Misc
+  'vendor',  // Go / PHP / Ruby vendored deps
 ])
+
+// Prefix-based ignore for variant names (e.g. `.venv-foo`, `venv-bar`).
+// Set lookup above is exact-match only, so `.venv-facefusion` wouldn't
+// match `.venv`. This catches the long tail.
+const IGNORE_DIR_PREFIXES = ['.venv', 'venv-', '.env-py']
+
+function isIgnoredDir(name) {
+  if (IGNORE_DIRS.has(name)) return true
+  for (const p of IGNORE_DIR_PREFIXES) if (name.startsWith(p)) return true
+  return false
+}
 
 // Parse a .gitignore file into a list of {pattern, negate} entries.
 // Implements a subset that covers the vast majority of real-world
@@ -181,7 +199,7 @@ export class Scanner extends EventEmitter {
       let entries
       try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
       for (const e of entries) {
-        if (IGNORE_DIRS.has(e.name)) continue
+        if (isIgnoredDir(e.name)) continue
         const full = path.join(dir, e.name)
         if (e.isDirectory()) walk(full, depth + 1)
         else if (e.isFile() && names.includes(e.name)) {
@@ -206,7 +224,7 @@ export class Scanner extends EventEmitter {
         const rel = path.relative(root, p)
         if (!rel) return false
         const segments = rel.split(path.sep)
-        if (segments.some((s) => IGNORE_DIRS.has(s))) return true
+        if (segments.some(isIgnoredDir)) return true
         // .gitignore matching uses '/'-joined relative path
         const relPosix = segments.join('/')
         const isDir = stats?.isDirectory() ?? false
