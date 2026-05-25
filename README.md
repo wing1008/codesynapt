@@ -1,10 +1,12 @@
 # CodeSynapt
 
+[![CI](https://img.shields.io/github/actions/workflow/status/wing1008/codesynapt/ci.yml?branch=main&label=ci)](https://github.com/wing1008/codesynapt/actions/workflows/ci.yml)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](./LICENSE)
 [![Plugin API: MIT](https://img.shields.io/badge/Plugin%20API-MIT-green.svg)](./plugin-api/LICENSE)
 [![Version](https://img.shields.io/github/package-json/v/wing1008/codesynapt?label=version&color=informational)](./CHANGELOG.md)
-[![Node ≥20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](./package.json)
+[![Node 20|22](https://img.shields.io/badge/Node-20%20%7C%2022-339933?logo=node.js&logoColor=white)](./package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](./docs/installation.md)
+[![Tests](https://img.shields.io/badge/tests-68%20passing-brightgreen)](./tests/)
 
 > **MCP-native code graph for AI agents — see blast radius live.**
 > The dependency map Claude Code / Cursor / any MCP agent should be

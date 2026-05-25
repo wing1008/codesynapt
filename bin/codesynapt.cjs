@@ -69,94 +69,94 @@ function die(msg) { process.stderr.write(`error: ${msg}\n`); process.exit(1) }
 const USAGE = `filegraph3d CLI — usage:
 
   ── Headless (no desktop app needed) ─────────────────────────
-  fg3d scan [path] [--json]   # one-shot scan, emit graph as JSON
-  fg3d scan [path] --summary  # cheap overview (file count, top hubs)
-  fg3d serve [path] [--port N]
+  cs scan [path] [--json]   # one-shot scan, emit graph as JSON
+  cs scan [path] --summary  # cheap overview (file count, top hubs)
+  cs serve [path] [--port N]
                               # standalone HTTP daemon on 127.0.0.1:N
                               #   serves /summary, /graph, /node/:id,
                               #   /blast/:id, /packages, etc.
                               #   no Electron window — pure CLI/MCP/CI use
-  fg3d ci-diff <base..head> [path] [--format=github-comment|json|plain] [--depth N]
+  cs ci-diff <base..head> [path] [--format=github-comment|json|plain] [--depth N]
                               # PR impact report: blast radius for every
                               #   file changed between two git refs.
                               #   Default --format=github-comment is
                               #   markdown ready to drop into a PR.
-  fg3d ci-gate <base..head> [path] [--max-blast N] [--max-changed N]
+  cs ci-gate <base..head> [path] [--max-blast N] [--max-changed N]
                               # PR gate for CI: fails (exit 1) if change
                               #   set exceeds thresholds.
                               #   --max-blast N    largest single-file blast
                               #   --max-changed N  total changed files
 
   ── Remote (needs the desktop app running at :7707) ──────────
-  fg3d health
-  fg3d summary                # cheap project overview (Layer 1)
-  fg3d refresh <id>           # force re-scan of one file (defeats staleness)
-  fg3d ls [--limit N] [--ext X] [--min-mass N] [--sort KEY:DIR]
+  cs health
+  cs summary                # cheap project overview (Layer 1)
+  cs refresh <id>           # force re-scan of one file (defeats staleness)
+  cs ls [--limit N] [--ext X] [--min-mass N] [--sort KEY:DIR]
                               #   sort = mass:desc (default) | size:desc | loc:desc
                               #          id:asc | insertion
-  fg3d show <id>              # node detail + imports + importedBy
-  fg3d read <id>              # file content
-  fg3d write <id> <path-or-->  # write file from local path or stdin (-)
-  fg3d edit <id> <find> <replace> [--all]
+  cs show <id>              # node detail + imports + importedBy
+  cs read <id>              # file content
+  cs write <id> <path-or-->  # write file from local path or stdin (-)
+  cs edit <id> <find> <replace> [--all]
                               # precise edit: find string is replaced with new string
                               #   --all → replace all occurrences (default: must be unique)
-  fg3d deps <id>              # outgoing edges (this -> X)
-  fg3d users <id>             # incoming edges (X -> this)
-  fg3d find <substring>       # search node ids
-  fg3d focus <id>             # move app camera to node
-  fg3d open <id>              # open inspector for node
-  fg3d history <id>           # list auto-history snapshots
-  fg3d restore <id> <ts>      # restore file to a history snapshot
-  fg3d external               # list external websites this project calls
-  fg3d packages               # list packages in a monorepo
-  fg3d package <name>         # package detail: files, cross-pkg edges, declared deps
-  fg3d package-graph          # package-to-package edges
-  fg3d legacy [--type T] [--min-conf N]
+  cs deps <id>              # outgoing edges (this -> X)
+  cs users <id>             # incoming edges (X -> this)
+  cs find <substring>       # search node ids
+  cs focus <id>             # move app camera to node
+  cs open <id>              # open inspector for node
+  cs history <id>           # list auto-history snapshots
+  cs restore <id> <ts>      # restore file to a history snapshot
+  cs external               # list external websites this project calls
+  cs packages               # list packages in a monorepo
+  cs package <name>         # package detail: files, cross-pkg edges, declared deps
+  cs package-graph          # package-to-package edges
+  cs legacy [--type T] [--min-conf N]
                               # cleanup audit: T = orphan|path|filename|duplicate
                               #   --min-conf 0.85 → only high-confidence candidates
-  fg3d trace [--limit N] [--tool T]
+  cs trace [--limit N] [--tool T]
                               # current session's AI/CLI/MCP trace events (chronological)
-  fg3d trace stats            # top files / tool breakdown / duration for current session
-  fg3d trace sessions         # past sessions in .filegraph3d/traces/
-  fg3d trace export <path>    # write current session to JSON
-  fg3d trace clear            # start a fresh session (old one preserved on disk)
-  fg3d blast <id> [n] [dir]   # impact of editing <id>: dependents within n hops
+  cs trace stats            # top files / tool breakdown / duration for current session
+  cs trace sessions         # past sessions in .filegraph3d/traces/
+  cs trace export <path>    # write current session to JSON
+  cs trace clear            # start a fresh session (old one preserved on disk)
+  cs blast <id> [n] [dir]   # impact of editing <id>: dependents within n hops
                               #   n   = BFS depth (default 3)
                               #   dir = users|deps (default users)
-  fg3d safety <id> [--deep] [--json]
+  cs safety <id> [--deep] [--json]
                               # 🟢/🟡/🔴 + 한 줄 권고. AI에게 시키기 전
                               #   "이 파일 건드려도 되나" 즉답.
                               #   --deep → 영향받는 파일 전체 리스트
-  fg3d bundle <id> [--budget N] [--depth N] [--json]
+  cs bundle <id> [--budget N] [--depth N] [--json]
                               # AI에게 "이 파일 수정해줘" 시킬 때 함께 줄
                               #   파일 묶음. token 예산(기본 8000) 안에서
                               #   가까운 의존 파일 우선 선택.
-  fg3d env [VAR] [--json]     # .env 변수 ↔ 사용처 매핑. VAR 지정 안 하면
+  cs env [VAR] [--json]     # .env 변수 ↔ 사용처 매핑. VAR 지정 안 하면
                               #   전체 + 미사용/미선언 상태 표시.
-  fg3d suggest [--top N] [--json]
+  cs suggest [--top N] [--json]
                               # "AI에게 다음에 시킬 작업" 자동 추천.
                               #   undeclared env, 테스트 없는 hub,
                               #   orphans, unused env, dynamic ratio 등.
-  fg3d feature <keyword> [--json]
+  cs feature <keyword> [--json]
                               # "결제" / "auth" 같은 키워드 → 관련 파일
                               #   frontend/backend/shared 분류.
                               #   path 매칭 + 라우트 매칭 + apiCall 매칭.
-  fg3d schema [Model] [--json]
+  cs schema [Model] [--json]
                               # DB 모델 추출 — Prisma / Drizzle /
                               #   SQLAlchemy. Model 지정시 필드 + 사용처.
-  fg3d bench [path]           # 응답시간 벤치마크 (scan + endpoint별 median/p95)
-  fg3d vendors [--json]       # third-party 폴더 자동 감지
+  cs bench [path]           # 응답시간 벤치마크 (scan + endpoint별 median/p95)
+  cs vendors [--json]       # third-party 폴더 자동 감지
                               #   (LICENSE/own manifest/.git/conventional name)
                               #   → .fg3dignore 권고
-  fg3d secrets [--json]       # frontend 코드에 server-only env 변수
+  cs secrets [--json]       # frontend 코드에 server-only env 변수
                               #   노출 탐지. public prefix 없는 변수가
                               #   브라우저 번들로 가면 키 유출.
-  fg3d url [PATH] [--json]    # frontend URL → 파일 매핑.
+  cs url [PATH] [--json]    # frontend URL → 파일 매핑.
                               #   Next app/pages, Astro, SvelteKit.
                               #   PATH 없으면 전체 등록 routes.
                               #   PATH 있으면 매칭 파일 (dynamic seg
                               #   처리).
-  fg3d context [--output FILE] [--max-routes N] [--max-models N] [--watch]
+  cs context [--output FILE] [--max-routes N] [--max-models N] [--watch]
                               # AI context file generator. Aggregates
                               #   summary + packages + url + schema + env +
                               #   external + legacy into a single Markdown
@@ -164,14 +164,14 @@ const USAGE = `filegraph3d CLI — usage:
                               #   Default stdout. --output writes to a file.
                               #   --watch: regen on every snapshot change
                               #   (5 s poll). Requires --output.
-  fg3d preflight [--strict] [--json]
+  cs preflight [--strict] [--json]
                               # 배포 전 종합 점검. env 미선언, http URL,
                               #   테스트 없는 hub, orphan ratio 등.
                               #   exit 1 if fail (--strict면 warn도 fail).
-  fg3d timeline               # git history → when each file first appeared
-  fg3d tour                   # suggested guided tour of the project
-  fg3d changes                # files modified this session
-  fg3d diff <id>              # show first-seen vs current diff for one file
+  cs timeline               # git history → when each file first appeared
+  cs tour                   # suggested guided tour of the project
+  cs changes                # files modified this session
+  cs diff <id>              # show first-seen vs current diff for one file
 
 Env: FG3D_PORT (default 7707)`
 
@@ -476,7 +476,7 @@ async function runCiAnalysis(args) {
 
 function fmtCiPlain(r) {
   const lines = []
-  lines.push(`fg3d ci-diff — ${r.range.base}${r.range.op}${r.range.head}`)
+  lines.push(`cs ci-diff — ${r.range.base}${r.range.op}${r.range.head}`)
   lines.push(`root: ${r.root}`)
   lines.push(`scan: ${r.snapshotFileCount} files, ${r.snapshotEdgeCount} edges`)
   lines.push(`changed: ${r.changedCount} (tracked ${r.trackedCount}, ext-untracked ${r.untrackedCount}, deleted ${r.deletedCount})`)
@@ -493,7 +493,7 @@ function fmtCiPlain(r) {
 
 function fmtCiMarkdown(r) {
   const lines = []
-  lines.push(`## 📦 fg3d impact — \`${r.range.base}${r.range.op}${r.range.head}\``)
+  lines.push(`## 📦 cs impact — \`${r.range.base}${r.range.op}${r.range.head}\``)
   lines.push('')
   lines.push(`Scanned ${r.snapshotFileCount} files / ${r.snapshotEdgeCount} edges. Changed ${r.changedCount} files (tracked ${r.trackedCount}, ext-untracked ${r.untrackedCount}, deleted ${r.deletedCount}).`)
   lines.push('')
@@ -556,7 +556,7 @@ async function runCiGate(args) {
     fails.push(`changed: ${r.trackedCount} tracked files changed (limit ${maxChanged})`)
   }
   // Always print a one-line summary, then thresholds
-  process.stderr.write(`fg3d ci-gate — ${r.range.base}${r.range.op}${r.range.head}\n`)
+  process.stderr.write(`cs ci-gate — ${r.range.base}${r.range.op}${r.range.head}\n`)
   process.stderr.write(`changed: ${r.trackedCount} tracked  ·  max blast (depth ${r.depth}): ${r.maxBlast}  ·  tests touched: ${r.totalTests}\n`)
   if (fails.length === 0) {
     process.stderr.write(`OK — all thresholds within limits.\n`)
@@ -610,7 +610,7 @@ async function main() {
         printJson(r.json); break
       }
       case 'refresh': {
-        if (!args[0]) return die('usage: fg3d refresh <id>')
+        if (!args[0]) return die('usage: cs refresh <id>')
         const r = await req('POST', '/refresh/' + encId(args[0]))
         if (r.status !== 200) return die(r.json?.error || 'failed')
         printJson(r.json); break
@@ -633,46 +633,46 @@ async function main() {
         break
       }
       case 'show': {
-        if (!args[0]) return die('usage: fg3d show <id>')
+        if (!args[0]) return die('usage: cs show <id>')
         const r = await req('GET', '/node/' + encId(args[0]))
         if (r.status !== 200) return die(r.json?.error || 'not found')
         printJson(r.json); break
       }
       case 'read': {
-        if (!args[0]) return die('usage: fg3d read <id>')
+        if (!args[0]) return die('usage: cs read <id>')
         const r = await req('GET', '/file/' + encId(args[0]))
         if (r.status !== 200) return die(r.json?.error || 'failed')
         process.stdout.write(r.json.content); break
       }
       case 'deps': {
-        if (!args[0]) return die('usage: fg3d deps <id>')
+        if (!args[0]) return die('usage: cs deps <id>')
         const r = await req('GET', '/deps/' + encId(args[0]))
         for (const e of r.json) process.stdout.write(`${e.k}\t${e.t}\n`); break
       }
       case 'users': {
-        if (!args[0]) return die('usage: fg3d users <id>')
+        if (!args[0]) return die('usage: cs users <id>')
         const r = await req('GET', '/users/' + encId(args[0]))
         for (const e of r.json) process.stdout.write(`${e.k}\t${e.s}\n`); break
       }
       case 'find': {
-        if (!args[0]) return die('usage: fg3d find <substring>')
+        if (!args[0]) return die('usage: cs find <substring>')
         const r = await req('GET', '/find', { q: args[0] })
         for (const id of r.json) process.stdout.write(id + '\n'); break
       }
       case 'focus': {
-        if (!args[0]) return die('usage: fg3d focus <id>')
+        if (!args[0]) return die('usage: cs focus <id>')
         const r = await req('POST', '/focus/' + encId(args[0]))
         if (r.status !== 200) return die(r.json?.error || 'failed')
         process.stdout.write('focused: ' + args[0] + '\n'); break
       }
       case 'open': {
-        if (!args[0]) return die('usage: fg3d open <id>')
+        if (!args[0]) return die('usage: cs open <id>')
         const r = await req('POST', '/open/' + encId(args[0]))
         if (r.status !== 200) return die(r.json?.error || 'failed')
         process.stdout.write('opened: ' + args[0] + '\n'); break
       }
       case 'history': {
-        if (!args[0]) return die('usage: fg3d history <id>')
+        if (!args[0]) return die('usage: cs history <id>')
         const r = await req('GET', '/history/' + encId(args[0]))
         for (const v of r.json) {
           const d = new Date(v.ts).toISOString()
@@ -681,13 +681,13 @@ async function main() {
         break
       }
       case 'restore': {
-        if (!args[0] || !args[1]) return die('usage: fg3d restore <id> <ts>')
+        if (!args[0] || !args[1]) return die('usage: cs restore <id> <ts>')
         const r = await req('POST', '/restore/' + encId(args[0]), { ts: args[1] })
         if (r.status !== 200) return die(r.json?.error || 'failed')
         process.stdout.write('restored\n'); break
       }
       case 'blast': {
-        if (!args[0]) return die('usage: fg3d blast <id> [depth] [dir]')
+        if (!args[0]) return die('usage: cs blast <id> [depth] [dir]')
         const depth = args[1] && /^\d+$/.test(args[1]) ? args[1] : '3'
         const dir = args[2] === 'deps' ? 'deps' : 'users'
         const r = await req('GET', '/blast/' + encId(args[0]), { depth, dir })
@@ -707,7 +707,7 @@ async function main() {
         break
       }
       case 'safety': {
-        if (!args[0]) return die('usage: fg3d safety <id> [--deep] [--json] [--locale ko|en]')
+        if (!args[0]) return die('usage: cs safety <id> [--deep] [--json] [--locale ko|en]')
         const id = args[0]
         const deep = args.includes('--deep') ? '1' : null
         const asJson = args.includes('--json')
@@ -731,7 +731,7 @@ async function main() {
         break
       }
       case 'bundle': {
-        if (!args[0]) return die('usage: fg3d bundle <id> [--budget N] [--depth N] [--json]')
+        if (!args[0]) return die('usage: cs bundle <id> [--budget N] [--depth N] [--json]')
         const id = args[0]
         let budget = '8000', depth = '3'
         for (let i = 1; i < args.length; i++) {
@@ -866,7 +866,7 @@ async function main() {
         if (asJson) { printJson(j); break }
         if (p) {
           process.stdout.write(`🔍 "${j.query}" 매칭 — ${j.count}개\n\n`)
-          if (j.count === 0) process.stdout.write(`  매칭 없음. fg3d url (인자 없이)로 등록된 route 확인.\n`)
+          if (j.count === 0) process.stdout.write(`  매칭 없음. cs url (인자 없이)로 등록된 route 확인.\n`)
           for (const m of j.matches) {
             const dyn = m.dynamicCount ? ` [dynamic ${m.dynamicCount}]` : ''
             process.stdout.write(`  · [${m.kind.padEnd(10)}] ${m.url}  →  ${m.id}${dyn}\n`)
@@ -1036,7 +1036,7 @@ async function main() {
         lines.push(`## How to use this file`)
         lines.push(`- Drop into project root as \`CLAUDE.md\`, \`AGENTS.md\`, \`.cursor/rules\`, or similar — the AI reads it on each turn.`)
         lines.push(`- For live data (changes since this snapshot), prefer the MCP tools: \`fg3d_summary\`, \`fg3d_query\`, \`fg3d_blast\`, \`fg3d_intent\`, \`fg3d_health\`, \`fg3d_change\`, \`fg3d_trace\`, \`fg3d_ui\`.`)
-        lines.push(`- Regenerate with \`fg3d context --output CLAUDE.md\`.`)
+        lines.push(`- Regenerate with \`cs context --output CLAUDE.md\`.`)
         lines.push(``)
 
         const md = lines.join('\n')
@@ -1105,7 +1105,7 @@ async function main() {
         break
       }
       case 'feature': {
-        if (!args[0]) return die('usage: fg3d feature <keyword> [--json]')
+        if (!args[0]) return die('usage: cs feature <keyword> [--json]')
         const kw = args[0]
         const asJson = args.includes('--json')
         const r = await req('GET', '/feature/' + encodeURIComponent(kw))
@@ -1127,7 +1127,7 @@ async function main() {
         sec('Frontend', j.frontend)
         sec('Backend',  j.backend)
         sec('Shared',   j.shared)
-        if (j.total === 0) process.stdout.write(`   매칭 없음. 다른 키워드로 시도하거나 fg3d find 사용.\n`)
+        if (j.total === 0) process.stdout.write(`   매칭 없음. 다른 키워드로 시도하거나 cs find 사용.\n`)
         break
       }
       case 'suggest': {
@@ -1199,7 +1199,7 @@ async function main() {
         break
       }
       case 'diff': {
-        if (!args[0]) return die('usage: fg3d diff <id>')
+        if (!args[0]) return die('usage: cs diff <id>')
         const r = await req('GET', '/changes/' + encId(args[0]))
         if (r.status !== 200) return die(r.json?.error || 'failed')
         const j = r.json
@@ -1272,7 +1272,7 @@ async function main() {
         break
       }
       case 'package': {
-        if (!args[0]) return die('usage: fg3d package <name>')
+        if (!args[0]) return die('usage: cs package <name>')
         const r = await req('GET', '/package/' + encodeURIComponent(args[0]))
         if (r.status !== 200) return die(r.json?.error || 'not found')
         const j = r.json
@@ -1310,7 +1310,7 @@ async function main() {
         break
       }
       case 'write': {
-        if (!args[0] || !args[1]) return die('usage: fg3d write <id> <path-or-->\n  use "-" to read content from stdin')
+        if (!args[0] || !args[1]) return die('usage: cs write <id> <path-or-->\n  use "-" to read content from stdin')
         const srcPath = args[1]
         let content
         if (srcPath === '-') {
@@ -1332,7 +1332,7 @@ async function main() {
       }
       case 'edit': {
         if (!args[0] || args[1] === undefined || args[2] === undefined) {
-          return die('usage: fg3d edit <id> <find> <replace> [--all]')
+          return die('usage: cs edit <id> <find> <replace> [--all]')
         }
         const all = args.includes('--all')
         const body = { find: args[1], replace: args[2], replaceAll: all }
@@ -1378,7 +1378,7 @@ async function main() {
           break
         }
         if (sub === 'export') {
-          if (!args[1]) return die('usage: fg3d trace export <path>')
+          if (!args[1]) return die('usage: cs trace export <path>')
           const r = await req('POST', '/trace/export', { path: args[1] })
           if (r.status !== 200) return die(r.json?.error || 'failed')
           process.stdout.write(`exported ${r.json.eventCount} events → ${r.json.path}\n`)

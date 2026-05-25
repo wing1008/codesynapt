@@ -611,7 +611,7 @@ ipcMain.handle('trace:export',     async (_e, exportPath) => {
   if (!exportPath) {
     const r = await dialog.showSaveDialog(mainWindow, {
       title: 'Export AI trace session',
-      defaultPath: `fg3d-trace-${traceSessionId}.json`,
+      defaultPath: `cs-trace-${traceSessionId}.json`,
       filters: [{ name: 'JSON', extensions: ['json'] }],
     })
     if (r.canceled || !r.filePath) return { canceled: true }
@@ -1001,7 +1001,7 @@ async function buildTimeline() {
 // Heuristic-only onboarding tour. Picks likely entry points (index/
 // main/app/server at the project root or under src/), then the top
 // hub files by incoming-import count. Each stop has a generated
-// human-readable hint. An MCP client can call fg3d_tour_plan to get
+// human-readable hint. An MCP client can call cs_trace({action:'tour'}) to get
 // the same script for narrating.
 function buildTour() {
   if (!scanner) return null
