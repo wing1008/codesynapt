@@ -80,7 +80,7 @@ const TOOLS = [
   {
     name: 'cs_summary',
     description:
-      '⭐ WHEN: ALWAYS call FIRST on a new session / new project. Only ~300 tokens.\n' +
+      'WHEN: once at the start of a new session on an unfamiliar project (skip if user is just chatting or working on a single small file). ~300 tokens.\n' +
       'Project structure overview.\n' +
       'actions:\n' +
       '  · project  — file count, edges, top hubs, top folders, ext mix, orphan count, confidence distribution (cheap, Layer 1)\n' +
@@ -154,11 +154,11 @@ const TOOLS = [
   {
     name: 'cs_blast',
     description:
-      '⭐ WHEN: BEFORE every file edit (any cs_change or your own Edit tool). MANDATORY safety check.\n' +
+      'WHEN: before NON-TRIVIAL file edits — refactors, function-signature changes, removed exports, multi-file work, hub files. SKIP for typos / comments / single-literal changes / docs.\n' +
       'Impact analysis — answers "is it safe to change this file?".\n' +
       'actions:\n' +
-      '  · safety — 🟢/🟡/🔴 verdict + reasons + one-line advice (call this first, every edit) (id, deep=true returns full file list)\n' +
-      '  · bundle — pack closest neighbours within token budget — call this when safety=🟡 or 🔴 to load the right context (id, budget=8000, depth=3)\n' +
+      '  · safety — 🟢/🟡/🔴 verdict + reasons + one-line advice (the usual first call). (id, deep=true returns full impacted list)\n' +
+      '  · bundle — pack closest neighbours within token budget — call when safety=🟡/🔴 to load the right context (id, budget=8000, depth=3)\n' +
       '  · radius — transitive dependents/dependencies via BFS, with token estimate (deeper analysis when needed) (id, depth=3, dir=users|deps)\n' +
       'RULE: 🔴 RISKY → STOP, surface to user, do not auto-edit. 🟡 CAUTION → call bundle first.',
     inputSchema: {
@@ -224,9 +224,9 @@ const TOOLS = [
   {
     name: 'cs_health',
     description:
-      '⭐ WHEN: \n' +
-      '  · preflight: BEFORE every commit / deploy suggestion\n' +
-      '  · suggest:   user says "what should I work on / fix next?" or you finish a task\n' +
+      'WHEN: \n' +
+      '  · preflight: before suggesting commit/deploy on a SIGNIFICANT change (skip for typo/doc-only)\n' +
+      '  · suggest:   user is open-ended ("what next?") or you finished a task and have spare attention\n' +
       '  · env / secrets / vendors / legacy: on-demand diagnosis\n' +
       'Project health checks + next-step recommendations.\n' +
       'actions:\n' +
@@ -263,9 +263,10 @@ const TOOLS = [
   {
     name: 'cs_change',
     description:
-      '⭐ WHEN: PREFER over your own Edit / Write tools whenever the user has CodeSynapt set up.\n' +
-      'Why: auto-snapshots, audit log, green pulse on the 3D node, AI trace overlay.\n' +
-      'PREREQ: call cs_blast({action:\'safety\'}) first; if 🔴 do not proceed.\n' +
+      'WHEN: editing a file ≥ 100 LOC, or a hub file, or anything cs_blast called caution/risky on.\n' +
+      'SKIP for: typos / comments / formatting / brand-new files you just created this session — your own Edit tool is fine there.\n' +
+      'Why prefer over own Edit when non-trivial: auto-snapshots, audit log, green pulse on the 3D node, AI trace overlay.\n' +
+      'PREREQ for non-trivial: call cs_blast({action:\'safety\'}) first; if 🔴 do not proceed.\n' +
       'File modifications + history.\n' +
       'actions:\n' +
       '  · write   — overwrite file entirely (id, content). For full rewrites or small files.\n' +
