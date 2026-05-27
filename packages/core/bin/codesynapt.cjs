@@ -156,9 +156,13 @@ const USAGE = `filegraph3d CLI — usage:
                               #   PATH 없으면 전체 등록 routes.
                               #   PATH 있으면 매칭 파일 (dynamic seg
                               #   처리).
-  cs init [path] [--agents]   # 상시 사용 모드 셋업: CLAUDE.md 또는
-                              #   AGENTS.md 생성 (AI 사용 규칙 포함) +
-                              #   claude mcp add 명령 안내 출력.
+  cs init [path] [--agents] [--no-slash-command]
+                              # 상시 사용 모드 셋업:
+                              #   - CLAUDE.md 또는 AGENTS.md 생성 (사용 규칙)
+                              #   - ~/.claude/commands/codesynapt.md 설치
+                              #     → 그 후 Claude Code 안에서 `/codesynapt`
+                              #       치면 cs_* 모드 진입
+                              #   - claude mcp add 명령 안내 출력
   cs context [--output FILE] [--max-routes N] [--max-models N] [--watch]
                               # AI context file generator. Aggregates
                               #   summary + packages + url + schema + env +
@@ -923,18 +927,22 @@ async function main() {
         // One-shot setup for "always-on mode":
         //   1. Generate CLAUDE.md (or AGENTS.md) in target project, with
         //      the AI agent usage rules section.
-        //   2. Print exact `claude mcp add` command for the user to copy.
-        //   3. Print exact `npm start` reminder + lock file location.
+        //   2. Install Claude Code slash command at ~/.claude/commands/codesynapt.md
+        //      so user can type `/codesynapt` to explicitly enter cs_* mode.
+        //   3. Print exact `claude mcp add` command for the user to copy.
         // Does NOT execute mcp add or npm start automatically — those have
         // user-specific side effects (auth, port choice) so we print
         // copy-paste commands instead.
         const fs = require('fs')
         const path = require('path')
+        const os = require('os')
         let target = null
         let outputName = 'CLAUDE.md'
+        let installSlash = true   // default: install Claude Code slash command
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--agents') outputName = 'AGENTS.md'
           else if (args[i] === '--output' && args[i+1]) outputName = args[++i]
+          else if (args[i] === '--no-slash-command') installSlash = false
           else if (!args[i].startsWith('--') && !target) target = args[i]
         }
         target = target || process.cwd()
@@ -955,21 +963,74 @@ async function main() {
         const outFile = path.join(abs, outputName)
         const r = spawnSync(process.execPath, [__filename, 'context', '--output', outFile], { stdio: 'inherit' })
         if (r.status !== 0) die('context generation failed')
+
+        // Install Claude Code slash command (user-level: ~/.claude/commands/)
+        let slashFile = null
+        if (installSlash) {
+          const slashDir = path.join(os.homedir(), '.claude', 'commands')
+          slashFile = path.join(slashDir, 'codesynapt.md')
+          try {
+            fs.mkdirSync(slashDir, { recursive: true })
+            const slashBody = [
+              '---',
+              'description: Enter CodeSynapt mode — use cs_* MCP tools actively for this session',
+              '---',
+              '',
+              "From this point on in the session, treat CodeSynapt as the primary code-intelligence backend. Before edits, queries, or 'what does this code do' style questions, prefer the cs_* MCP tools over reading raw files or running shell commands.",
+              '',
+              '**Mandatory next step**: call `cs_summary({action:\'project\'})` once now to load the project shape (~300 tokens).',
+              '',
+              '**For the rest of the session, follow these rules:**',
+              '',
+              '| When | Tool |',
+              '|---|---|',
+              '| About to edit a file ≥ 100 LOC, hub file, or refactor | `cs_blast({action:\'safety\', id})` first |',
+              '| Safety 🟡 or 🔴 | `cs_blast({action:\'bundle\', id, budget:8000})` to pack context |',
+              '| 🔴 RISKY verdict | STOP, surface to user, ask for confirmation |',
+              '| "Find the X feature / Y screen" | `cs_intent({action:\'feature\'|\'url\'|\'schema\'})` |',
+              '| Dependency questions ("who uses X?") | `cs_query({action:\'users\'|\'deps\', id})` |',
+              '| Editing non-trivial files | prefer `cs_change({action:\'edit\', id, find, replace})` over your own Edit tool (auto-snapshots + 3D pulse) |',
+              '| Before suggesting a significant commit/deploy | `cs_health({action:\'preflight\'})` |',
+              '| User asks "what next?" | `cs_health({action:\'suggest\', top:5})` |',
+              '| Korean user | add `locale: \'ko\'` to safety/preflight/suggest |',
+              '',
+              '**Skip cs_* for trivial work**: typos, comment-only changes, formatting, single-literal swaps, README/docs edits, brand-new files in this session, general conversation, or "explain X" questions.',
+              '',
+              "If the user later types `/clear` or starts a new session, this mode resets. To re-enter, call `/codesynapt` again.",
+            ].join('\n') + '\n'
+            // Preserve any user customisations: only overwrite if file is missing OR identical to our previous template.
+            if (!fs.existsSync(slashFile)) {
+              fs.writeFileSync(slashFile, slashBody, 'utf8')
+            }
+          } catch (e) {
+            slashFile = null
+            process.stderr.write(`⚠ could not write slash command: ${e.message}\n`)
+          }
+        }
+
         // Print setup checklist
         const selfMcp = path.resolve(__dirname, 'codesynapt-mcp.cjs')
         process.stdout.write(`\n✅ CodeSynapt always-on mode setup\n\n`)
         process.stdout.write(`  1. ${outputName} written to ${outFile}\n`)
         process.stdout.write(`     → contains AI agent usage rules + project snapshot.\n\n`)
-        process.stdout.write(`  2. Register the MCP server with your AI client (one-time):\n\n`)
+        if (slashFile && fs.existsSync(slashFile)) {
+          process.stdout.write(`  2. Claude Code slash command installed at ${slashFile}\n`)
+          process.stdout.write(`     → from now on, type \`/codesynapt\` inside a Claude Code session\n`)
+          process.stdout.write(`       to explicitly enter cs_* tool-preferring mode.\n\n`)
+        } else {
+          process.stdout.write(`  2. (Slash command skipped — pass --no-slash-command to opt out, or check permissions on ~/.claude/commands/)\n\n`)
+        }
+        process.stdout.write(`  3. Register the MCP server with your AI client (one-time):\n\n`)
         process.stdout.write(`     Claude Code:\n`)
         process.stdout.write(`       claude mcp add codesynapt node ${selfMcp}\n\n`)
         process.stdout.write(`     Cursor / Continue / others: see docs/mcp-setup.md\n\n`)
-        process.stdout.write(`  3. Keep the desktop app (or 'cs serve') running while you work.\n`)
+        process.stdout.write(`  4. Keep the desktop app (or 'cs serve') running while you work.\n`)
         process.stdout.write(`     Lock file: ~/.codesynapt/port — CLI/MCP auto-discovers it.\n\n`)
-        process.stdout.write(`  4. (Optional) Auto-refresh ${outputName} on every change:\n`)
+        process.stdout.write(`  5. (Optional) Auto-refresh ${outputName} on every change:\n`)
         process.stdout.write(`       cs context --output ${outFile} --watch\n\n`)
-        process.stdout.write(`From now on, your AI agent will automatically call cs_* tools\n`)
-        process.stdout.write(`at the right moments (see "AI agent usage rules" section in ${outputName}).\n`)
+        process.stdout.write(`Usage:\n`)
+        process.stdout.write(`  - Just chat normally → AI uses cs_* tools when warranted (non-trivial work).\n`)
+        process.stdout.write(`  - Type \`/codesynapt\` to explicitly force cs_*-first mode for the session.\n`)
         break
       }
       case 'context': {
