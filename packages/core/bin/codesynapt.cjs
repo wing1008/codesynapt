@@ -156,6 +156,9 @@ const USAGE = `filegraph3d CLI — usage:
                               #   PATH 없으면 전체 등록 routes.
                               #   PATH 있으면 매칭 파일 (dynamic seg
                               #   처리).
+  cs init [path] [--agents]   # 상시 사용 모드 셋업: CLAUDE.md 또는
+                              #   AGENTS.md 생성 (AI 사용 규칙 포함) +
+                              #   claude mcp add 명령 안내 출력.
   cs context [--output FILE] [--max-routes N] [--max-models N] [--watch]
                               # AI context file generator. Aggregates
                               #   summary + packages + url + schema + env +
@@ -916,6 +919,59 @@ async function main() {
         }
         break
       }
+      case 'init': {
+        // One-shot setup for "always-on mode":
+        //   1. Generate CLAUDE.md (or AGENTS.md) in target project, with
+        //      the AI agent usage rules section.
+        //   2. Print exact `claude mcp add` command for the user to copy.
+        //   3. Print exact `npm start` reminder + lock file location.
+        // Does NOT execute mcp add or npm start automatically — those have
+        // user-specific side effects (auth, port choice) so we print
+        // copy-paste commands instead.
+        const fs = require('fs')
+        const path = require('path')
+        let target = null
+        let outputName = 'CLAUDE.md'
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === '--agents') outputName = 'AGENTS.md'
+          else if (args[i] === '--output' && args[i+1]) outputName = args[++i]
+          else if (!args[i].startsWith('--') && !target) target = args[i]
+        }
+        target = target || process.cwd()
+        const abs = path.resolve(target)
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) die(`not a directory: ${abs}`)
+
+        // Generate context with rules (call /summary first to ensure server reachable)
+        const health = await req('GET', '/health').catch(() => null)
+        if (!health || health.status !== 200) {
+          process.stderr.write(`⚠ codesynapt server not reachable. Start it first:\n`)
+          process.stderr.write(`    cd ${process.cwd()} && npm start         (desktop)\n`)
+          process.stderr.write(`    OR\n`)
+          process.stderr.write(`    cs serve ${abs}                          (headless daemon)\n`)
+          process.exit(1)
+        }
+        // Re-invoke ourselves to generate CLAUDE.md
+        const { spawnSync } = require('child_process')
+        const outFile = path.join(abs, outputName)
+        const r = spawnSync(process.execPath, [__filename, 'context', '--output', outFile], { stdio: 'inherit' })
+        if (r.status !== 0) die('context generation failed')
+        // Print setup checklist
+        const selfMcp = path.resolve(__dirname, 'codesynapt-mcp.cjs')
+        process.stdout.write(`\n✅ CodeSynapt always-on mode setup\n\n`)
+        process.stdout.write(`  1. ${outputName} written to ${outFile}\n`)
+        process.stdout.write(`     → contains AI agent usage rules + project snapshot.\n\n`)
+        process.stdout.write(`  2. Register the MCP server with your AI client (one-time):\n\n`)
+        process.stdout.write(`     Claude Code:\n`)
+        process.stdout.write(`       claude mcp add codesynapt node ${selfMcp}\n\n`)
+        process.stdout.write(`     Cursor / Continue / others: see docs/mcp-setup.md\n\n`)
+        process.stdout.write(`  3. Keep the desktop app (or 'cs serve') running while you work.\n`)
+        process.stdout.write(`     Lock file: ~/.codesynapt/port — CLI/MCP auto-discovers it.\n\n`)
+        process.stdout.write(`  4. (Optional) Auto-refresh ${outputName} on every change:\n`)
+        process.stdout.write(`       cs context --output ${outFile} --watch\n\n`)
+        process.stdout.write(`From now on, your AI agent will automatically call cs_* tools\n`)
+        process.stdout.write(`at the right moments (see "AI agent usage rules" section in ${outputName}).\n`)
+        break
+      }
       case 'context': {
         // Aggregate snapshot for AI agents (CLAUDE.md / AGENTS.md style).
         let outputFile = null
@@ -1033,10 +1089,37 @@ async function main() {
 
         lines.push(`---`)
         lines.push(``)
+        lines.push(`## AI agent usage rules (CodeSynapt MCP — always-on mode)`)
+        lines.push(``)
+        lines.push(`If a CodeSynapt MCP server is registered (\`claude mcp add codesynapt ...\`),`)
+        lines.push(`**always** prefer its tools over reading raw files / running shell commands`)
+        lines.push(`for the situations below. The graph is live (~300 ms after a save) so the`)
+        lines.push(`answer is more accurate than your in-context guess.`)
+        lines.push(``)
+        lines.push(`| When the user says / you intend… | Call this tool FIRST |`)
+        lines.push(`|---|---|`)
+        lines.push(`| Starting work on a new project, or first message in a session | \`cs_summary({action:'project'})\` (cheap, 300 tokens) |`)
+        lines.push(`| "Refactor / edit / change \`X\`" (any file edit) | \`cs_blast({action:'safety', id:'X'})\` — verdict + reasons |`)
+        lines.push(`| Safety says 🟡 caution or 🔴 risky | \`cs_blast({action:'bundle', id:'X', budget:8000})\` — pack neighbours into context |`)
+        lines.push(`| "What files does this feature live in?" / "Find the … screen" | \`cs_intent({action:'feature', keyword:'…'})\` or \`cs_intent({action:'url', path:'/…'})\` |`)
+        lines.push(`| "Is X imported anywhere?" / dependency questions | \`cs_query({action:'users', id:'X'})\` |`)
+        lines.push(`| Before suggesting a commit / deploy | \`cs_health({action:'preflight'})\` — overall ok/warn/fail |`)
+        lines.push(`| User asks "what should I work on next?" | \`cs_health({action:'suggest', top:5})\` |`)
+        lines.push(`| Editing a file (instead of your own Edit tool) | \`cs_change({action:'edit', id, find, replace})\` — auto-snapshots + pulses the node in the desktop view |`)
+        lines.push(`| Korean user / 한국어 응답 원할 때 | add \`locale: 'ko'\` to safety / preflight / suggest |`)
+        lines.push(``)
+        lines.push(`### Hard rules`)
+        lines.push(``)
+        lines.push(`1. **🔴 RISKY** safety verdict → tell the user; do **not** auto-edit. Ask for confirmation.`)
+        lines.push(`2. **\`undeclared\` env var preflight** → do not deploy. Ask user to add to \`.env.example\` first.`)
+        lines.push(`3. **\`server-only env in frontend\`** → security issue, surface to user before continuing.`)
+        lines.push(`4. **\`confidence: 'low'\`** on a queried node → blast/bundle results may be incomplete (DI / eval). Disclose this.`)
+        lines.push(`5. **\`contentHash\` mismatch** when you re-read a file → call \`cs_change({action:'refresh', id})\` then retry.`)
+        lines.push(``)
         lines.push(`## How to use this file`)
-        lines.push(`- Drop into project root as \`CLAUDE.md\`, \`AGENTS.md\`, \`.cursor/rules\`, or similar — the AI reads it on each turn.`)
-        lines.push(`- For live data (changes since this snapshot), prefer the MCP tools: \`fg3d_summary\`, \`fg3d_query\`, \`fg3d_blast\`, \`fg3d_intent\`, \`fg3d_health\`, \`fg3d_change\`, \`fg3d_trace\`, \`fg3d_ui\`.`)
-        lines.push(`- Regenerate with \`cs context --output CLAUDE.md\`.`)
+        lines.push(`- Drop into project root as \`CLAUDE.md\`, \`AGENTS.md\`, or \`.cursor/rules\` — the AI reads it on each turn.`)
+        lines.push(`- Live data: prefer the MCP tools listed above.`)
+        lines.push(`- Regenerate: \`cs context --output CLAUDE.md\` (or \`--watch\` for auto-regen).`)
         lines.push(``)
 
         const md = lines.join('\n')

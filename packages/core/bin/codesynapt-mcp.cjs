@@ -80,9 +80,10 @@ const TOOLS = [
   {
     name: 'cs_summary',
     description:
-      'Project structure overview. Call this FIRST when working on a new repo to know what you\'re dealing with.\n' +
+      '⭐ WHEN: ALWAYS call FIRST on a new session / new project. Only ~300 tokens.\n' +
+      'Project structure overview.\n' +
       'actions:\n' +
-      '  · project  — file count, edges, top hubs, top folders, ext mix, orphan count (cheap, Layer 1)\n' +
+      '  · project  — file count, edges, top hubs, top folders, ext mix, orphan count, confidence distribution (cheap, Layer 1)\n' +
       '  · health   — is the desktop app running, current root, history flag\n' +
       '  · packages — monorepo packages with file counts and cross-package edges\n' +
       '  · package_graph — package-to-package edge list (visual overview)\n' +
@@ -153,12 +154,13 @@ const TOOLS = [
   {
     name: 'cs_blast',
     description:
-      'Impact analysis before editing — answers "is it safe to change this file?".\n' +
+      '⭐ WHEN: BEFORE every file edit (any cs_change or your own Edit tool). MANDATORY safety check.\n' +
+      'Impact analysis — answers "is it safe to change this file?".\n' +
       'actions:\n' +
-      '  · radius — transitive dependents/dependencies via BFS, with token estimate (id, depth=3, dir=users|deps)\n' +
-      '  · safety — 🟢/🟡/🔴 verdict + reasons + one-line advice (id, deep=true returns full file list)\n' +
-      '  · bundle — pack closest neighbours within token budget, ready to feed to the editor (id, budget=8000, depth=3)\n' +
-      'Call `safety` before any edit; `bundle` before reading neighbour context; `radius` for deeper analysis.',
+      '  · safety — 🟢/🟡/🔴 verdict + reasons + one-line advice (call this first, every edit) (id, deep=true returns full file list)\n' +
+      '  · bundle — pack closest neighbours within token budget — call this when safety=🟡 or 🔴 to load the right context (id, budget=8000, depth=3)\n' +
+      '  · radius — transitive dependents/dependencies via BFS, with token estimate (deeper analysis when needed) (id, depth=3, dir=users|deps)\n' +
+      'RULE: 🔴 RISKY → STOP, surface to user, do not auto-edit. 🟡 CAUTION → call bundle first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -222,12 +224,16 @@ const TOOLS = [
   {
     name: 'cs_health',
     description:
-      'Project health checks + next-step recommendations. Use before deploys or when "what should I work on next?".\n' +
+      '⭐ WHEN: \n' +
+      '  · preflight: BEFORE every commit / deploy suggestion\n' +
+      '  · suggest:   user says "what should I work on / fix next?" or you finish a task\n' +
+      '  · env / secrets / vendors / legacy: on-demand diagnosis\n' +
+      'Project health checks + next-step recommendations.\n' +
       'actions:\n' +
       '  · env       — env vars: declared vs used cross-reference (var optional — overview if omitted)\n' +
-      '  · secrets   — server-only env leaked into frontend bundles (security check)\n' +
-      '  · vendors   — third-party folder auto-detect (LICENSE / own manifest / nested .git / conventional name). Suggests .fg3dignore entries.\n' +
-      '  · preflight — comprehensive deploy-readiness (undeclared env / http URLs / hub tests / orphans / dynamic / leaks)\n' +
+      '  · secrets   — server-only env leaked into frontend bundles. RULE: fail at preflight, surface to user.\n' +
+      '  · vendors   — third-party folder auto-detect → suggests .fg3dignore entries.\n' +
+      '  · preflight — comprehensive deploy-readiness. RULE: do not suggest commit/deploy if overall=fail.\n' +
       '  · suggest   — rule-based "next thing to ask the AI to fix" (high/medium/low). Best opening move when stuck.\n' +
       '  · legacy    — orphan/path/filename/duplicate cleanup candidates with confidence scores (type optional)',
     inputSchema: {
@@ -257,7 +263,10 @@ const TOOLS = [
   {
     name: 'cs_change',
     description:
-      'File modifications + history. All writes are auto-snapshotted (if history enabled) and pulse green in the 3D view.\n' +
+      '⭐ WHEN: PREFER over your own Edit / Write tools whenever the user has CodeSynapt set up.\n' +
+      'Why: auto-snapshots, audit log, green pulse on the 3D node, AI trace overlay.\n' +
+      'PREREQ: call cs_blast({action:\'safety\'}) first; if 🔴 do not proceed.\n' +
+      'File modifications + history.\n' +
       'actions:\n' +
       '  · write   — overwrite file entirely (id, content). For full rewrites or small files.\n' +
       '  · edit    — precise find→replace (id, find, replace, replaceAll). Like Claude Code Edit tool.\n' +
