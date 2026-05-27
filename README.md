@@ -60,8 +60,8 @@ npm start                        # desktop app + HTTP control API on :7707
 
 ```sh
 npm install --omit=optional --omit=dev
-node bin/codesynapt.cjs scan .   # one-shot
-node bin/codesynapt.cjs serve .  # daemon
+node packages/core/bin/codesynapt.cjs scan .   # one-shot
+node packages/core/bin/codesynapt.cjs serve .  # daemon
 ```
 
 `three` (3D renderer) and `ws` are `optionalDependencies`; `electron` is a devDependency. CI runners can skip the 700 MB Electron download entirely.
@@ -69,34 +69,34 @@ node bin/codesynapt.cjs serve .  # daemon
 ### Headless — no desktop window needed (CI / SSH / Docker)
 
 ```sh
-node bin/codesynapt.cjs scan [path] --summary         # one-shot project overview
-node bin/codesynapt.cjs scan [path] --json            # full graph as JSON
-node bin/codesynapt.cjs serve [path] --port 7707      # long-running HTTP API daemon
-node bin/codesynapt.cjs ci-diff main..HEAD            # PR impact report (Markdown by default)
-node bin/codesynapt.cjs ci-gate main..HEAD --max-blast 50   # CI gate, exits 1 on breach
+node packages/core/bin/codesynapt.cjs scan [path] --summary         # one-shot project overview
+node packages/core/bin/codesynapt.cjs scan [path] --json            # full graph as JSON
+node packages/core/bin/codesynapt.cjs serve [path] --port 7707      # long-running HTTP API daemon
+node packages/core/bin/codesynapt.cjs ci-diff main..HEAD            # PR impact report (Markdown by default)
+node packages/core/bin/codesynapt.cjs ci-gate main..HEAD --max-blast 50   # CI gate, exits 1 on breach
 ```
 
 ### Connected — talks to a running desktop app or `serve` daemon at :7707
 
 ```sh
 # Most useful first:
-node bin/codesynapt.cjs summary                       # cheap project overview (Layer 1)
-node bin/codesynapt.cjs safety src/x.ts               # 🟢/🟡/🔴 + one-line advice
-node bin/codesynapt.cjs bundle src/x.ts --budget 8000 # pack neighbours into token budget
-node bin/codesynapt.cjs blast  src/x.ts 3             # transitive dependents + token estimate
-node bin/codesynapt.cjs suggest                       # "what to ask the AI next" recommendations
-node bin/codesynapt.cjs preflight                     # deploy-readiness check
-node bin/codesynapt.cjs env [VAR]                     # .env declared vs used
-node bin/codesynapt.cjs secrets                       # server-only env leaked to client?
-node bin/codesynapt.cjs feature payment               # keyword → FE/BE/shared cluster
-node bin/codesynapt.cjs url /billing                  # URL → file (Next.js/Astro/SvelteKit)
-node bin/codesynapt.cjs schema [Model]                # DB models (Prisma/Drizzle/SQLAlchemy)
-node bin/codesynapt.cjs external                      # external APIs/websites by domain
-node bin/codesynapt.cjs deps  src/x.ts                # what does x.ts import?
-node bin/codesynapt.cjs users src/x.ts                # who imports x.ts?
-node bin/codesynapt.cjs find  auth                    # substring search across file ids
-node bin/codesynapt.cjs ls    --limit 10              # top 10 most-imported files
-node bin/codesynapt.cjs focus src/x.ts                # move desktop camera (desktop only)
+node packages/core/bin/codesynapt.cjs summary                       # cheap project overview (Layer 1)
+node packages/core/bin/codesynapt.cjs safety src/x.ts               # 🟢/🟡/🔴 + one-line advice
+node packages/core/bin/codesynapt.cjs bundle src/x.ts --budget 8000 # pack neighbours into token budget
+node packages/core/bin/codesynapt.cjs blast  src/x.ts 3             # transitive dependents + token estimate
+node packages/core/bin/codesynapt.cjs suggest                       # "what to ask the AI next" recommendations
+node packages/core/bin/codesynapt.cjs preflight                     # deploy-readiness check
+node packages/core/bin/codesynapt.cjs env [VAR]                     # .env declared vs used
+node packages/core/bin/codesynapt.cjs secrets                       # server-only env leaked to client?
+node packages/core/bin/codesynapt.cjs feature payment               # keyword → FE/BE/shared cluster
+node packages/core/bin/codesynapt.cjs url /billing                  # URL → file (Next.js/Astro/SvelteKit)
+node packages/core/bin/codesynapt.cjs schema [Model]                # DB models (Prisma/Drizzle/SQLAlchemy)
+node packages/core/bin/codesynapt.cjs external                      # external APIs/websites by domain
+node packages/core/bin/codesynapt.cjs deps  src/x.ts                # what does x.ts import?
+node packages/core/bin/codesynapt.cjs users src/x.ts                # who imports x.ts?
+node packages/core/bin/codesynapt.cjs find  auth                    # substring search across file ids
+node packages/core/bin/codesynapt.cjs ls    --limit 10              # top 10 most-imported files
+node packages/core/bin/codesynapt.cjs focus src/x.ts                # move desktop camera (desktop only)
 ```
 
 The desktop app exposes ~30 endpoints. Run `fg3d --help` for the full
@@ -113,7 +113,7 @@ npm link        # adds fg3d / fg3d-mcp / codesynapt-server to PATH
 ### Claude Code (one-time)
 
 ```sh
-claude mcp add codesynapt node /absolute/path/to/codesynapt/bin/codesynapt-mcp.cjs
+claude mcp add codesynapt node /absolute/path/to/codesynapt/packages/core/bin/codesynapt-mcp.cjs
 ```
 
 That registers 8 intent-shaped MCP tools (all `cs_*`). In any

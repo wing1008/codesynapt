@@ -1,7 +1,7 @@
 # MCP setup — using filegraph3d from AI coding agents
 
 filegraph3d ships a Model Context Protocol (MCP) server at
-`bin/codesynapt-mcp.cjs`. Once registered with an MCP-capable client (Claude
+`packages/core/bin/codesynapt-mcp.cjs`. Once registered with an MCP-capable client (Claude
 Code, Cursor, Continue, Cline, custom clients), the client gets 19
 tools that read and control the running filegraph3d app.
 
@@ -74,7 +74,7 @@ tools that read and control the running filegraph3d app.
 One-time registration:
 
 ```sh
-claude mcp add filegraph3d node /absolute/path/to/filegraph3d/bin/codesynapt-mcp.cjs
+claude mcp add filegraph3d node /absolute/path/to/filegraph3d/packages/core/bin/codesynapt-mcp.cjs
 ```
 
 Then in any session, just ask the agent questions that involve
@@ -106,7 +106,7 @@ Cursor uses the same MCP config format. Add to your
   "mcpServers": {
     "filegraph3d": {
       "command": "node",
-      "args": ["/absolute/path/to/filegraph3d/bin/codesynapt-mcp.cjs"]
+      "args": ["/absolute/path/to/filegraph3d/packages/core/bin/codesynapt-mcp.cjs"]
     }
   }
 }
@@ -117,7 +117,7 @@ Restart Cursor. The tools appear under the MCP tools section in chat.
 ## Continue / Cline / others
 
 Any MCP-compliant client. Same pattern: command `node`, args pointing
-at `bin/codesynapt-mcp.cjs`. The server speaks JSON-RPC 2.0 over stdio per
+at `packages/core/bin/codesynapt-mcp.cjs`. The server speaks JSON-RPC 2.0 over stdio per
 the MCP spec (no transport selection needed).
 
 ## Custom port
@@ -127,13 +127,13 @@ server:
 
 ```sh
 FG3D_PORT=8088 npm start                    # in the filegraph3d dir
-FG3D_PORT=8088 node bin/codesynapt-mcp.cjs        # if testing manually
+FG3D_PORT=8088 node packages/core/bin/codesynapt-mcp.cjs        # if testing manually
 ```
 
 For Claude Code registration, set the env in the registration:
 
 ```sh
-claude mcp add filegraph3d node /abs/path/bin/codesynapt-mcp.cjs -e FG3D_PORT=8088
+claude mcp add filegraph3d node /abs/path/packages/core/bin/codesynapt-mcp.cjs -e FG3D_PORT=8088
 ```
 
 ## Verifying
@@ -216,7 +216,7 @@ control endpoints (`POST /focus/:id`, `POST /open/:id`,
 `POST /restore/:id?ts=`). Control endpoints relay through `ipcMain →
 webContents.send` to the renderer, where the React-less HTML/Three.js
 app listens for `control:focus` / `control:open` events and reacts.
-The CLI (`bin/codesynapt.cjs`) is a thin wrapper around that HTTP API. The
-MCP server (`bin/codesynapt-mcp.cjs`) is also a thin wrapper, but speaks
+The CLI (`packages/core/bin/codesynapt.cjs`) is a thin wrapper around that HTTP API. The
+MCP server (`packages/core/bin/codesynapt-mcp.cjs`) is also a thin wrapper, but speaks
 newline-delimited JSON-RPC 2.0 on stdio per the MCP spec — no external
 dependencies, ~150 lines of hand-rolled JSON-RPC.

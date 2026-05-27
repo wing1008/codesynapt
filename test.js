@@ -5,7 +5,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { Scanner } from './scanner.js'
+import { Scanner } from './packages/core/scanner.js'
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fg3d-test-'))
 

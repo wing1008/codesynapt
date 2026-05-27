@@ -37,7 +37,7 @@ let currentRoot = null
 
 async function loadScannerModule() {
   if (Scanner) return Scanner
-  const mod = await import('../scanner.js')
+  const mod = await import('../packages/core/scanner.js')
   Scanner = mod.Scanner
   return Scanner
 }
@@ -47,7 +47,7 @@ let _legacyAudit = null
 let _legacyCache = { version: -1, data: null }
 async function loadLegacyAudit() {
   if (_legacyAudit) return _legacyAudit
-  const mod = await import('../legacy.js')
+  const mod = await import('../packages/core/legacy.js')
   _legacyAudit = mod.auditLegacy
   return _legacyAudit
 }
@@ -1259,7 +1259,7 @@ function computeTraceStats(events) {
 // feature/preflight/schema/url/secrets) so the desktop app exposes
 // them too, without duplicating their logic here. Existing endpoints
 // remain handled by this file's own router below — append-only.
-const { createControlServer: _libCreateControlServer } = require('../lib/control-server.cjs')
+const { createControlServer: _libCreateControlServer } = require('../packages/core/lib/control-server.cjs')
 let _libControlHandler = null
 let _libScannerRef = null   // invalidate when scanner is swapped
 function _ensureLibHandler() {

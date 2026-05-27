@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { WebSocketServer } from 'ws'
-import { Scanner } from './scanner.js'
+import { Scanner } from './packages/core/scanner.js'
 
 // ─── CLI ──────────────────────────────────────────────────────
 const args = process.argv.slice(2)

@@ -27,20 +27,16 @@
   "main": "electron/main.cjs",
   "bin": {
     "codesynapt-server": "./server.js",
-    "codesynapt": "./bin/codesynapt.cjs",
-    "cs": "./bin/codesynapt.cjs",
-    "codesynapt-mcp": "./bin/codesynapt-mcp.cjs"
+    "codesynapt": "./packages/core/bin/codesynapt.cjs",
+    "cs": "./packages/core/bin/codesynapt.cjs",
+    "codesynapt-mcp": "./packages/core/bin/codesynapt-mcp.cjs"
   },
   "files": [
-    "bin/",
+    "packages/core/",
     "electron/",
-    "lib/",
     "public/",
     "scripts/",
     "plugin-api/",
-    "parser.js",
-    "scanner.js",
-    "monorepo.js",
     "server.js",
     "LICENSE",
     "LICENSES.md",

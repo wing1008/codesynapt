@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { Scanner } from '../scanner.js'
+import { Scanner } from '../packages/core/scanner.js'
 import { createRequire } from 'module'
 import fs from 'fs'
 import path from 'path'
@@ -7,7 +7,7 @@ import os from 'os'
 
 // lib/control-server.cjs is CommonJS; use createRequire for ESM test.
 const require = createRequire(import.meta.url)
-const { createControlServer } = require('../lib/control-server.cjs')
+const { createControlServer } = require('../packages/core/lib/control-server.cjs')
 
 let tmpRoot, scanner, lib
 

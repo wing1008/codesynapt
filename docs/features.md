@@ -152,7 +152,7 @@ and an MCP server (`fg3d-mcp`) for Claude Code / Cursor / Continue.
 See [**docs/mcp-setup.md**](./mcp-setup.md) for setup. Quick recap:
 
 ```sh
-claude mcp add filegraph3d node /abs/path/bin/codesynapt-mcp.cjs
+claude mcp add filegraph3d node /abs/path/packages/core/bin/codesynapt-mcp.cjs
 ```
 
 Then ask Claude things like "이 프로젝트가 호출하는 외부 API 다 알려줘"

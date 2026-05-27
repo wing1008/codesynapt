@@ -55,8 +55,8 @@ These are non-negotiable. Full rationale in `AGENTS.md`.
 
 Follow the checklist in `AGENTS.md` — but the most common gotchas:
 
-- **New HTTP endpoint?** Add to `bin/codesynapt.cjs` (CLI command) AND
-  `bin/codesynapt-mcp.cjs` (MCP tool). Wrap response with `withMeta()` so
+- **New HTTP endpoint?** Add to `packages/core/bin/codesynapt.cjs` (CLI command) AND
+  `packages/core/bin/codesynapt-mcp.cjs` (MCP tool). Wrap response with `withMeta()` so
   AI can budget tokens.
 - **New UI string?** Use `data-i18n="key"` (HTML) or `t('key')` (JS),
   add the key to both `T.ko` and `T.en` in `public/app.js`.

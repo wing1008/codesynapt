@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { parseFile, resolveImport, extractNextApiRoutes,
-         extractNuxtServerRoutes, extractSvelteKitServerRoutes } from '../parser.js'
+         extractNuxtServerRoutes, extractSvelteKitServerRoutes } from '../packages/core/parser.js'
 
 describe('parseFile — JS/TS imports', () => {
   it('extracts ES module imports', () => {

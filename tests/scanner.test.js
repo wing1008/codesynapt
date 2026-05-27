@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { Scanner } from '../scanner.js'
+import { Scanner } from '../packages/core/scanner.js'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
