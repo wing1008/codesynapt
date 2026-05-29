@@ -1,4 +1,4 @@
-# fg3d blast radius — GitHub Action
+# CodeSynapt blast radius — GitHub Action
 
 Post a Markdown PR comment summarising the dependency blast radius of every changed file, and optionally fail the build if a threshold is breached.
 
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
 
-      - uses: ./.github/actions/blast-radius   # local action — or point at filegraph3d/blast-radius@v1 once published
+      - uses: ./.github/actions/blast-radius   # local action — or point at wing1008/codesynapt/blast-radius@v1 once published
         with:
           comment: 'true'
           max-blast: 50         # optional gate: fail if largest single-file blast > 50
@@ -55,7 +55,7 @@ jobs:
 
 ## What the comment looks like
 
-> ## 📦 fg3d impact — `main..HEAD`
+> ## 📦 CodeSynapt impact — `main..HEAD`
 >
 > Scanned 1,245 files / 3,402 edges. Changed 4 files (tracked 4, ext-untracked 0, deleted 0).
 >
@@ -73,9 +73,9 @@ jobs:
 
 1. Resolves base + head SHAs from the PR (or explicit inputs).
 2. `git fetch` with full history so the diff range exists locally.
-3. `fg3d ci-diff <base>..<head> --format=github-comment` — produces Markdown.
-4. Posts or updates a single PR comment marked with `<!-- fg3d-blast-radius -->`.
-5. If `max-blast` / `max-changed` set, runs `fg3d ci-gate` — exits 1 on breach.
+3. `cs ci-diff <base>..<head> --format=github-comment` — produces Markdown.
+4. Posts or updates a single PR comment marked with `<!-- codesynapt-blast-radius -->`.
+5. If `max-blast` / `max-changed` set, runs `cs ci-gate` — exits 1 on breach.
 
 ## Why
 

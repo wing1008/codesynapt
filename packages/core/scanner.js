@@ -85,16 +85,19 @@ function loadGitignoreRules(root) {
   return []
 }
 
-// Project-local fg3d-specific ignore. Same syntax as .gitignore.
+// Project-local CodeSynapt-specific ignore. Same syntax as .gitignore.
 // Use when you want to keep a folder in git but hide it from the
 // graph (e.g. vendored third-party code you don't edit).
+// Reads .codesynaptignore first, falls back to legacy .fg3dignore.
 function loadFg3dIgnoreRules(root) {
-  const file = path.join(root, '.fg3dignore')
-  try {
-    if (fs.existsSync(file)) {
-      return parseGitignore(fs.readFileSync(file, 'utf8'))
-    }
-  } catch { /* ignore */ }
+  for (const name of ['.codesynaptignore', '.fg3dignore']) {
+    const file = path.join(root, name)
+    try {
+      if (fs.existsSync(file)) {
+        return parseGitignore(fs.readFileSync(file, 'utf8'))
+      }
+    } catch { /* ignore */ }
+  }
   return []
 }
 
@@ -187,6 +190,10 @@ export class Scanner extends EventEmitter {
     this.pkgEdges = []  // package-to-package edges aggregated from file edges
     this.watcher = null
     this._pendingSnapshot = null
+    // True once the chokidar 'ready' has fired and the initial walk is done.
+    // Used by /search to refuse work while the event loop is still saturated
+    // by add events — returning 503 instead of hanging.
+    this.initialScanComplete = false
     this.gitignoreRules = loadGitignoreRules(root)
     this.fg3dIgnoreRules = loadFg3dIgnoreRules(root)
     this.envFiles = []  // [{ id, keys: [...] }] — populated on first ready
@@ -212,7 +219,7 @@ export class Scanner extends EventEmitter {
   //     third-party / external / deps / submodules / tools
   //
   // We only report folders, never auto-ignore — the user can copy
-  // suggested entries into `.fg3dignore`. Reported via `vendorCandidates`
+  // suggested entries into `.codesynaptignore`. Reported via `vendorCandidates`
   // on the snapshot.
   scanVendorCandidates() {
     this.vendorCandidates = []
@@ -356,6 +363,7 @@ export class Scanner extends EventEmitter {
       .on('unlink', (p) => this.handleRemove(p))
       .on('ready', () => {
         initial = false
+        this.initialScanComplete = true
         this.emit('scan-progress', { count: scanCount, done: true })
         this.scanEnvFiles()
         this.scanVendorCandidates()
@@ -376,6 +384,9 @@ export class Scanner extends EventEmitter {
         id: f.id, ext: f.ext, loc: f.loc, size: f.size,
         importCount: f.imports.length,
         pkg: f.pkg || null,
+        hasDynamicResolution: (f.dynamicPatterns || []).length > 0,
+        dynamicPatterns:      f.dynamicPatterns || [],
+        confidence:           f.confidence || 'high',
       })),
       edges: this.edges,
       monorepo: this.monorepo,
@@ -400,6 +411,7 @@ export class Scanner extends EventEmitter {
     if (!file) return
     this.files.set(file.id, file)
     if (!initial) {
+      this.emit('file-added', { id: file.id, absPath })
       this.rebuildEdges()
       this.emitSnapshot()
     }
@@ -418,6 +430,7 @@ export class Scanner extends EventEmitter {
   handleRemove(absPath) {
     const id = this.toId(absPath)
     if (this.files.delete(id)) {
+      this.emit('file-removed', { id, absPath })
       this.rebuildEdges()
       this.emitSnapshot()
     }

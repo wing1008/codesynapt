@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> Guide for AI coding agents working on filegraph3d
+> Guide for AI coding agents working on CodeSynapt
 > (Claude Code, Cursor, Codex, Aider, etc).
 > Humans: see [CONTRIBUTING.md](./CONTRIBUTING.md) instead.
 
@@ -9,13 +9,13 @@ aren't obvious from reading the code. Read it before making changes.
 
 ## What this project is
 
-filegraph3d is a desktop app for visualizing code dependency graphs
+CodeSynapt is a desktop app for visualizing code dependency graphs
 in 3D. The stack:
 
 - **Electron** (desktop shell — main process is Node, renderer is Chromium)
 - **Three.js** (3D rendering via WebGL)
 - **Vanilla JavaScript** — no React, no Vue, no framework
-- **Dual-licensed**: BSL 1.1 (main app) + MIT (`plugin-api/`)
+- **Dual-licensed**: AGPL-3.0 (main app) + MIT (`plugin-api/`)
 
 It's a one-person project. Optimize for **the maintainer's future self
 re-reading this code**, not for theoretical scalability.
@@ -83,9 +83,9 @@ electron/             Main process (Node)
   preload.cjs           ← contextBridge — only file Renderer can see Node through
   plugin-loader.cjs     ← Plugin discovery + manifest validation
 
-bin/                  CLI + MCP entry points (CommonJS, shebang'd)
-  fg3d.cjs              ← Terminal CLI — 19 commands, talks to :7707 over HTTP
-  fg3d-mcp.cjs          ← MCP server — stdio JSON-RPC 2.0, 19 tools, ZERO deps
+packages/core/bin/    CLI + MCP entry points (CommonJS, shebang'd)
+  codesynapt.cjs        ← Terminal CLI (alias: cs) — talks to :7707 over HTTP
+  codesynapt-mcp.cjs    ← MCP server — stdio JSON-RPC 2.0 + Streamable HTTP
 
 public/               Renderer (Chromium)
   index.html            ← Single page, CSP at top, data-i18n attrs on visible text
@@ -120,7 +120,7 @@ docs/                 User-facing docs
 ## Three surfaces, one scanner
 
 `electron/main.cjs` boots the desktop UI **and** a tiny HTTP server on
-`127.0.0.1:7707` (override via `FG3D_PORT`). The CLI (`packages/core/bin/codesynapt.cjs`)
+`127.0.0.1:7707` (override via `CS_PORT`, legacy alias `FG3D_PORT`). The CLI (`packages/core/bin/codesynapt.cjs`)
 and MCP server (`packages/core/bin/codesynapt-mcp.cjs`) are both thin wrappers around
 that HTTP API — they don't talk to the scanner directly. This means:
 
@@ -149,7 +149,7 @@ AI can budget tokens and detect stale data. New endpoints should use it.
 
 ### Layer-1 first, narrow later
 
-`fg3d_summary` is the cheap (~300 tokens) overview the agent should
+`cs_summary` is the cheap (~300 tokens) overview the agent should
 read first. New features that surface a project-wide property should
 also add to summary if cheap, instead of forcing a full graph dump.
 
@@ -292,12 +292,12 @@ themeable node colors, that's a new feature, discuss first.
 
 ### The renderer assumes Electron OR browser dev mode
 
-`public/backend.js` and `public/app.js` check `window.fg3d` to detect
+`public/backend.js` and `public/app.js` check `window.codesynapt` to detect
 Electron. Browser mode (via `npm run server`) shims most things but
 **not all** — plugins aren't available in browser mode, for example.
 
 When adding renderer features that touch the filesystem or plugin
-system, check `window.fg3d` first and degrade gracefully.
+system, check `window.codesynapt` first and degrade gracefully. (`window.fg3d` is a legacy alias kept for backward compat.)
 
 ### The 300k node ceiling is a hard cap
 
@@ -362,13 +362,13 @@ allocations without measuring.
 
 ## License boundary — critical
 
-Files inside `plugin-api/` are MIT. Files outside are BSL 1.1.
+Files inside `plugin-api/` are MIT. Files outside are AGPL-3.0.
 
 **Never copy code from outside `plugin-api/` into inside `plugin-api/`**.
 If a utility is needed in both, it must originate inside `plugin-api/`
 and the main app can copy from there, not vice versa.
 
-Why: BSL → MIT directionally is fine; MIT → BSL would taint the BSL
+Why: AGPL → MIT directionally is fine; MIT → AGPL would taint the AGPL
 work with conflicting attribution requirements. Authors who PR to
 `plugin-api/` expect their code to remain MIT.
 

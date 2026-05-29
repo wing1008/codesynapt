@@ -119,23 +119,27 @@ const TOOLS = [
       '  · node   — one file\'s metadata + imports + importedBy (requires id)\n' +
       '  · deps   — what this file imports (requires id)\n' +
       '  · users  — what imports this file = blast surface (requires id)\n' +
-      '  · find   — substring search across file ids (requires q)\n' +
+      '  · find   — file-ID/path substring search (requires q). For *contents*, use search.\n' +
+      '  · search — full-text CONTENT search across all tracked files (requires q). Returns line:col + snippet. mtime LRU cache → repeat queries are sub-50ms. WHEN: variable rename, hardcoded string hunt, i18n key tracking, "where is X used as text".\n' +
       '  · read   — file content, up to 2 MB (requires id)',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'node', 'deps', 'users', 'find', 'read'] },
+        action: { type: 'string', enum: ['list', 'node', 'deps', 'users', 'find', 'search', 'read'] },
         id:     { type: 'string', description: 'file id, root-relative (e.g. src/auth.ts)' },
-        q:      { type: 'string', description: 'find action — substring' },
+        q:      { type: 'string', description: 'find / search action — substring or regex pattern' },
         limit:  { type: 'number', description: 'list action — page size (0 = all)' },
         offset: { type: 'number', description: 'list action — pagination offset' },
         ext:    { type: 'string', description: 'list action — filter by extension (e.g. "ts")' },
         minMass:{ type: 'number', description: 'list action — only files with ≥ N importers' },
         sort:   { type: 'string', description: 'list action — mass:desc | size:desc | loc:desc | id:asc | insertion' },
+        regex:         { type: 'boolean', description: 'search action — treat q as regex (default false)' },
+        caseSensitive: { type: 'boolean', description: 'search action — case-sensitive match (default false)' },
+        max:    { type: 'number', description: 'search action — max total matches before early-bail (default 100)' },
       },
       required: ['action'],
     },
-    handler: async ({ action, id, q, limit, offset, ext, minMass, sort }) => {
+    handler: async ({ action, id, q, limit, offset, ext, minMass, sort, regex, caseSensitive, max }) => {
       switch (action) {
         case 'list':
           return (await apiReq('GET', '/graph', {
@@ -145,6 +149,19 @@ const TOOLS = [
         case 'deps':  if (!id) bad('deps requires id');  return (await apiReq('GET', '/deps/' + encId(id))).data
         case 'users': if (!id) bad('users requires id'); return (await apiReq('GET', '/users/' + encId(id))).data
         case 'find':  if (!q)  bad('find requires q');   return (await apiReq('GET', '/find', { q })).data
+        case 'search': {
+          // 503 (scan in progress) → retry up to 3 times, 2 s apart.
+          if (!q) bad('search requires q')
+          const sParams = { q, regex: regex ? '1' : '0', case: caseSensitive ? '1' : '0', max: String(max ?? 100) }
+          let sr
+          for (let attempt = 0; attempt < 4; attempt++) {
+            sr = await apiReq('GET', '/search', sParams)
+            if (sr.status !== 503) break
+            if (attempt < 3) await new Promise((res) => setTimeout(res, 2000))
+          }
+          if (sr.status !== 200) bad(`search failed: ${sr.data?.error || 'status ' + sr.status}`)
+          return sr.data
+        }
         case 'read':  if (!id) bad('read requires id');  return (await apiReq('GET', '/file/' + encId(id))).data
         default: bad('unknown action: ' + action)
       }
@@ -232,7 +249,7 @@ const TOOLS = [
       'actions:\n' +
       '  · env       — env vars: declared vs used cross-reference (var optional — overview if omitted)\n' +
       '  · secrets   — server-only env leaked into frontend bundles. RULE: fail at preflight, surface to user.\n' +
-      '  · vendors   — third-party folder auto-detect → suggests .fg3dignore entries.\n' +
+      '  · vendors   — third-party folder auto-detect → suggests .codesynaptignore entries.\n' +
       '  · preflight — comprehensive deploy-readiness. RULE: do not suggest commit/deploy if overall=fail.\n' +
       '  · suggest   — rule-based "next thing to ask the AI to fix" (high/medium/low). Best opening move when stuck.\n' +
       '  · legacy    — orphan/path/filename/duplicate cleanup candidates with confidence scores (type optional)',
@@ -316,7 +333,7 @@ const TOOLS = [
       'actions:\n' +
       '  · log      — current session events (tool, id, ts). Filters: limit, tool.\n' +
       '  · stats    — top files / tool breakdown / duration for current session\n' +
-      '  · sessions — past sessions saved on disk (.filegraph3d/traces)\n' +
+      '  · sessions — past sessions saved on disk (.codesynapt/traces)\n' +
       '  · session  — one past session detail (requires sessionId)\n' +
       '  · clear    — start a fresh session (previous archived)\n' +
       '  · changes  — files modified this session (with current vs first-seen size/loc)\n' +
@@ -399,7 +416,7 @@ async function handle(msg) {
       return respond(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'filegraph3d', version: '0.2.0' },
+        serverInfo: { name: 'codesynapt', version: '0.2.0' },
       })
     }
     if (method === 'notifications/initialized') {

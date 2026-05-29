@@ -58,16 +58,16 @@ files that have been modified in the last week."
 
 ## Environment
 
-- **filegraph3d version**: <!-- Settings → About -->
+- **CodeSynapt version**: <!-- Settings → About -->
 - **Plugin type**: <!-- theme / exporter / parser / layout / panel / action -->
 - **OS**: <!-- macOS / Windows / Linux -->
 
 ## Have you checked
 
-- [ ] [Plugin API docs](https://github.com/YOUR_USER/filegraph3d/tree/main/plugin-api/docs)
-- [ ] [Troubleshooting guide](https://github.com/YOUR_USER/filegraph3d/blob/main/plugin-api/docs/troubleshooting.md)
-- [ ] [Example plugins](https://github.com/YOUR_USER/filegraph3d/tree/main/plugin-api/examples)
-- [ ] [types.d.ts](https://github.com/YOUR_USER/filegraph3d/blob/main/plugin-api/types.d.ts)
+- [ ] [Plugin API docs](https://github.com/wing1008/codesynapt/tree/main/plugin-api/docs)
+- [ ] [Troubleshooting guide](https://github.com/wing1008/codesynapt/blob/main/plugin-api/docs/troubleshooting.md)
+- [ ] [Example plugins](https://github.com/wing1008/codesynapt/tree/main/plugin-api/examples)
+- [ ] [types.d.ts](https://github.com/wing1008/codesynapt/blob/main/plugin-api/types.d.ts)
 
 ## Additional context
 

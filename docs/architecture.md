@@ -1,6 +1,6 @@
 # Architecture
 
-How filegraph3d works under the hood. Aimed at contributors and the
+How codesynapt works under the hood. Aimed at contributors and the
 curious; not required reading for users.
 
 - [High-level pipeline](#high-level-pipeline)
@@ -51,7 +51,7 @@ Standard Electron split:
 - **Main process** (`electron/main.cjs`) — Node.js. Owns the BrowserWindow,
   filesystem, child processes, IPC. Runs the scanner and parser.
 - **Preload** (`electron/preload.cjs`) — bridges main and renderer via
-  `contextBridge`. Exposes only the explicit `window.fg3d.*` API.
+  `contextBridge`. Exposes only the explicit `window.cs.*` API.
 - **Renderer** (`public/`) — Chromium. Renders the graph, handles
   user input. Cannot reach Node APIs except via the preload bridge.
 
@@ -62,7 +62,7 @@ intercepted and opened in the user's OS browser instead of the app.
 ## Project structure
 
 ```
-filegraph3d/
+codesynapt/
 ├── electron/
 │   ├── main.cjs              Electron main process entry
 │   ├── preload.cjs           IPC bridge
@@ -261,10 +261,10 @@ Any automatic heuristic gets these wrong. Letting the user mark "this
 is what's really live right now" is more honest. See
 [features.md](./features.md#active-sets-and-pipelines).
 
-### Why BSL, not MIT?
+### Why AGPL, not MIT?
 
 The author wants to be able to monetize the app commercially later
-without losing the contribution model. BSL lets the code stay public
+without losing the contribution model. AGPL lets the code stay public
 and inspectable while preserving commercial rights, and auto-converts
 to Apache 2.0 after 4 years — so it's an OSI-compatible long-term
 plan, just with a delay. The plugin API stays MIT so the ecosystem
@@ -287,5 +287,5 @@ Start at:
 3. `parser.js` → how imports are extracted
 4. `public/app.js` (the largest file) → renderer, layout, UI
 
-If something seems wrong or surprising, [open an issue](https://github.com/YOUR_USER/filegraph3d/issues)
+If something seems wrong or surprising, [open an issue](https://github.com/YOUR_USER/codesynapt/issues)
 or a PR.

@@ -129,7 +129,7 @@ exclude-contributors: []
 
 # ─── Release note template ──────────────────────────────
 template: |
-  ## filegraph3d $RESOLVED_VERSION
+  ## codesynapt $RESOLVED_VERSION
 
   $CHANGES
 
@@ -141,9 +141,9 @@ template: |
 
   Pre-built binaries for this release:
 
-  - **macOS** (Apple Silicon + Intel) — `filegraph3d-$RESOLVED_VERSION-mac.dmg`
-  - **Windows** — `filegraph3d-$RESOLVED_VERSION-win.exe` (installer) or portable build
-  - **Linux** — `filegraph3d-$RESOLVED_VERSION-linux.AppImage`, `.deb`, or `.tar.gz`
+  - **macOS** (Apple Silicon + Intel) — `codesynapt-$RESOLVED_VERSION-mac.dmg`
+  - **Windows** — `codesynapt-$RESOLVED_VERSION-win.exe` (installer) or portable build
+  - **Linux** — `codesynapt-$RESOLVED_VERSION-linux.AppImage`, `.deb`, or `.tar.gz`
 
   Verify downloads with the `SHA256SUMS-<os>.txt` files attached below.
 

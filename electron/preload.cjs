@@ -1,7 +1,7 @@
 // Preload — safe IPC bridge between renderer (untrusted) and main (privileged)
 const { contextBridge, ipcRenderer } = require('electron')
 
-contextBridge.exposeInMainWorld('fg3d', {
+const csApi = {
   // Imperative
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
   loadFolder: (path) => ipcRenderer.invoke('load-folder', path),
@@ -92,7 +92,13 @@ contextBridge.exposeInMainWorld('fg3d', {
   listPlugins: () => ipcRenderer.invoke('list-plugins'),
   openPluginDir: () => ipcRenderer.invoke('open-plugin-dir'),
   pluginDir: () => ipcRenderer.invoke('plugin-dir'),
-})
+}
+
+// Expose under both names: 'codesynapt' is the canonical namespace from 0.14.6+;
+// 'fg3d' is a legacy alias kept for backward compat (plugin authors, etc.).
+// Both refer to the SAME object — no extra memory.
+contextBridge.exposeInMainWorld('codesynapt', csApi)
+contextBridge.exposeInMainWorld('fg3d', csApi)
 
 // Platform info for renderer
 contextBridge.exposeInMainWorld('platform', {

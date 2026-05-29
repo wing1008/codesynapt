@@ -101,7 +101,7 @@ function findManifests(root, manifestNames, maxDepth = MAX_DEPTH) {
   const found = []
   const skip = new Set(['node_modules', '.git', 'dist', 'build', 'out',
     '.next', '.nuxt', '.turbo', '.vercel', 'venv', '.venv', '__pycache__',
-    '.cache', '.parcel-cache', 'target', '.filegraph3d', 'coverage'])
+    '.cache', '.parcel-cache', 'target', '.codesynapt', '.filegraph3d', 'coverage'])
   const walk = (dir, depth) => {
     if (depth > maxDepth) return
     let entries

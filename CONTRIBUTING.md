@@ -1,4 +1,4 @@
-# Contributing to FileGraph 3D
+# Contributing to CodeSynapt
 
 Contributions, bug reports, and feature requests are welcome.
 
@@ -9,8 +9,8 @@ participating, you agree to abide by its terms. See also
 ## Development setup
 
 ```sh
-git clone https://github.com/YOUR_USER/filegraph3d.git
-cd filegraph3d
+git clone https://github.com/YOUR_USER/codesynapt.git
+cd codesynapt
 npm install
 npm start            # launches the Electron app
 ```
@@ -114,23 +114,24 @@ A PR is more likely to be rejected (politely!) if it:
 
 ## License and CLA
 
-filegraph3d uses dual licensing:
+CodeSynapt uses dual licensing:
 
-- **Main app** (everything outside `plugin-api/`) — Business Source
-  License 1.1. See [LICENSE](./LICENSE).
-- **Plugin API** (`plugin-api/`) — MIT. See [plugin-api/LICENSE](./plugin-api/LICENSE).
+- **Main app** (everything outside `plugin-api/`) — **AGPL-3.0-or-later**. See [LICENSE](./LICENSE).
+- **Plugin API** (`plugin-api/`) — **MIT**. See [plugin-api/LICENSE](./plugin-api/LICENSE).
+- The project maintainer (wing1008) **also offers commercial licenses** of the main app for organizations that can't accept AGPL's copyleft. See [LICENSES.md](./LICENSES.md).
 
 By submitting a pull request, you agree that:
 
 1. Your contribution is your original work (or you have rights to it).
 2. You license your contribution under the same terms as the
-   surrounding code — BSL 1.1 for changes to the main app, MIT for
-   changes inside `plugin-api/`.
-3. You grant the project maintainers the right to relicense the
-   project (including your contribution) under any other license in
-   the future. This is necessary so the project can evolve its
-   licensing strategy — for example, to apply the Change License
-   conversion smoothly.
+   surrounding code — **AGPL-3.0-or-later** for changes to the main app,
+   **MIT** for changes inside `plugin-api/`.
+3. You grant the project maintainer the right to **relicense the
+   project (including your contribution) under other terms**, including
+   the commercial license described in `LICENSES.md`. This is required
+   for the dual-license model to work — without it, the maintainer
+   could not sell commercial licenses that include any community
+   contribution.
 
 If you're contributing on behalf of a company, make sure you have
 authorization. For substantial contributions we may ask for a

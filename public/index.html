@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' blob: 'sha256-NfHJr+xcDJiAGqHYgFEaR5vX+0YDa2Tbke39iP8L6uY='; img-src 'self' data:; connect-src 'self' ws: wss: blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
-<title>FileGraph 3D</title>
+<title>CodeSynapt</title>
 <link rel="stylesheet" href="./style.css" />
 </head>
 <body class="no-folder">
@@ -171,8 +171,8 @@
             <span class="radio-sub" data-i18n="settings.physics.auto.sub"></span>
           </span>
         </label>
-        <label class="radio">
-          <input type="radio" name="backend" value="gpu" />
+        <label class="radio is-disabled" data-i18n-title="settings.physics.gpu.tip">
+          <input type="radio" name="backend" value="gpu" disabled />
           <span class="radio-label">
             <strong data-i18n="settings.physics.gpu">GPU only</strong>
             <span class="radio-sub" data-i18n="settings.physics.gpu.sub"></span>

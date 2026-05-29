@@ -1,39 +1,20 @@
 # GitHub funding configuration
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
 #
-# Uncomment and fill in any platforms you've set up. You can have
-# multiple — GitHub shows them all in the Sponsor dropdown.
-#
-# The Sponsor button appears at the top right of the repo page once
-# at least one of these is configured.
+# CodeSynapt is dual-licensed (AGPL-3.0 + Commercial). Individual
+# sponsorships fund maintenance; commercial licenses pay for sustained
+# development. See LICENSES.md for the commercial side.
 
-# GitHub Sponsors (preferred — zero platform fees, GitHub native)
-# Requires: register at https://github.com/sponsors
-# github: YOUR_USERNAME
+# GitHub Sponsors — preferred (zero platform fees, GitHub native).
+# Requires one-time activation at https://github.com/sponsors/wing1008
+github: [wing1008]
 
-# Buy Me a Coffee (easy one-time donations)
-# Requires: account at https://www.buymeacoffee.com/
-# custom: ["https://buymeacoffee.com/YOUR_USERNAME"]
+# Buy Me a Coffee — easy one-time donations.
+# Activate the account at https://www.buymeacoffee.com/wing1008 first.
+custom: ["https://buymeacoffee.com/wing1008"]
 
-# Ko-fi (alternative to Buy Me a Coffee)
-# ko_fi: YOUR_USERNAME
+# Ko-fi — alternative one-time / monthly. Activate at https://ko-fi.com/wing1008
+# ko_fi: wing1008
 
-# Patreon (recurring memberships)
-# patreon: YOUR_USERNAME
-
-# Open Collective (transparent group funding)
-# open_collective: filegraph3d
-
-# Liberapay (open-source friendly, EU-based)
-# liberapay: YOUR_USERNAME
-
-# Tidelift (for businesses paying for open-source maintenance)
-# tidelift: npm/filegraph3d
-
-# Polar (modern sponsorship + paid issues)
-# polar: YOUR_USERNAME
-
-# Custom URLs — your own donation page, BTC address, etc.
-# custom:
-#   - "https://your-site.com/donate"
-#   - "https://github.com/YOUR_USER/filegraph3d#sponsor"
+# Open Collective (transparent group funding) — activate later if needed
+# open_collective: codesynapt

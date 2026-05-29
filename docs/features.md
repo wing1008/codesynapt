@@ -1,6 +1,6 @@
 # Features
 
-A complete tour of what filegraph3d does.
+A complete tour of what codesynapt does.
 
 - [The graph](#the-graph)
 - [File tree](#file-tree)
@@ -80,7 +80,7 @@ Press `/` or `Ctrl+F` from anywhere to focus the search box.
 AI coding inverts this — the `.old.` file is often the real production
 code while the AI's "improved" version doesn't actually work.
 
-So filegraph3d lets you **declare what's really live** instead of
+So codesynapt lets you **declare what's really live** instead of
 guessing.
 
 ### Starring individual files
@@ -146,13 +146,13 @@ inspection:
 
 ## AI agent integration
 
-Three surfaces share one scanner: the desktop window, a CLI (`fg3d`),
-and an MCP server (`fg3d-mcp`) for Claude Code / Cursor / Continue.
+Three surfaces share one scanner: the desktop window, a CLI (`cs`),
+and an MCP server (`codesynapt-mcp`) for Claude Code / Cursor / Continue.
 
 See [**docs/mcp-setup.md**](./mcp-setup.md) for setup. Quick recap:
 
 ```sh
-claude mcp add filegraph3d node /abs/path/packages/core/bin/codesynapt-mcp.cjs
+claude mcp add codesynapt node /abs/path/packages/core/bin/codesynapt-mcp.cjs
 ```
 
 Then ask Claude things like "이 프로젝트가 호출하는 외부 API 다 알려줘"
@@ -186,7 +186,7 @@ scrolling text logs.
 
 ## Blast radius prediction
 
-`fg3d blast <id> [depth]` or the `fg3d_blast_radius` MCP tool returns:
+`cs blast <id> [depth]` or `cs_blast({action:'safety', id})` MCP tool returns:
 
 - Total files affected (BFS through dependents)
 - Total LOC + size
@@ -200,7 +200,7 @@ affected nodes flash magenta in the graph.
 
 ## External URL inventory
 
-`fg3d external` or `fg3d_external_urls` lists every external host the
+`cs external` or `cs_intent({action:'external'})` lists every external host the
 project calls (HTTP / HTTPS / WebSocket / Secure WebSocket), grouped
 by domain, with caller file paths. Useful for:
 
@@ -214,7 +214,7 @@ in `.env.example`, comments, and hardcoded constants all show up.
 
 ## Time-lapse
 
-Hit the ⏱ button in the topbar. filegraph3d reads
+Hit the ⏱ button in the topbar. codesynapt reads
 `git log --diff-filter=A --name-only` to build a per-file "first
 introduced at" timeline. A slider appears at the bottom of the
 canvas:
@@ -230,7 +230,7 @@ Requires a git repo. First call takes a few seconds for big projects
 
 ## Guided tour
 
-Hit the 🧭 button or run `fg3d tour`. Heuristic-selected stops:
+Hit the 🧭 button or run `cs tour`. Heuristic-selected stops:
 
 1. **Entry points** matching `^(?:src/)?(?:index|main|app|server|cli|bin)\.`
 2. **Top hubs** by incoming-import count (the most "important" files)
@@ -240,7 +240,7 @@ Hit the 🧭 button or run `fg3d tour`. Heuristic-selected stops:
 The camera flies to each stop in sequence with a short rationale.
 Prev / Next / Close buttons in the overlay.
 
-Pair with `fg3d_tour` from an MCP client so an AI can narrate to a
+Pair with `cs_intent({action:'tour'})` from an MCP client so an AI can narrate to a
 new team member.
 
 ## Auto file history
@@ -249,13 +249,13 @@ Opt-in via **Settings → file history → 자동 히스토리 활성화**.
 Default is OFF.
 
 When enabled, every save (yours via the inspector, the AI's via
-`fg3d_restore`, or any external editor detected by chokidar) writes
-a timestamped snapshot under `.filegraph3d/history/<encoded-path>/<ts>.snap`.
+`cs_change({action:'restore'})`, or any external editor detected by chokidar) writes
+a timestamped snapshot under `.codesynapt/history/<encoded-path>/<ts>.snap`.
 Max 3 snapshots per file — oldest auto-deleted.
 
 Two ways to roll back:
 - Inspector → history section → click **Restore** next to a timestamp
-- `fg3d restore <id> <ts>` from the CLI, or `fg3d_restore` from MCP
+- `cs restore <id> <ts>` from the CLI, or `cs_change({action:'restore'})` from MCP
 
 Snapshots are skipped if the new content is byte-identical to the
 latest snapshot (defeats chokidar re-fires).
@@ -281,7 +281,7 @@ Auto-refreshes every 3 seconds while the panel is open.
 
 The `EN` / `한` button in the topbar switches the entire UI between
 English and Korean. The choice persists across sessions
-(`localStorage:filegraph3d:lang`).
+(`localStorage:codesynapt:lang`).
 
 If a string isn't translating, that's a bug — see AGENTS.md for the
 `data-i18n` / `t('key')` conventions.
@@ -355,5 +355,5 @@ A few common requests intentionally not supported:
 - **Team collaboration** — local tool; export and share files manually
 - **Time-travel / git history overlay** — on the roadmap, not in v0.11
 
-For things filegraph3d doesn't do, see if a [plugin](../plugin-api/README.md)
+For things codesynapt doesn't do, see if a [plugin](../plugin-api/README.md)
 could.

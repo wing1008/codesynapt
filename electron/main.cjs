@@ -1,4 +1,4 @@
-// Electron main process — desktop app shell for filegraph3d
+// Electron main process — desktop app shell for CodeSynapt
 const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -89,6 +89,7 @@ async function startScanner(root) {
   // Stop any in-flight scanner cleanly before installing a new one
   currentRoot = root
   timelineCache = { root: null, data: null, building: false }   // invalidate
+  migrateLegacyHistoryDir(root)
   addRecent(root)
   scanner = new Scanner(root)
 
@@ -137,12 +138,15 @@ function createWindow() {
     minHeight: 480,
     backgroundColor: '#07090F',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    title: 'FileGraph 3D',
+    title: 'CodeSynapt',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // Sandbox isolates the renderer from Node APIs entirely. Preload uses
+      // only contextBridge + ipcRenderer (no fs/path/etc), so sandbox:true
+      // is compatible. Reduces blast radius of any renderer-side compromise.
+      sandbox: true,
     },
   })
 
@@ -166,7 +170,7 @@ function createWindow() {
   // or moved to another virtual desktop and explicitly hidden).
   //
   // This matches user intuition: "I didn't tell it to stop, so it
-  // shouldn't stop." It also lets the user keep filegraph3d alive
+  // shouldn't stop." It also lets the user keep CodeSynapt alive
   // on a second monitor while they work in another app.
   // ─────────────────────────────────────────────────────────────
   const sendVisibility = (visible) => {
@@ -181,15 +185,18 @@ function createWindow() {
 
   // Drag & drop folder onto window
   mainWindow.webContents.on('did-finish-load', () => {
-    // Auto-load last folder if it still exists
-    if (store.lastFolder && fs.existsSync(store.lastFolder)) {
+    // Priority: CS_INITIAL_ROOT env (set by `cs ensure --launch`) > last folder
+    const envRoot = process.env.CS_INITIAL_ROOT
+    if (envRoot && fs.existsSync(envRoot) && fs.statSync(envRoot).isDirectory()) {
+      startScanner(path.resolve(envRoot))
+    } else if (store.lastFolder && fs.existsSync(store.lastFolder)) {
       startScanner(store.lastFolder)
     } else {
       mainWindow.webContents.send('no-folder')
     }
   })
 
-  if (process.env.FG3D_DEVTOOLS === '1') mainWindow.webContents.openDevTools()
+  if (process.env.CS_DEVTOOLS === '1' || process.env.FG3D_DEVTOOLS === '1') mainWindow.webContents.openDevTools()
 }
 
 // ─── Native menu ────────────────────────────────────────────────
@@ -469,12 +476,30 @@ function makeLineDiff(before, after) {
 }
 
 // ─── File history ──────────────────────────────────────────────
-const HISTORY_DIR_NAME = '.filegraph3d'
+const HISTORY_DIR_NAME = '.codesynapt'
+const LEGACY_HISTORY_DIR_NAME = '.filegraph3d'   // renamed in 0.14.6; migrate on first scan
 const HISTORY_MAX_PER_FILE = 3
 let historyEnabled = false  // default OFF — user toggles on in settings
 function historyDirFor(root, id) {
   const safe = id.replace(/[\\/:]/g, '__').replace(/[^A-Za-z0-9._-]/g, '_')
   return path.join(root, HISTORY_DIR_NAME, 'history', safe)
+}
+// One-time migration of the per-project data folder (history/ + traces/).
+// If a user upgraded from <0.14.6, their backups live under .filegraph3d/.
+// We rename the whole folder so both history/ and traces/ subdirs move together.
+// Skipped if the new folder already exists (user has both somehow — leave them).
+function migrateLegacyHistoryDir(root) {
+  if (!root) return
+  try {
+    const oldPath = path.join(root, LEGACY_HISTORY_DIR_NAME)
+    const newPath = path.join(root, HISTORY_DIR_NAME)
+    if (fs.existsSync(oldPath) && !fs.existsSync(newPath) && fs.statSync(oldPath).isDirectory()) {
+      fs.renameSync(oldPath, newPath)
+      log.info('migrated legacy history dir', { from: LEGACY_HISTORY_DIR_NAME, to: HISTORY_DIR_NAME, root })
+    }
+  } catch (e) {
+    log.warn('history dir migration skipped', { error: e.message })
+  }
 }
 function snapshotHistory(root, id, content) {
   if (!historyEnabled) return
@@ -685,6 +710,8 @@ function findNode(id) {
     importCount: f.imports.length,
     hasDynamicResolution: (f.dynamicPatterns || []).length > 0,
     dynamicPatterns: f.dynamicPatterns || [],
+    confidence: f.confidence || 'high',
+    pkg: f.pkg || null,
     lastSeenAt: f.lastSeenAt,
   }
 }
@@ -1118,7 +1145,7 @@ function writeJson(res, status, data) {
 // AI/CLI/MCP layer makes. Lets the user see exactly what an AI did
 // during a coding session, export it for review, or replay it.
 //
-// Storage layout: `.filegraph3d/traces/session-{startTs}.jsonl`
+// Storage layout: `.codesynapt/traces/session-{startTs}.jsonl`
 // One line per event. Each session ID is the unix-ms timestamp of
 // when the scanner started on that root.
 const TRACE_DIR_NAME = 'traces'
@@ -1260,6 +1287,103 @@ function computeTraceStats(events) {
 // them too, without duplicating their logic here. Existing endpoints
 // remain handled by this file's own router below — append-only.
 const { createControlServer: _libCreateControlServer } = require('../packages/core/lib/control-server.cjs')
+const { createLogger } = require('../packages/core/lib/logger.cjs')
+
+// Structured logger for the main process. Writes NDJSON to
+// ~/.codesynapt/audit/main-YYYY-MM-DD.jsonl. Level info+ → file; warn+ → stderr.
+const _logFile = path.join(app.getPath('home'), '.codesynapt', 'audit',
+  `main-${new Date().toISOString().slice(0,10)}.jsonl`)
+const log = createLogger({ file: _logFile, module: 'main', level: 'info', echoStderr: 'warn' })
+
+// ─── Search worker (isolated from main event loop) ─────────────
+// Persistent worker (reused across searches) so its in-memory mtime cache
+// makes the 2nd+ search fast. The worker is rebuilt only when the scanner
+// is swapped (different project root). Files > 5 MB are pre-skipped to
+// avoid the libuv-thread-stall that previously plagued worker reuse.
+const { Worker } = require('worker_threads')
+let _searchWorker = null
+let _searchWorkerReady = false
+let _searchScannerRef = null
+let _searchInFlight = null   // { reqId, resolve, reject, timer }
+let _searchReqCounter = 0
+
+function _teardownSearchWorker() {
+  if (_searchWorker) { try { _searchWorker.terminate() } catch {} }
+  _searchWorker = null
+  _searchWorkerReady = false
+  if (_searchInFlight) {
+    clearTimeout(_searchInFlight.timer)
+    _searchInFlight.reject(new Error('worker recycled'))
+    _searchInFlight = null
+  }
+}
+
+function _ensureSearchWorker() {
+  if (_searchWorker && _searchScannerRef === scanner) return _searchWorker
+  _teardownSearchWorker()
+  const workerPath = path.resolve(__dirname, '..', 'packages', 'core', 'lib', 'search-worker.cjs')
+  const w = new Worker(workerPath)
+  _searchScannerRef = scanner
+  w.on('message', (msg) => {
+    if (msg.type === 'ready') { _searchWorkerReady = true; return }
+    if (!_searchInFlight) return
+    const inflight = _searchInFlight
+    _searchInFlight = null
+    clearTimeout(inflight.timer)
+    if (msg.type === 'result') inflight.resolve(msg.payload)
+    else                       inflight.reject(new Error(msg.error || 'worker error'))
+  })
+  w.on('error', (e) => {
+    if (_searchInFlight) { clearTimeout(_searchInFlight.timer); _searchInFlight.reject(e); _searchInFlight = null }
+    _searchWorker = null
+    _searchWorkerReady = false
+  })
+  w.on('exit', () => {
+    _searchWorker = null
+    _searchWorkerReady = false
+    if (_searchInFlight) {
+      clearTimeout(_searchInFlight.timer)
+      _searchInFlight.reject(new Error('worker exited unexpectedly'))
+      _searchInFlight = null
+    }
+  })
+  // Keep worker's cache in sync with scanner
+  if (scanner) {
+    scanner.on('file-changed', ({ id }) => { try { w.postMessage({ type: 'invalidate', id }) } catch {} })
+    scanner.on('file-removed', ({ id }) => { try { w.postMessage({ type: 'invalidate', id }) } catch {} })
+  }
+  _searchWorker = w
+  return w
+}
+
+function _searchInWorker(opts, timeoutMs = 60000) {
+  return new Promise((resolve, reject) => {
+    if (_searchInFlight) return reject(new Error('worker busy — another search is in flight'))
+    if (!scanner) return reject(new Error('scanner not ready'))
+    const w = _ensureSearchWorker()
+    const reqId = ++_searchReqCounter
+    const files = [...scanner.files.values()].map((f) => ({ id: f.id, absPath: f.absPath }))
+    const timer = setTimeout(() => {
+      if (!_searchInFlight || _searchInFlight.reqId !== reqId) return
+      _searchInFlight = null
+      // Worker may be stuck — recycle so future requests are clean
+      _teardownSearchWorker()
+      reject(new Error(`worker timeout ${timeoutMs}ms`))
+    }, timeoutMs)
+    _searchInFlight = { reqId, resolve, reject, timer }
+    // If worker hasn't fired 'ready' yet, queue a one-shot send
+    if (_searchWorkerReady) {
+      w.postMessage({ type: 'search', id: reqId, files, ...opts })
+    } else {
+      const onReady = (msg) => {
+        if (msg.type !== 'ready') return
+        w.off('message', onReady)
+        w.postMessage({ type: 'search', id: reqId, files, ...opts })
+      }
+      w.on('message', onReady)
+    }
+  })
+}
 let _libControlHandler = null
 let _libScannerRef = null   // invalidate when scanner is swapped
 function _ensureLibHandler() {
@@ -1284,11 +1408,16 @@ const _LIB_ENDPOINTS = new Set([
 ])
 
 function handleControlRequest(req, res) {
+  // DNS-rebinding defense: reject Host headers that aren't loopback.
+  const hostHeader = (req.headers.host || '').split(':')[0].toLowerCase()
+  if (hostHeader !== '127.0.0.1' && hostHeader !== 'localhost' && hostHeader !== '[::1]') {
+    return writeJson(res, 403, { error: 'forbidden host: ' + hostHeader })
+  }
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': 'null',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     })
     return res.end()
   }
@@ -1309,7 +1438,7 @@ function handleControlRequest(req, res) {
   try {
     if (req.method === 'GET' && parts.length === 0) {
       return writeJson(res, 200, {
-        name: 'filegraph3d',
+        name: 'codesynapt',
         endpoints: [
           'GET /health', 'GET /graph', 'GET /node/:id', 'GET /file/:id',
           'GET /deps/:id', 'GET /users/:id', 'GET /find?q=', 'GET /history/:id',
@@ -1435,6 +1564,39 @@ function handleControlRequest(req, res) {
     if (req.method === 'GET' && seg0 === 'find') {
       return writeJson(res, 200, searchFiles(url.searchParams.get('q') || ''))
     }
+    if (req.method === 'GET' && seg0 === 'search') {
+      // Full-text search across all tracked files (content scan).
+      // Different from /find which only matches file IDs.
+      // Runs in a worker_thread isolated from this event loop.
+      const q = url.searchParams.get('q')
+      if (!q) return writeJson(res, 400, { error: 'q (query) is required' })
+      if (!scanner || !scanner.initialScanComplete) {
+        const fileCount = scanner ? scanner.files.size : 0
+        return writeJson(res, 503, {
+          error: 'scan in progress',
+          fileCount,
+          retryAfterMs: 2000,
+          hint: 'Initial scan still running. Try again in a couple of seconds; /health will keep increasing fileCount.',
+        })
+      }
+      ;(async () => {
+        try {
+          const result = await _searchInWorker({
+            q,
+            regex:         url.searchParams.get('regex') === '1' || url.searchParams.get('regex') === 'true',
+            caseSensitive: url.searchParams.get('case')  === '1' || url.searchParams.get('case')  === 'true',
+            max:           parseInt(url.searchParams.get('max') || '100', 10),
+            maxPerFile:    parseInt(url.searchParams.get('maxPerFile') || '10', 10),
+          })
+          writeJson(res, 200, withMeta(result))
+        } catch (e) {
+          const msg = e.message || String(e)
+          if (msg.includes('busy')) return writeJson(res, 503, { error: msg, retryAfterMs: 1000 })
+          writeJson(res, 500, { error: msg })
+        }
+      })().catch((e) => writeJson(res, 500, { error: e.message }))
+      return
+    }
     if (req.method === 'GET' && seg0 === 'external') {
       return writeJson(res, 200, getExternalUrls())
     }
@@ -1482,6 +1644,48 @@ function handleControlRequest(req, res) {
       if (!scanner.files.has(id)) return writeJson(res, 404, { error: 'not found' })
       mainWindow?.webContents.send('control:open', { id })
       return writeJson(res, 200, { ok: true, id })
+    }
+    if (req.method === 'POST' && seg0 === 'load' && rest.length === 0) {
+      // Body: { path } — load a project folder. If same as currentRoot, no-op.
+      // Used by `cs ensure` to auto-switch projects from CLI/MCP without
+      // requiring the user to click "Open Folder" in the desktop UI.
+      let bodyChunks = []
+      req.on('data', (c) => bodyChunks.push(c))
+      req.on('end', async () => {
+        let target = null
+        try {
+          const bodyStr = Buffer.concat(bodyChunks).toString('utf8')
+          if (bodyStr) target = JSON.parse(bodyStr)?.path || null
+        } catch {}
+        target = target || url.searchParams.get('path')
+        if (!target) return writeJson(res, 400, { error: 'usage: { "path": "..." }' })
+        let abs
+        try {
+          abs = path.resolve(target)
+          // realpathSync normalizes symlinks so two different paths pointing
+          // to the same directory hit the noop branch correctly.
+          if (fs.existsSync(abs)) abs = fs.realpathSync(abs)
+        } catch (e) { return writeJson(res, 400, { error: 'invalid path: ' + e.message }) }
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+          return writeJson(res, 400, { error: 'not a directory: ' + abs })
+        }
+        // Reject the OS root (C:\ on Windows, / on POSIX) — scanning that
+        // would walk the entire filesystem. Almost certainly a mistake.
+        if (abs === path.parse(abs).root) {
+          return writeJson(res, 400, { error: 'refusing to load OS root: ' + abs })
+        }
+        // Confirm we can actually read it before triggering a scan.
+        try { fs.accessSync(abs, fs.constants.R_OK) }
+        catch { return writeJson(res, 403, { error: 'not readable: ' + abs }) }
+        if (currentRoot === abs && scanner) {
+          return writeJson(res, 200, { ok: true, action: 'noop', root: currentRoot, fileCount: scanner.files.size })
+        }
+        try {
+          await startScanner(abs)
+          return writeJson(res, 200, { ok: true, action: 'loaded', root: currentRoot, fileCount: scanner?.files?.size || 0 })
+        } catch (e) { return writeJson(res, 500, { error: e.message }) }
+      })
+      return
     }
     if (req.method === 'GET' && seg0 === 'trace' && rest.length === 0) {
       // Current session log. Filter by tool, since=, limit.
@@ -1709,8 +1913,10 @@ function startControlServer(startPort = controlPort, attempt = 0) {
     controlPort = port
     writeLockFile(port)
     if (port !== startPort) {
+      log.info('control API listening (fallback)', { port, requestedPort: startPort, host: '127.0.0.1' })
       console.log(`[cs] control API listening on http://127.0.0.1:${port}  (fallback — ${startPort} was in use)`)
     } else {
+      log.info('control API listening', { port, host: '127.0.0.1' })
       console.log(`[cs] control API listening on http://127.0.0.1:${port}`)
     }
   })
@@ -1724,15 +1930,93 @@ function stopControlServer() {
 }
 ipcMain.handle('control-port', () => controlPort)
 
+// ─── Log retention (audit + per-project traces) ────────────────
+// Default 30 days; configurable via env. Prevents unbounded growth of
+// ~/.codesynapt/audit/YYYY-MM-DD.jsonl and project-local .codesynapt/traces/.
+function pruneOldLogs() {
+  const days = parseInt(process.env.CS_AUDIT_RETENTION_DAYS || '30', 10)
+  if (!days || days <= 0) return   // 0 = keep forever
+  const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000
+  const auditDir = path.join(app.getPath('home'), '.codesynapt', 'audit')
+  const dirs = [auditDir]
+  if (currentRoot) dirs.push(traceDirFor(currentRoot))
+  for (const dir of dirs) {
+    try {
+      if (!fs.existsSync(dir)) continue
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.jsonl')) continue
+        const f = path.join(dir, name)
+        try {
+          const stat = fs.statSync(f)
+          if (stat.mtimeMs < cutoffMs) {
+            fs.unlinkSync(f)
+            log.info('log pruned', { file: f, retentionDays: days })
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+}
+
+// ─── Single-instance lock ───────────────────────────────────────
+// Critical for clean version upgrades: when the NSIS installer launches
+// the new version (runAfterFinish), if an old build is somehow still
+// running, route the second-instance event to focus/restore instead of
+// spawning a duplicate process. Also prevents two desktop windows
+// fighting over port 7707.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (_event, argv) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      if (!mainWindow.isVisible()) mainWindow.show()
+      mainWindow.focus()
+    }
+    // If the second instance passed CS_INITIAL_ROOT via env or a path arg,
+    // load that folder into the running window.
+    const envRoot = process.env.CS_INITIAL_ROOT
+    const argRoot = argv && argv.find && argv.find((a) => a && !a.startsWith('-') && fs.existsSync(a) && fs.statSync(a).isDirectory())
+    const target = envRoot && fs.existsSync(envRoot) ? envRoot : argRoot
+    if (target && path.resolve(target) !== currentRoot) startScanner(path.resolve(target))
+  })
+}
+
 // ─── App lifecycle ──────────────────────────────────────────────
 app.whenReady().then(() => {
   rebuildMenu()
   createWindow()
   startControlServer()
+  pruneOldLogs()   // one-shot on boot; daily users get fresh pruning
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+
+  // Auto-updater (GitHub Releases). Disabled by env var for users who
+  // want zero outbound network calls. Silently no-ops if no published
+  // releases yet (404 from update feed → updater logs and does nothing).
+  if (process.env.CS_DISABLE_UPDATER !== '1') {
+    try {
+      const { autoUpdater } = require('electron-updater')
+      autoUpdater.autoDownload = false   // ask user before downloading
+      autoUpdater.on('error', (e) => log.error('updater error', { message: e.message }))
+      autoUpdater.on('update-available', (info) => {
+        log.info('update available', { version: info.version })
+        // Notify renderer; renderer shows a toast with "download / dismiss".
+        mainWindow?.webContents.send('updater:available', { version: info.version, releaseNotes: info.releaseNotes })
+      })
+      autoUpdater.on('update-downloaded', (info) => {
+        mainWindow?.webContents.send('updater:downloaded', { version: info.version })
+      })
+      // Check ~10s after boot so the scanner gets the network priority.
+      setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}) }, 10_000)
+    } catch (e) {
+      // electron-updater is optional at runtime; CLI/MCP-only installs skip it
+      log.warn('updater not loaded', { error: e.message })
+    }
+  }
 })
 
 app.on('window-all-closed', () => {
@@ -1749,4 +2033,15 @@ app.on('web-contents-created', (_e, contents) => {
     if (url.startsWith('http')) shell.openExternal(url)
     return { action: 'deny' }
   })
+  // Defense-in-depth: block all in-window navigation away from our file://.
+  // CSP already blocks remote loads, but this is one more layer.
+  contents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://')) {
+      event.preventDefault()
+      if (url.startsWith('http')) shell.openExternal(url)
+    }
+  })
+  // Deny every permission request — we don't use mic/camera/geolocation/etc.
+  contents.session.setPermissionRequestHandler((_wc, _perm, callback) => callback(false))
+  contents.session.setPermissionCheckHandler(() => false)
 })

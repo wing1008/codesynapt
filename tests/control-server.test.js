@@ -116,7 +116,7 @@ describe('control-server auth + audit (P4·6)', () => {
 describe('control-server endpoints', () => {
   it('GET / returns endpoint catalog', async () => {
     const r = await call('GET', '/')
-    expect(r.name).toBe('filegraph3d')
+    expect(r.name).toBe('codesynapt')
     expect(Array.isArray(r.endpoints)).toBe(true)
   })
 

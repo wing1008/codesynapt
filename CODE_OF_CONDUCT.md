@@ -2,7 +2,7 @@
 
 ## Our pledge
 
-We — the maintainer and contributors of filegraph3d — pledge to make
+We — the maintainer and contributors of codesynapt — pledge to make
 participation in this project a harassment-free experience for everyone,
 regardless of age, body size, visible or invisible disability,
 ethnicity, sex characteristics, gender identity and expression, level
@@ -106,7 +106,7 @@ within the community.
 
 ## A note on this project's reality
 
-filegraph3d is currently maintained by one person in their spare time.
+codesynapt is currently maintained by one person in their spare time.
 
 - Response times to reports may vary, but the maintainer commits to
   acknowledging reports within **7 days**.

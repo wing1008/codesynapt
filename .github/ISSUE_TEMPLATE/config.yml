@@ -2,32 +2,32 @@ blank_issues_enabled: false
 
 contact_links:
   - name: 💬 Question or discussion
-    url: https://github.com/YOUR_USER/filegraph3d/discussions
+    url: https://github.com/wing1008/codesynapt/discussions
     about: |
       Have a question, want to share what you built, or discuss an idea?
       Use Discussions instead of Issues — better visibility, threaded
       replies, and you can mark answers.
 
   - name: 🔒 Security vulnerability
-    url: https://github.com/YOUR_USER/filegraph3d/blob/main/SECURITY.md
+    url: https://github.com/wing1008/codesynapt/blob/main/SECURITY.md
     about: |
       Found a security issue? Please DO NOT open a public issue.
       See SECURITY.md for our responsible disclosure process.
 
   - name: 💼 Commercial license inquiry
-    url: https://github.com/YOUR_USER/filegraph3d/blob/main/LICENSES.md
+    url: https://github.com/wing1008/codesynapt/blob/main/LICENSES.md
     about: |
-      Want to use filegraph3d in a commercial product covered by
-      BSL? See LICENSES.md and contact the maintainer directly.
+      Want to use CodeSynapt in a commercial product covered by
+      AGPL? See LICENSES.md and contact the maintainer directly.
 
   - name: 🔌 Building a plugin
-    url: https://github.com/YOUR_USER/filegraph3d/blob/main/plugin-api/README.md
+    url: https://github.com/wing1008/codesynapt/blob/main/plugin-api/README.md
     about: |
       Building a theme, exporter, parser, or other plugin?
       Start with the plugin API docs.
 
   - name: 📖 General documentation
-    url: https://github.com/YOUR_USER/filegraph3d/blob/main/docs/README.md
+    url: https://github.com/wing1008/codesynapt/blob/main/docs/README.md
     about: |
       Looking for how to install, use, or contribute? Check the docs
       folder first — your question may already be answered there.

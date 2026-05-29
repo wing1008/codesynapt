@@ -1,11 +1,11 @@
 # CLAUDE.md
 
 Project-level context for Claude Code (and other AI coding agents)
-working on filegraph3d itself.
+working on CodeSynapt itself.
 
 ## TL;DR
 
-filegraph3d is a desktop app (Electron + Three.js) + CLI + MCP server
+CodeSynapt is a desktop app (Electron + Three.js) + CLI + MCP server
 that visualizes code dependency graphs in 3D. The killer angle is
 that it exposes the graph to AI coding agents via the MCP protocol —
 so an agent can ask "what files import auth.ts?" and get a precise
@@ -18,11 +18,13 @@ can watch).
    mistakes, patterns the existing code follows. **Read this first.**
 2. **[docs/architecture.md](./docs/architecture.md)** — how the
    internals fit together.
-3. **[docs/mcp-setup.md](./docs/mcp-setup.md)** — the MCP tool catalog
-   (19 tools) and the recommended call pattern. Important if you're
-   adding a new tool or endpoint.
+3. **[docs/mcp-setup.md](./docs/mcp-setup.md)** — MCP tool catalog. Note:
+   the 19-tool table in that doc is the pre-0.14 layout; current is **8
+   `cs_*` tools** dispatched via `{action: '...'}`. README and the slash
+   command bodies (`~/.claude/commands/codesynapt.md`) have the live
+   contract until that doc is rewritten.
 
-## When you're working IN this project, you can use filegraph3d ON itself
+## When you're working IN this project, you can use codesynapt ON itself
 
 ```sh
 npm install
@@ -32,9 +34,9 @@ npm start             # launches the app, scans the cwd by default
 Then from another terminal (or via the MCP integration if registered):
 
 ```sh
-fg3d summary          # Layer-1 project overview
-fg3d users src/app.js # who imports app.js — useful before refactoring
-fg3d blast public/app.js 3 users   # 3-hop impact of changing app.js
+cs summary          # Layer-1 project overview
+cs users src/app.js # who imports app.js — useful before refactoring
+cs blast public/app.js 3 users   # 3-hop impact of changing app.js
 ```
 
 Yes, this is a self-hosting moment. The tool helps maintain itself.
@@ -49,7 +51,7 @@ These are non-negotiable. Full rationale in `AGENTS.md`.
 - 🚫 **No localStorage without try/catch** (throws in private mode, quota)
 - 🚫 **No reaching into globals from plugins** — use `ctx.*` APIs only
 - 🚫 **No license boundary violations** — `plugin-api/` is MIT,
-  everything else is BSL 1.1. Don't copy MIT-licensed code into BSL.
+  everything else is AGPL-3.0. Don't copy MIT-licensed code into AGPL.
 
 ## When you add a new feature
 
@@ -65,4 +67,4 @@ Follow the checklist in `AGENTS.md` — but the most common gotchas:
 
 ## License
 
-Dual-licensed. Main app = BSL 1.1, `plugin-api/` = MIT. See `LICENSES.md`.
+Dual-licensed. Main app = AGPL-3.0, `plugin-api/` = MIT. See `LICENSES.md`.

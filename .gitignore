@@ -87,7 +87,8 @@ private/
 .scratch/
 
 # ─── App-generated state (history, traces) ─────────────────
-.filegraph3d/
+.codesynapt/
+.filegraph3d/   # legacy, kept for repos that haven't migrated yet
 
 # ─── Local debug / test scripts (Playwright + screenshots) ─
 _verify_*.py
@@ -117,3 +118,6 @@ _visual_check/
 _autoframe_shots/
 _now/
 _backup_*/
+
+# Bundled Node 22 LTS binary (76 MB) for Windows installer — downloaded on demand
+build/bundled-node/

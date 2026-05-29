@@ -1594,6 +1594,13 @@ body:not(.no-folder) #welcome { display: none; }
   transition: background 0.15s, border-color 0.15s;
 }
 .radio:hover { background: rgba(126, 207, 207, 0.06); }
+.radio.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: auto;          /* keep tooltip on hover */
+}
+.radio.is-disabled:hover { background: transparent; }
+.radio.is-disabled .radio-sub { font-style: italic; }
 .radio input[type="radio"] {
   margin-top: 2px;
   accent-color: var(--accent);
@@ -3291,7 +3298,7 @@ body[data-theme="carbon"] .welcome-frame {
 }
 body[data-theme="carbon"] .welcome-frame::before {
   /* A prefix line like a terminal prompt */
-  content: '$ filegraph3d --init';
+  content: '$ cs init';
   position: absolute;
   top: 12px; left: 16px;
   font-family: var(--font-mono);

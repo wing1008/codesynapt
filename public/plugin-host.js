@@ -44,7 +44,7 @@ function makeContext(manifest, hostHelpers) {
   }
 
   // Storage scoped to this plugin id
-  const storagePrefix = `filegraph3d:plugin:${manifest.id}:`
+  const storagePrefix = `codesynapt:plugin:${manifest.id}:`
   const storage = {
     get(key) {
       try {
@@ -291,7 +291,7 @@ export async function initPlugins(hostHelpers) {
   pluginRegistry.contextMenuItems.length = 0
   pluginRegistry.commands.clear()
 
-  if (!window.fg3d || !window.fg3d.listPlugins) {
+  if (!window.codesynapt || !window.codesynapt.listPlugins) {
     // Browser dev mode — no plugins available
     pluginRegistry.loaded = []
     return
@@ -299,7 +299,7 @@ export async function initPlugins(hostHelpers) {
 
   let discovered = []
   try {
-    discovered = await window.fg3d.listPlugins()
+    discovered = await window.codesynapt.listPlugins()
   } catch (err) {
     console.error('[plugin] discovery failed:', err)
     return

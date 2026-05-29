@@ -1,16 +1,27 @@
 # Getting help
 
-Need help with filegraph3d? Here's where to go.
+Need help with CodeSynapt? Here's where to go.
+
+## Support the project ❤️
+
+CodeSynapt is built by one person ([@wing1008](https://github.com/wing1008)) in their spare time. If it's useful to you, please consider:
+
+- ⭐ **[Star the repo](https://github.com/wing1008/codesynapt)** — free, takes 2 seconds, helps a lot
+- 💚 **[GitHub Sponsors](https://github.com/sponsors/wing1008)** — recurring or one-time
+- ☕ **[Buy me a coffee](https://buymeacoffee.com/wing1008)** — one-time tip
+- 🏢 **[Commercial license](../LICENSES.md)** — if your company needs to ship CodeSynapt without AGPL obligations
+
+
 
 ## Where to ask
 
 | Question type | Where to go |
 |---|---|
-| 🐛 **I found a bug** | [Open a bug report](https://github.com/YOUR_USER/filegraph3d/issues/new?template=bug_report.md) |
-| 💡 **I have a feature idea** | [Open a feature request](https://github.com/YOUR_USER/filegraph3d/issues/new?template=feature_request.md) |
-| 🔌 **Plugin development question** | [Open a plugin issue](https://github.com/YOUR_USER/filegraph3d/issues/new?template=plugin_issue.md) |
-| ❓ **How do I…?** | [GitHub Discussions](https://github.com/YOUR_USER/filegraph3d/discussions) |
-| 💬 **General chat / showing off what you built** | [Discussions](https://github.com/YOUR_USER/filegraph3d/discussions/categories/show-and-tell) |
+| 🐛 **I found a bug** | [Open a bug report](https://github.com/wing1008/codesynapt/issues/new?template=bug_report.md) |
+| 💡 **I have a feature idea** | [Open a feature request](https://github.com/wing1008/codesynapt/issues/new?template=feature_request.md) |
+| 🔌 **Plugin development question** | [Open a plugin issue](https://github.com/wing1008/codesynapt/issues/new?template=plugin_issue.md) |
+| ❓ **How do I…?** | [GitHub Discussions](https://github.com/wing1008/codesynapt/discussions) |
+| 💬 **General chat / showing off what you built** | [Discussions](https://github.com/wing1008/codesynapt/discussions/categories/show-and-tell) |
 | 🔒 **Security vulnerability** | Read [SECURITY.md](../SECURITY.md) — **don't open a public issue** |
 | 💼 **Commercial licensing** | Email the maintainer (see [LICENSES.md](../LICENSES.md)) |
 
@@ -51,7 +62,7 @@ Use them.
 
 ## Response time expectations
 
-filegraph3d is currently maintained by **one person in their spare time**.
+CodeSynapt is currently maintained by **one person in their spare time**.
 
 Realistic timelines:
 
@@ -74,7 +85,7 @@ This project doesn't provide:
 - **Phone or video support**
 - **Custom development for free** — but commercial arrangements are possible
 - **Onboarding sessions** — the docs are the onboarding
-- **Tech support for code that isn't filegraph3d** — e.g., "my Electron
+- **Tech support for code that isn't CodeSynapt** — e.g., "my Electron
   app is broken" isn't this project's problem
 - **24/7 uptime guarantees** — this is an offline desktop app; there
   is no service to be up
@@ -90,12 +101,12 @@ If you're building a plugin and got stuck:
    first — it covers 11 common failure modes.
 2. Check the [example plugins](../plugin-api/examples/) — copy and
    modify.
-3. If still stuck, open a [plugin issue](https://github.com/YOUR_USER/filegraph3d/issues/new?template=plugin_issue.md)
+3. If still stuck, open a [plugin issue](https://github.com/wing1008/codesynapt/issues/new?template=plugin_issue.md)
    with your manifest, your code, and the DevTools console output.
 
-## Translating filegraph3d
+## Translating CodeSynapt
 
-Currently filegraph3d is English-only. The codebase isn't internationalized
+Currently CodeSynapt is English-only. The codebase isn't internationalized
 yet — strings are inline. If you'd like to help internationalize it,
 open a Discussion to coordinate.
 

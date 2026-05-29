@@ -6,6 +6,27 @@ import { initPlugins, pluginRegistry } from './plugin-host.js'
 // backend.runStep() will detect this and stay on CPU.
 const stepGPU = null
 
+// One-time localStorage migration: `filegraph3d:*` → `codesynapt:*`.
+// Renamed from FileGraph 3D in 0.14.6. We copy old keys (don't delete)
+// so downgrading still works. Marker key prevents re-running.
+;(function migrateLocalStorage() {
+  try {
+    const marker = 'codesynapt:_migrated_from_filegraph3d'
+    if (localStorage.getItem(marker) === '1') return
+    let copied = 0
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (!k || !k.startsWith('filegraph3d:')) continue
+      const newKey = 'codesynapt:' + k.slice('filegraph3d:'.length)
+      if (localStorage.getItem(newKey) !== null) continue   // don't overwrite
+      const v = localStorage.getItem(k)
+      if (v != null) { localStorage.setItem(newKey, v); copied++ }
+    }
+    localStorage.setItem(marker, '1')
+    if (copied > 0) console.log(`[codesynapt] migrated ${copied} localStorage key(s) from filegraph3d:*`)
+  } catch (e) { /* private mode / quota / etc — skip */ }
+})()
+
 // ═══════════════════════════════════════════════════════════════
 //  Central event bus
 //
@@ -66,7 +87,7 @@ window.__bus = bus
 //  i18n — Korean / English. state.lang persists in localStorage,
 //  changes via the language toggle button in the top bar.
 // ═══════════════════════════════════════════════════════════════
-const LANG_KEY = 'filegraph3d:lang'
+const LANG_KEY = 'codesynapt:lang'
 const T = {
   ko: {
     // Top bar
@@ -155,9 +176,10 @@ const T = {
     'settings.physics.title':       '물리 백엔드',
     'settings.physics.help':        '매 프레임 노드 위치를 어떻게 계산할지. 큰 그래프에선 GPU가 훨씬 빠르지만 다른 앱과 그래픽카드를 공유.',
     'settings.physics.auto':        '자동',
-    'settings.physics.auto.sub':    'GPU가 한가하면 사용, 다른 앱이 GPU 점유 중이면 CPU로 전환 (권장)',
-    'settings.physics.gpu':         'GPU 전용',
-    'settings.physics.gpu.sub':     'WebGPU 강제. 최고 성능, 다른 GPU-heavy 앱과 충돌 가능',
+    'settings.physics.auto.sub':    'GPU가 한가하면 사용, 다른 앱이 GPU 점유 중이면 CPU로 전환 (권장 — 현재는 항상 CPU)',
+    'settings.physics.gpu':         'GPU 전용 (v0.6 예정)',
+    'settings.physics.gpu.sub':     'WebGPU compute shader는 아직 구현 안 됨 — 활성화하면 CPU fallback',
+    'settings.physics.gpu.tip':     'v0.6에 활성화 예정. 현재는 항상 CPU.',
     'settings.physics.cpu':         'CPU 전용',
     'settings.physics.cpu.sub':     'GPU를 일체 안 씀. Wan / Stable Diffusion / 학습 중에 유용',
     'settings.physics.active':      '활성',
@@ -196,7 +218,7 @@ const T = {
     'settings.camera.top':          '위에서',
     'settings.camera.side':         '옆에서',
     // History settings (existing)
-    'history.settings.help': '파일을 저장하거나 외부에서 수정될 때마다 파일당 최근 3개 버전을 자동 백업. 저장 위치: <code>.filegraph3d/history/</code>. 기본 OFF.',
+    'history.settings.help': '파일을 저장하거나 외부에서 수정될 때마다 파일당 최근 3개 버전을 자동 백업. 저장 위치: <code>.codesynapt/history/</code>. 기본 OFF.',
     'history.settings.toggle': '자동 히스토리 활성화',
     // AI trace panel
     'trace.panel.empty':    '대기 중… (MCP/CLI 호출 시 여기 표시)',
@@ -395,9 +417,10 @@ const T = {
     'settings.physics.title':       'physics backend',
     'settings.physics.help':        'How node positions get computed each frame. GPU is much faster for large graphs but shares your graphics card with other apps.',
     'settings.physics.auto':        'Auto',
-    'settings.physics.auto.sub':    'Use GPU when free; switch to CPU when GPU is busy with other apps (recommended)',
-    'settings.physics.gpu':         'GPU only',
-    'settings.physics.gpu.sub':     'Force WebGPU compute. Best perf, but may compete with other GPU-heavy apps',
+    'settings.physics.auto.sub':    'Use GPU when free; switch to CPU when GPU is busy (recommended — currently always CPU)',
+    'settings.physics.gpu':         'GPU only (planned for v0.6)',
+    'settings.physics.gpu.sub':     'WebGPU compute shaders not yet implemented — enabling falls back to CPU',
+    'settings.physics.gpu.tip':     'Coming in v0.6. Always CPU for now.',
     'settings.physics.cpu':         'CPU only',
     'settings.physics.cpu.sub':     "Don't touch the GPU at all. Useful while running Wan / Stable Diffusion / training",
     'settings.physics.active':      'active',
@@ -435,7 +458,7 @@ const T = {
     'settings.camera.default':      'default',
     'settings.camera.top':          'top-down',
     'settings.camera.side':         'side',
-    'history.settings.help': 'Auto-backups the latest 3 versions of each file on every save or external change. Stored in <code>.filegraph3d/history/</code>. Default OFF.',
+    'history.settings.help': 'Auto-backups the latest 3 versions of each file on every save or external change. Stored in <code>.codesynapt/history/</code>. Default OFF.',
     'history.settings.toggle': 'Enable auto history',
     'trace.panel.empty':    'Idle… (MCP/CLI calls appear here)',
     // Full trace panel
@@ -604,7 +627,7 @@ const AI_TRACE_COLORS = {
 // ═══════════════════════════════════════════════════════════════
 //  Environment / palette / utilities
 // ═══════════════════════════════════════════════════════════════
-const isElectron = !!window.fg3d
+const isElectron = !!window.codesynapt
 if (window.platform?.isMac) document.body.classList.add('is-mac')
 
 const TYPE_COLORS = {
@@ -2620,7 +2643,7 @@ function attachTreeHandlers(host) {
       state.searchSyntax = 'glob'
       const inp = document.getElementById('search')
       if (inp) inp.value = state.filterText
-      try { localStorage.setItem('filegraph3d:search_syntax', 'glob') } catch {}
+      try { localStorage.setItem('codesynapt:search_syntax', 'glob') } catch {}
       if (window.syncSearchSyntaxBtn) window.syncSearchSyntaxBtn()
       applyFilter()
     })
@@ -2681,7 +2704,7 @@ function setTreeCollapsed(collapsed) {
   document.getElementById('ftToggle').textContent = collapsed ? '+' : '−'
   const tbtn = document.getElementById('treeToggleBtn')
   if (tbtn) tbtn.classList.toggle('active', collapsed)
-  try { localStorage.setItem('filegraph3d:tree_collapsed', collapsed ? 'true' : 'false') } catch {}
+  try { localStorage.setItem('codesynapt:tree_collapsed', collapsed ? 'true' : 'false') } catch {}
 }
 function toggleTree() {
   const collapsed = !document.getElementById('fileTreePanel').classList.contains('collapsed')
@@ -2693,7 +2716,7 @@ document.getElementById('treeToggleBtn')?.addEventListener('click', toggleTree)
 
 // Restore tree collapsed state
 try {
-  if (localStorage.getItem('filegraph3d:tree_collapsed') === 'true') {
+  if (localStorage.getItem('codesynapt:tree_collapsed') === 'true') {
     setTreeCollapsed(true)
   }
 } catch {}
@@ -2732,7 +2755,7 @@ bus.on('activeset:changed', () => {
 //    { starred: string[], pipelines: [{id,name,files}],
 //      activePipelines: string[], mode: 'off'|'dim'|'hide' }
 // ═══════════════════════════════════════════════════════════════
-const ACTIVESET_KEY_PREFIX = 'filegraph3d:active:'
+const ACTIVESET_KEY_PREFIX = 'codesynapt:active:'
 
 function activeSetKey(root) { return ACTIVESET_KEY_PREFIX + (root || '') }
 
@@ -2963,7 +2986,7 @@ bus.on('snapshot:applied', renderPipelinesPanel)
 //  root. Lets you quickly jump back to files you've been looking
 //  at without searching again.
 // ═══════════════════════════════════════════════════════════════
-const RECENT_KEY_PREFIX = 'filegraph3d:recent:'
+const RECENT_KEY_PREFIX = 'codesynapt:recent:'
 const RECENT_LIMIT = 8
 
 function recentKey(root) { return RECENT_KEY_PREFIX + (root || '') }
@@ -3068,7 +3091,7 @@ function renderFilterBadges() {
       title: 'Search mode is "hide non-matching" — click ✕ to switch to highlight',
       clear: () => {
         state.searchMode = 'highlight'
-        try { localStorage.setItem('filegraph3d:search_mode', 'highlight') } catch {}
+        try { localStorage.setItem('codesynapt:search_mode', 'highlight') } catch {}
         if (window.syncSearchModeBtn) window.syncSearchModeBtn()
         applyFilter()
       },
@@ -3082,7 +3105,7 @@ function renderFilterBadges() {
       title: 'Files in the same folder are pulled toward each other',
       clear: () => {
         state.folderGrouping = false
-        try { localStorage.setItem('filegraph3d:folder_grouping', 'false') } catch {}
+        try { localStorage.setItem('codesynapt:folder_grouping', 'false') } catch {}
         const btn = document.getElementById('folderGroupBtn')
         if (btn) btn.classList.remove('active')
         reheat(0.3)
@@ -3097,7 +3120,7 @@ function renderFilterBadges() {
       title: 'Ripple ignores depth limit and reaches every connected file',
       clear: () => {
         state.showAllConnected = false
-        try { localStorage.setItem('filegraph3d:show_all_connected', 'false') } catch {}
+        try { localStorage.setItem('codesynapt:show_all_connected', 'false') } catch {}
         invalidateFocusCache()
         const btn = document.getElementById('showAllBtn')
         if (btn) btn.classList.remove('active')
@@ -4041,8 +4064,8 @@ function renderInspector(id) {
     el.addEventListener('click', () => {
       const a = el.dataset.action
       if (!isElectron) return
-      if (a === 'open') window.fg3d.openInEditor(id)
-      if (a === 'reveal') window.fg3d.revealInOS(id)
+      if (a === 'open') window.codesynapt.openInEditor(id)
+      if (a === 'reveal') window.codesynapt.revealInOS(id)
     })
   })
   refreshHistory(id)
@@ -4053,7 +4076,7 @@ async function refreshHistory(id) {
   if (!host) return
   if (!isElectron) { host.innerHTML = `<div class="ins-sub" style="opacity:0.6">${t('history.electron.required')}</div>`; return }
   if (!state.historyEnabled) { host.innerHTML = `<div class="ins-sub" style="opacity:0.6">${t('history.off')}</div>`; return }
-  const versions = await window.fg3d.listHistory(id)
+  const versions = await window.codesynapt.listHistory(id)
   if (!versions.length) {
     host.innerHTML = `<div class="ins-sub" style="opacity:0.6">${t('history.none')}</div>`
     return
@@ -4074,7 +4097,7 @@ async function refreshHistory(id) {
       const ts = parseInt(el.dataset.ts, 10)
       const action = el.dataset.action
       if (action === 'view') {
-        const content = await window.fg3d.readHistory(id, ts)
+        const content = await window.codesynapt.readHistory(id, ts)
         if (content === null) return toast(t('history.snap_not_found'))
         const preview = document.getElementById('preview')
         if (preview) {
@@ -4086,7 +4109,7 @@ async function refreshHistory(id) {
           if (status) { status.textContent = t('history.viewing', { when: new Date(ts).toLocaleString() }); status.className = 'ins-save-status' }
         }
       } else if (action === 'restore') {
-        const r = await window.fg3d.restoreHistory(id, ts)
+        const r = await window.codesynapt.restoreHistory(id, ts)
         if (!r?.ok) return toast(t('history.restore_failed', { err: r?.error || 'unknown' }))
         toast(t('history.restored'))
         setPreview(id, r.content)
@@ -4126,7 +4149,7 @@ function setPreview(id, content) {
         if (status) { status.textContent = t('editor.save_unavailable'); status.className = 'ins-save-status err' }
         return
       }
-      const r = await window.fg3d.writeFile(fileId, next)
+      const r = await window.codesynapt.writeFile(fileId, next)
       if (status) {
         if (r?.ok) {
           status.textContent = t('editor.saved'); status.className = 'ins-save-status ok'
@@ -4225,7 +4248,7 @@ function openDiffPreview() {
   }
   document.getElementById('diffConfirm').onclick = async () => {
     if (!isElectron) return toast(t('editor.save_unavailable'))
-    const r = await window.fg3d.writeFile(id, current)
+    const r = await window.codesynapt.writeFile(id, current)
     if (r?.ok) {
       el.dataset.original = current
       const status = document.getElementById('saveStatus')
@@ -4294,8 +4317,8 @@ function updateStats() {
 }
 
 // ─── Search wiring ──────────────────────────────────────────
-const SEARCH_SYNTAX_KEY = 'filegraph3d:search_syntax'
-const SEARCH_MODE_KEY   = 'filegraph3d:search_mode'
+const SEARCH_SYNTAX_KEY = 'codesynapt:search_syntax'
+const SEARCH_MODE_KEY   = 'codesynapt:search_mode'
 try {
   const sx = localStorage.getItem(SEARCH_SYNTAX_KEY)
   if (sx === 'plain' || sx === 'glob' || sx === 'regex') state.searchSyntax = sx
@@ -4509,7 +4532,7 @@ document.getElementById('exportPngBtn').addEventListener('click', () => {
     renderer.render(scene, camera)
     canvas.toBlob((blob) => {
       if (!blob) { toast('Screenshot failed'); return }
-      download(`filegraph3d-${timestamp()}.png`, blob, 'image/png')
+      download(`codesynapt-${timestamp()}.png`, blob, 'image/png')
       toast('Saved screenshot')
     }, 'image/png')
   } catch (err) {
@@ -4537,7 +4560,7 @@ document.getElementById('exportJsonBtn').addEventListener('click', () => {
     setTimeout(() => {
       try {
         const json = JSON.stringify(data, null, 2)
-        download(`filegraph3d-${timestamp()}.json`, json, 'application/json')
+        download(`codesynapt-${timestamp()}.json`, json, 'application/json')
         toast(`Exported ${data.nodes.length} nodes / ${data.edges.length} edges`)
       } catch (err) {
         console.error('JSON serialize failed:', err)
@@ -4557,7 +4580,7 @@ document.getElementById('exportCsvBtn').addEventListener('click', () => {
     const esc = (s) => /[,"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
     lines.push(`${esc(e.s)},${esc(e.t)},${esc(e.k)}`)
   }
-  download(`filegraph3d-edges-${timestamp()}.csv`, lines.join('\n'), 'text/csv')
+  download(`codesynapt-edges-${timestamp()}.csv`, lines.join('\n'), 'text/csv')
   toast(`Exported ${state.edges.length} edges as CSV`)
 })
 
@@ -4581,7 +4604,7 @@ document.querySelectorAll('.preset-btn[data-view]').forEach((btn) => {
 // Custom slots 1-3 — Cmd/Ctrl + 1/2/3 saves, plain 1/2/3 restores
 const customViews = {}
 try {
-  const saved = JSON.parse(localStorage.getItem('filegraph3d:custom_views') || '{}')
+  const saved = JSON.parse(localStorage.getItem('codesynapt:custom_views') || '{}')
   Object.assign(customViews, saved)
 } catch {}
 function saveCustomView(slot) {
@@ -4589,7 +4612,7 @@ function saveCustomView(slot) {
     theta: cam.theta, phi: cam.phi, radius: cam.targetRadius,
     target: { x: cam.target.x, y: cam.target.y, z: cam.target.z },
   }
-  try { localStorage.setItem('filegraph3d:custom_views', JSON.stringify(customViews)) } catch {}
+  try { localStorage.setItem('codesynapt:custom_views', JSON.stringify(customViews)) } catch {}
   toast(`View saved to slot ${slot}`)
 }
 function restoreCustomView(slot) {
@@ -4617,7 +4640,7 @@ async function openChanges() {
 function closeChanges() { changesPanel.classList.add('hidden'); expandedChanges.clear() }
 async function refreshChanges() {
   try {
-    const items = await window.fg3d.getChanges()
+    const items = await window.codesynapt.getChanges()
     if (!items.length) {
       changesList.innerHTML = `<div class="changes-empty">${t('changes.empty')}</div>`
       return
@@ -4666,7 +4689,7 @@ async function refreshChanges() {
       const target = changesList.querySelector(`[data-diff="${CSS.escape(id)}"]`)
       if (!target) continue
       try {
-        const d = await window.fg3d.getChangeDiff(id)
+        const d = await window.codesynapt.getChangeDiff(id)
         if (!d || d.error) { target.textContent = `error: ${d?.error || 'failed'}`; continue }
         const out = []
         for (const ln of d.lines) {
@@ -4713,7 +4736,7 @@ function renderTourStop() {
 async function openTour() {
   if (!isElectron) return toast(t('tour.requires_electron'))
   try {
-    const data = await window.fg3d.getTour()
+    const data = await window.codesynapt.getTour()
     if (!data || data.error) return toast(`tour error: ${data?.error || 'failed'}`)
     if (!data.stops || !data.stops.length) return toast(t('tour.no_stops'))
     tourStops = data.stops
@@ -4759,7 +4782,7 @@ function closePackages() {
 }
 async function refreshPackages() {
   try {
-    const data = await window.fg3d.getPackages()
+    const data = await window.codesynapt.getPackages()
     packagesData = data
     if (!data || !data.packages || data.packages.length === 0) {
       pkgMetaEl.textContent = t('packages.not_monorepo', { kind: data?.kind || 'none' })
@@ -4800,7 +4823,7 @@ async function refreshPackages() {
 
 async function openPackageDetail(name) {
   try {
-    const d = await window.fg3d.getPackage(name)
+    const d = await window.codesynapt.getPackage(name)
     if (!d || d.error) return toast(`error: ${d?.error || 'failed'}`)
     const out = []
     out.push(`<div class="pkg-detail-head">
@@ -4934,9 +4957,9 @@ function closeTraceFull() {
 
 async function refreshTraceFull() {
   try {
-    const log = await window.fg3d.traceLog({ tool: traceCurrentToolFilter || undefined })
+    const log = await window.codesynapt.traceLog({ tool: traceCurrentToolFilter || undefined })
     traceCurrentData = log
-    const stats = await window.fg3d.traceStats()
+    const stats = await window.codesynapt.traceStats()
     traceCurrentStats = stats
     const dur = stats.durationMs > 0 ? (stats.durationMs / 1000).toFixed(1) + 's' : '—'
     traceFullMeta.textContent = t('trace.meta', {
@@ -5045,7 +5068,7 @@ function renderTraceStats() {
 
 async function renderTraceSessions() {
   traceFullBody.innerHTML = `<div class="trace-empty">${t('trace.loading')}</div>`
-  const data = await window.fg3d.traceSessions()
+  const data = await window.codesynapt.traceSessions()
   if (!data.sessions.length) {
     traceFullBody.innerHTML = `<div class="trace-empty">${t('trace.no_sessions')}</div>`
     return
@@ -5064,7 +5087,7 @@ async function renderTraceSessions() {
   traceFullBody.querySelectorAll('[data-id]').forEach((el) => {
     el.addEventListener('click', async () => {
       const id = parseInt(el.dataset.id, 10)
-      const data = await window.fg3d.traceSession(id)
+      const data = await window.codesynapt.traceSession(id)
       if (!data) return toast(t('trace.session_load_failed'))
       // Render the loaded session's events into the log
       traceCurrentData = { sessionId: id, events: data.events }
@@ -5113,14 +5136,14 @@ document.getElementById('aiTraceFullBtn')?.addEventListener('click', openTraceFu
 document.getElementById('closeTraceFull')?.addEventListener('click', closeTraceFull)
 document.getElementById('traceReplayBtn')?.addEventListener('click', startTraceReplay)
 document.getElementById('traceClearBtn')?.addEventListener('click', async () => {
-  await window.fg3d.traceClear()
+  await window.codesynapt.traceClear()
   state.aiTraceLog.length = 0
   refreshTracePanel()
   await refreshTraceFull()
   toast(t('trace.cleared'))
 })
 document.getElementById('traceExportBtn')?.addEventListener('click', async () => {
-  const r = await window.fg3d.traceExport()
+  const r = await window.codesynapt.traceExport()
   if (r.canceled) return
   if (r.error) return toast(`error: ${r.error}`)
   toast(t('trace.exported', { n: r.eventCount, path: r.path }))
@@ -5172,7 +5195,7 @@ function closeLegacy() { legacyPanel.classList.add('hidden') }
 async function refreshLegacy() {
   try {
     legacyListEl.innerHTML = `<div class="legacy-empty">${t('legacy.loading')}</div>`
-    legacyData = await window.fg3d.getLegacy()
+    legacyData = await window.codesynapt.getLegacy()
     if (!legacyData) {
       legacyListEl.innerHTML = `<div class="legacy-empty">${t('legacy.empty')}</div>`
       return
@@ -5308,7 +5331,7 @@ const pswCloseBtn    = document.getElementById('pswClose')
 
 async function refreshProjectSwitcher() {
   if (!isElectron) return
-  const data = await window.fg3d.listProjects()
+  const data = await window.codesynapt.listProjects()
   const pinned = data.pinned || []
   const recent = (data.recent || []).filter((p) => !pinned.some((x) => x.path === p))
   const current = data.current || ''
@@ -5340,7 +5363,7 @@ async function refreshProjectSwitcher() {
     row.addEventListener('click', async (ev) => {
       if (ev.target.classList.contains('psw-pin')) return
       const p = row.dataset.path
-      try { await window.fg3d.loadFolder(p); pswPanel.classList.add('hidden') }
+      try { await window.codesynapt.loadFolder(p); pswPanel.classList.add('hidden') }
       catch (e) { toast(t('psw.open_failed', { err: e.message || e })) }
     })
   })
@@ -5351,9 +5374,9 @@ async function refreshProjectSwitcher() {
       const p = btn.dataset.path
       if (btn.dataset.action === 'pin') {
         const name = window.prompt(t('psw.rename.prompt'), basename(p)) || basename(p)
-        await window.fg3d.pinProject(p, name)
+        await window.codesynapt.pinProject(p, name)
       } else {
-        if (window.confirm(t('psw.unpin.confirm'))) await window.fg3d.unpinProject(p)
+        if (window.confirm(t('psw.unpin.confirm'))) await window.codesynapt.unpinProject(p)
       }
       refreshProjectSwitcher()
     })
@@ -5372,7 +5395,7 @@ pswCloseBtn?.addEventListener('click', () => pswPanel.classList.add('hidden'))
 pswPinBtn?.addEventListener('click', async () => {
   if (!state.root) { toast(t('psw.no_current')); return }
   const name = window.prompt(t('psw.rename.prompt'), basename(state.root)) || basename(state.root)
-  if (isElectron) await window.fg3d.pinProject(state.root, name)
+  if (isElectron) await window.codesynapt.pinProject(state.root, name)
   toast(t('psw.pinned'))
   refreshProjectSwitcher()
 })
@@ -5414,7 +5437,7 @@ async function openTimelapse() {
   tlStamp.textContent = 'loading git history…'
   tlMeta.textContent = ''
   try {
-    const data = await window.fg3d.getTimeline()
+    const data = await window.codesynapt.getTimeline()
     if (!data || !data.isGit) {
       tlStamp.textContent = '(not a git repo)'
       tlMeta.textContent = data?.error || ''
@@ -5484,7 +5507,7 @@ tlPlay.addEventListener('click', () => {
 })
 
 // ─── File history toggle ─────────────────────────────────────
-const HISTORY_ENABLED_KEY = 'filegraph3d:history_enabled'
+const HISTORY_ENABLED_KEY = 'codesynapt:history_enabled'
 state.historyEnabled = false
 try {
   if (localStorage.getItem(HISTORY_ENABLED_KEY) === 'true') state.historyEnabled = true
@@ -5495,14 +5518,14 @@ if (historyToggle) {
   historyToggle.addEventListener('change', () => {
     state.historyEnabled = historyToggle.checked
     try { localStorage.setItem(HISTORY_ENABLED_KEY, state.historyEnabled ? 'true' : 'false') } catch {}
-    if (isElectron) window.fg3d.setHistoryEnabled(state.historyEnabled)
+    if (isElectron) window.codesynapt.setHistoryEnabled(state.historyEnabled)
     if (state.selectedId) refreshHistory(state.selectedId)
   })
 }
-if (isElectron) window.fg3d.setHistoryEnabled(state.historyEnabled)
+if (isElectron) window.codesynapt.setHistoryEnabled(state.historyEnabled)
 
 // ─── Folder grouping toggle ──────────────────────────────────
-const FOLDER_GROUP_KEY = 'filegraph3d:folder_grouping'
+const FOLDER_GROUP_KEY = 'codesynapt:folder_grouping'
 try {
   if (localStorage.getItem(FOLDER_GROUP_KEY) === 'true') state.folderGrouping = true
 } catch {}
@@ -5555,12 +5578,12 @@ folderGroupBtn.addEventListener('click', () => {
 })
 
 // ─── Node distance / size sliders ────────────────────────────
-const NODE_DIST_KEY = 'filegraph3d:node_distance'
-const NODE_SIZE_KEY = 'filegraph3d:node_size_v2'   // v2: rebased default — old 0.3× is now 1.0×
-const MAX_WORLD_KEY = 'filegraph3d:max_world_radius'
-const FOLDER_STRENGTH_KEY = 'filegraph3d:folder_strength'
-const FOLDER_SPREAD_KEY   = 'filegraph3d:folder_spread'
-try { localStorage.removeItem('filegraph3d:node_size') } catch {}
+const NODE_DIST_KEY = 'codesynapt:node_distance'
+const NODE_SIZE_KEY = 'codesynapt:node_size_v2'   // v2: rebased default — old 0.3× is now 1.0×
+const MAX_WORLD_KEY = 'codesynapt:max_world_radius'
+const FOLDER_STRENGTH_KEY = 'codesynapt:folder_strength'
+const FOLDER_SPREAD_KEY   = 'codesynapt:folder_spread'
+try { localStorage.removeItem('codesynapt:node_size') } catch {}
 try {
   const d = parseFloat(localStorage.getItem(NODE_DIST_KEY))
   if (!isNaN(d) && d >= 0.3 && d <= 3) state.nodeDistanceScale = d
@@ -5724,8 +5747,8 @@ function handleVisibilityChange(visible) {
     reheat(0.2)
   }
 }
-if (isElectron && window.fg3d.onWindowVisibility) {
-  window.fg3d.onWindowVisibility(({ visible }) => handleVisibilityChange(visible))
+if (isElectron && window.codesynapt.onWindowVisibility) {
+  window.codesynapt.onWindowVisibility(({ visible }) => handleVisibilityChange(visible))
 } else {
   document.addEventListener('visibilitychange', () => {
     handleVisibilityChange(!document.hidden)
@@ -5751,7 +5774,7 @@ async function refreshFolder() {
   refreshing = true
   refreshBtn?.classList.add('spinning')
   try {
-    await window.fg3d.loadFolder(state.root)
+    await window.codesynapt.loadFolder(state.root)
   } catch (err) {
     console.error('refreshFolder failed:', err)
     toast(`Refresh failed: ${err.message || err}`)
@@ -5773,7 +5796,7 @@ async function pickFolder() {
   if (!isElectron) return
   pickingFolder = true
   try {
-    await window.fg3d.pickFolder()
+    await window.codesynapt.pickFolder()
   } catch (err) {
     console.error('pickFolder failed:', err)
     toast(`Couldn't open folder: ${err.message || err}`)
@@ -5783,7 +5806,7 @@ async function pickFolder() {
 }
 async function readFile(id) {
   if (isElectron) {
-    const r = await window.fg3d.readFile(id)
+    const r = await window.codesynapt.readFile(id)
     return r?.content || ''
   } else if (ws && ws.readyState === 1) {
     return new Promise((resolve) => {
@@ -5804,7 +5827,7 @@ async function readFile(id) {
 
 async function refreshWelcome() {
   if (!isElectron) return
-  const s = await window.fg3d.getState()
+  const s = await window.codesynapt.getState()
   const list = document.getElementById('recentList')
   if (!s.recentFolders || !s.recentFolders.length) { list.innerHTML = ''; return }
   list.innerHTML = `<div class="recent-label">recent</div>` +
@@ -5816,7 +5839,7 @@ async function refreshWelcome() {
       el.style.opacity = '0.5'
       el.disabled = true
       try {
-        await window.fg3d.loadFolder(el.dataset.folder)
+        await window.codesynapt.loadFolder(el.dataset.folder)
       } catch (err) {
         toast(`Couldn't load: ${err.message || err}`)
       } finally {
@@ -5885,7 +5908,7 @@ window.addEventListener('drop', async (e) => {
   // and reports back. So we just send the path; main.cjs already
   // validates and emits an error if it's not a directory.
   try {
-    await window.fg3d.loadFolder(file.path)
+    await window.codesynapt.loadFolder(file.path)
   } catch (err) {
     console.error('loadFolder failed:', err)
     toast(`Couldn't open: ${err.message || err}`)
@@ -5921,22 +5944,22 @@ function toast(message) {
 
 let ws = null
 if (isElectron) {
-  window.fg3d.onSnapshot((d) => {
+  window.codesynapt.onSnapshot((d) => {
     state.monorepo = d.monorepo || null
     state.pkgEdges = d.pkgEdges || []
     applySnapshot(d.files, d.edges, d.root)
     bus.emit('monorepo:updated', state.monorepo)
   })
-  window.fg3d.onFolderLoaded(({ root }) => {
+  window.codesynapt.onFolderLoaded(({ root }) => {
     state.root = root
     document.getElementById('pathLabel').textContent = root
     document.body.classList.remove('no-folder')
   })
-  window.fg3d.onNoFolder(() => { clearGraph(); refreshWelcome() })
-  window.fg3d.onError(({ message }) => { console.error(message); toast(message) })
-  if (window.fg3d.onScanProgress) window.fg3d.onScanProgress(handleScanProgress)
-  if (window.fg3d.onControl) {
-    window.fg3d.onControl((msg) => {
+  window.codesynapt.onNoFolder(() => { clearGraph(); refreshWelcome() })
+  window.codesynapt.onError(({ message }) => { console.error(message); toast(message) })
+  if (window.codesynapt.onScanProgress) window.codesynapt.onScanProgress(handleScanProgress)
+  if (window.codesynapt.onControl) {
+    window.codesynapt.onControl((msg) => {
       const node = state.nodes.get(msg.id)
       if (!node) return
       if (msg.type === 'focus') {
@@ -6027,7 +6050,7 @@ backend.init({ onStatusChange: updateSettingsUI })
 backend.subscribe(updateSettingsUI)
 
 // ─── Theme picker ──────────────────────────────────────
-const THEME_KEY = 'filegraph3d:theme'
+const THEME_KEY = 'codesynapt:theme'
 const VALID_THEMES = ['observatory', 'minimal', 'terminal', 'maximal', 'carbon', 'mono', 'daylight']
 
 function applyTheme(theme) {
@@ -6057,8 +6080,8 @@ document.querySelectorAll('.theme-card').forEach((card) => {
 })
 
 // ─── Focus-depth controls ────────────────────────────────────
-const FOCUS_DEPTH_KEY = 'filegraph3d:focus_depth'
-const SHOW_ALL_KEY = 'filegraph3d:show_all_connected'
+const FOCUS_DEPTH_KEY = 'codesynapt:focus_depth'
+const SHOW_ALL_KEY = 'codesynapt:show_all_connected'
 const focusDepthInput = document.getElementById('focusDepthInput')
 const showAllBtn = document.getElementById('showAllBtn')
 
@@ -6124,7 +6147,7 @@ showAllBtn.addEventListener('click', () => {
 // ═══════════════════════════════════════════════════════════════
 
 // ─── Project info storage ──────────────────────────────────────
-const PROJECT_INFO_KEY_PREFIX = 'filegraph3d:project:'
+const PROJECT_INFO_KEY_PREFIX = 'codesynapt:project:'
 
 function projectKey(root) {
   return PROJECT_INFO_KEY_PREFIX + (root || '')
@@ -6317,7 +6340,7 @@ function renderNodeContext(n) {
     }
   })
   document.getElementById('ctxOpenInEditor')?.addEventListener('click', () => {
-    if (state.selectedId && isElectron) window.fg3d.openInEditor(state.selectedId)
+    if (state.selectedId && isElectron) window.codesynapt.openInEditor(state.selectedId)
   })
 }
 
@@ -6536,7 +6559,7 @@ minimapCanvas.addEventListener('pointercancel', endMinimapDrag)
 window.addEventListener('blur', () => { minimapDragging = false; minimapPointerId = null })
 
 // ─── Right rail toggle (header button + inline minimap button) ──
-const RIGHT_RAIL_KEY = 'filegraph3d:right_rail_collapsed'
+const RIGHT_RAIL_KEY = 'codesynapt:right_rail_collapsed'
 const rightRail = document.getElementById('rightRail')
 const rightRailBtn = document.getElementById('rightRailBtn')
 const minimapToggleBtn = document.getElementById('minimapToggle')
@@ -6685,8 +6708,8 @@ function refreshThemePicker() {
     manageBtn.style.cssText = 'margin-top: 8px; width: 100%;'
     manageBtn.textContent = 'Open plugin folder…'
     manageBtn.addEventListener('click', () => {
-      if (window.fg3d?.openPluginDir) {
-        window.fg3d.openPluginDir().then((dir) => {
+      if (window.codesynapt?.openPluginDir) {
+        window.codesynapt.openPluginDir().then((dir) => {
           if (dir) toast(`Plugin folder: ${dir}`)
         })
       }

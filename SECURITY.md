@@ -2,7 +2,7 @@
 
 ## Data handling
 
-FileGraph 3D runs entirely on your local machine. Specifically:
+CodeSynapt runs entirely on your local machine. Specifically:
 
 - **No network access.** The app does not connect to any external
   server, telemetry endpoint, or update service. You can verify this
@@ -16,17 +16,24 @@ FileGraph 3D runs entirely on your local machine. Specifically:
   the folders you scan.
 - **Local-only persistence.** Settings, recent folders, project info,
   and active-set markings are stored in:
-  - macOS: `~/Library/Application Support/FileGraph 3D/`
-  - Windows: `%APPDATA%\FileGraph 3D\`
-  - Linux: `~/.config/FileGraph 3D/`
+  - macOS: `~/Library/Application Support/CodeSynapt/`
+  - Windows: `%APPDATA%\CodeSynapt\`
+  - Linux: `~/.config/CodeSynapt/`
   - Plus localStorage inside the Electron renderer (per-installation)
 
   This data is never transmitted anywhere. Deleting these directories
   resets the app to factory defaults.
 
+### Audit + trace logs (local-only)
+
+- **Audit log** of every HTTP control API request lives at `~/.codesynapt/audit/YYYY-MM-DD.jsonl` (NDJSON).
+- **AI session traces** of every MCP tool call live at `<project>/.codesynapt/traces/session-<ts>.jsonl`.
+- Both are kept for **30 days by default** and auto-pruned on app start. Override with `CS_AUDIT_RETENTION_DAYS=N` env (0 = keep forever).
+- Neither is ever transmitted. You can `rm` them at any time.
+
 ## What the app reads
 
-When you open a folder, FileGraph 3D scans it to extract dependency
+When you open a folder, CodeSynapt scans it to extract dependency
 relationships:
 
 - File contents are read to extract `import`/`require`/`include`
@@ -65,7 +72,7 @@ minor release.
 Currently the released binaries are **not code-signed**. This means
 on first launch:
 
-- **macOS** will show "FileGraph 3D can't be opened because the
+- **macOS** will show "CodeSynapt can't be opened because the
   developer cannot be verified." Right-click the app → Open → Open
   Anyway, or System Settings → Privacy & Security → Open Anyway.
 - **Windows** will show "Windows protected your PC" via SmartScreen.
@@ -87,8 +94,8 @@ matches what the build produced.
 To build from source yourself:
 
 ```sh
-git clone https://github.com/YOUR_USER/filegraph3d.git
-cd filegraph3d
+git clone https://github.com/YOUR_USER/codesynapt.git
+cd codesynapt
 git checkout v0.10.1   # whichever version you want to verify
 npm ci                  # exact deps from package-lock.json
 npm run dist:mac        # or dist:win, dist:linux

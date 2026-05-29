@@ -3,7 +3,7 @@
 > Maintainer reference. Lists every label this repository uses, what
 > it means, and which automation depends on it.
 
-filegraph3d uses GitHub labels for three purposes:
+CodeSynapt uses GitHub labels for three purposes:
 
 1. **Triage** — what kind of issue/PR is this?
 2. **Release-drafter categorization** — which section of the release notes?

@@ -28,7 +28,7 @@
 //    by running one GPU step and checking its timing.
 // ═══════════════════════════════════════════════════════════════
 
-const STORAGE_KEY = 'filegraph3d:backend_mode'
+const STORAGE_KEY = 'codesynapt:backend_mode'
 const SAMPLE_WINDOW = 30          // frames to average for contention
 const CONTENTION_MS = 10          // GPU step >10ms avg = contended
 const RECOVERY_MS = 4             // probe shows <4ms = healthy again

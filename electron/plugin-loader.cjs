@@ -9,9 +9,9 @@
 //     contextIsolation) and loads theme CSS directly.
 //
 //  The plugin directory is one of:
-//    macOS:   ~/Library/Application Support/FileGraph 3D/plugins
-//    Windows: %APPDATA%\FileGraph 3D\plugins
-//    Linux:   ~/.config/FileGraph 3D/plugins
+//    macOS:   ~/Library/Application Support/codesynapt/plugins
+//    Windows: %APPDATA%\codesynapt\plugins
+//    Linux:   ~/.config/codesynapt/plugins
 //
 //  Each plugin is its own folder containing manifest.json plus
 //  the entry file (theme.css or main.js).

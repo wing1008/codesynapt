@@ -9,7 +9,7 @@ assignees: ''
 <!--
 Thanks for the suggestion! Before filling this out, please consider:
 
-1. Could this be a plugin instead? filegraph3d has an extensible
+1. Could this be a plugin instead? CodeSynapt has an extensible
    plugin API for themes, exporters, parsers, layouts, panels, and
    actions. See plugin-api/README.md.
 

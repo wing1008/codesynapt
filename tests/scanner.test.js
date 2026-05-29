@@ -83,7 +83,7 @@ describe('Scanner — vendor detection (P1·2)', () => {
   })
 })
 
-describe('Scanner — IGNORE_DIRS + .fg3dignore', () => {
+describe('Scanner — IGNORE_DIRS + .codesynaptignore (with legacy .fg3dignore fallback)', () => {
   let ignoreRoot
 
   beforeAll(() => {
@@ -99,10 +99,10 @@ describe('Scanner — IGNORE_DIRS + .fg3dignore', () => {
     fs.mkdirSync(path.join(ignoreRoot, '.obsidian'))
     fs.writeFileSync(path.join(ignoreRoot, '.obsidian/theme.css'), 'body{}')
 
-    // .fg3dignore: hide tools/
+    // .codesynaptignore: hide tools/ (legacy .fg3dignore name is also honored via fallback)
     fs.mkdirSync(path.join(ignoreRoot, 'tools'))
     fs.writeFileSync(path.join(ignoreRoot, 'tools/helper.ts'), 'export const h = 1')
-    fs.writeFileSync(path.join(ignoreRoot, '.fg3dignore'), 'tools/\n')
+    fs.writeFileSync(path.join(ignoreRoot, '.codesynaptignore'), 'tools/\n')
   })
   afterAll(() => { try { fs.rmSync(ignoreRoot, { recursive: true, force: true }) } catch {} })
 
@@ -116,7 +116,7 @@ describe('Scanner — IGNORE_DIRS + .fg3dignore', () => {
     expect(snap.files.some((f) => f.id.startsWith('.obsidian/'))).toBe(false)
   })
 
-  it('honours .fg3dignore', async () => {
+  it('honours .codesynaptignore', async () => {
     const { snap } = await scanOnce(ignoreRoot)
     expect(snap.files.some((f) => f.id.startsWith('tools/'))).toBe(false)
     // tracked file still present

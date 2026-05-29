@@ -10,14 +10,14 @@ import { Scanner } from './packages/core/scanner.js'
 const args = process.argv.slice(2)
 if (args.includes('-h') || args.includes('--help')) {
   console.log(`
-filegraph3d — Real-time 3D file/code dependency visualizer
+codesynapt — Real-time 3D file/code dependency visualizer
 
 Usage:
-  filegraph3d <directory> [--port <n>]
+  codesynapt <directory> [--port <n>]
 
 Examples:
-  filegraph3d .
-  filegraph3d ~/projects/myapp --port 8080
+  codesynapt .
+  codesynapt ~/projects/myapp --port 8080
 `)
   process.exit(0)
 }
@@ -100,9 +100,10 @@ wss.on('connection', (ws) => {
 })
 
 // ─── Start ────────────────────────────────────────────────────
-server.listen(PORT, () => {
+// Bind to loopback only — never expose this dev server to the LAN.
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`
-  ┌─ filegraph3d ─────────────────────────────────
+  ┌─ codesynapt ─────────────────────────────────
   │  root: ${ROOT}
   │  open: http://localhost:${PORT}
   └───────────────────────────────────────────────

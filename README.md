@@ -1,12 +1,15 @@
 # CodeSynapt
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wing1008/codesynapt/ci.yml?branch=main&label=ci)](https://github.com/wing1008/codesynapt/actions/workflows/ci.yml)
-[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](./LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](./LICENSE)
+[![Commercial license available](https://img.shields.io/badge/Commercial-Available-orange.svg)](./LICENSES.md)
 [![Plugin API: MIT](https://img.shields.io/badge/Plugin%20API-MIT-green.svg)](./plugin-api/LICENSE)
 [![Version](https://img.shields.io/github/package-json/v/wing1008/codesynapt?label=version&color=informational)](./CHANGELOG.md)
 [![Node 20|22](https://img.shields.io/badge/Node-20%20%7C%2022-339933?logo=node.js&logoColor=white)](./package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](./docs/installation.md)
 [![Tests](https://img.shields.io/badge/tests-68%20passing-brightgreen)](./tests/)
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/wing1008?label=Sponsor&logo=GitHub&style=social)](https://github.com/sponsors/wing1008)
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/wing1008)
 
 > **MCP-native code graph for AI agents — see blast radius live.**
 > The dependency map Claude Code / Cursor / any MCP agent should be
@@ -27,7 +30,7 @@ talks to, which "v2" file is the real one vs. abandoned drafts.
 | Surface | For | Example |
 |---|---|---|
 | **MCP server** | AI coding agents | "Which files import `auth.js`?" → agent calls `cs_query({action:'users', id:'auth.js'})` |
-| **CLI** (`fg3d`) | terminal users, scripts, CI | `fg3d external` — list every API/website your code talks to; `fg3d ci-diff main..HEAD` — PR blast radius as Markdown |
+| **CLI** (`cs`) | terminal users, scripts, CI | `cs external` — list every API/website your code talks to; `cs ci-diff main..HEAD` — PR blast radius as Markdown |
 | **Desktop app** | visual exploration | drop folder → 3D graph with live updates; watch the AI navigate live |
 
 All three share the same scanner: imports across JS/TS/Vue/Svelte/Python/Go/Rust/Ruby/PHP/C/C++, plus route↔fetch matching for full-stack monorepos, plus external URL inventory, plus dynamic-pattern detection.
@@ -40,7 +43,7 @@ All three share the same scanner: imports across JS/TS/Vue/Svelte/Python/Go/Rust
 - **Live updates ~300 ms** — chokidar file-watcher + 60 ms snapshot debounce. No re-indexing, no manual refresh, no cloud round-trip. (Most code-intelligence tools require an explicit re-index step — this one doesn't.)
 - **Live agent visualization** — when the desktop window is open, every MCP call pulses the touched node in 3D. You see the AI navigate.
 - **Full-stack route↔fetch matching** — JS/TS, Python, Next.js file-system API routes auto-detected. Frontend `fetch('/api/billing')` linked to `app/api/billing/route.ts` automatically.
-- **Headless + CI** — `fg3d scan`, `fg3d serve`, `fg3d ci-diff main..HEAD`, `fg3d ci-gate --max-blast 50`. No Electron required for CI / SSH / Docker.
+- **Headless + CI** — `cs scan`, `cs serve`, `cs ci-diff main..HEAD`, `cs ci-gate --max-blast 50`. No Electron required for CI / SSH / Docker.
 - **Auto-history per file** (opt-in) — every save snapshots previous content (cap 3). Roll back via `cs_change({action:'restore'})`.
 - **External URL inventory** — `cs_intent({action:'external'})` lists every API host the project calls (Stripe, OpenAI, your own backend…), grouped by domain.
 - **Env / secret leak detection** — `cs_health({action:'secrets'})` flags server-only env vars accidentally used in client bundles.
@@ -49,68 +52,121 @@ All three share the same scanner: imports across JS/TS/Vue/Svelte/Python/Go/Rust
 
 ## Quick start
 
+Three install paths, pick the one that matches you.
+
+### Path 1 — Windows `.exe` (easiest, no Node required up-front)
+
+Download `CodeSynapt-Setup-<version>.exe` from the [Releases](https://github.com/wing1008/codesynapt/releases) page. Run the installer:
+
+- **Auto-detects** existing Node.js. If found, uses your system Node (saves 76 MB). If not, ships Node 22 LTS bundled.
+- Adds `cs` / `codesynapt` / `codesynapt-mcp` to your user `PATH` automatically (toggle "Add cs command to PATH" — checked by default).
+- Installs to `%LOCALAPPDATA%\Programs\CodeSynapt\`. **Updates are clean**: installing a newer `.exe` auto-removes the old one and preserves your data under `%APPDATA%\codesynapt\`.
+
+After install, open **a new** PowerShell:
+
+```sh
+cs --help
+```
+
+If `cs` shows usage, you're done. (Unsigned installer — Windows SmartScreen will warn "unverified publisher"; click "More info → Run anyway".)
+
+### Path 2 — Developer / source (any OS)
+
 ```sh
 git clone https://github.com/wing1008/codesynapt.git
 cd codesynapt
 npm install                      # full install — desktop + CLI + MCP (~700 MB w/ Electron)
+npm link                         # adds cs / codesynapt / codesynapt-mcp to your PATH
 npm start                        # desktop app + HTTP control API on :7707
 ```
 
-**CLI / MCP only** (no Electron, no 3D — for CI / SSH / Docker, ~30 MB):
+### Path 3 — CLI / MCP only (no desktop, no 3D — for CI / SSH / Docker, ~30 MB)
 
 ```sh
+git clone https://github.com/wing1008/codesynapt.git
+cd codesynapt
 npm install --omit=optional --omit=dev
-node packages/core/bin/codesynapt.cjs scan .   # one-shot
-node packages/core/bin/codesynapt.cjs serve .  # daemon
+npm link
+cs scan .                        # one-shot
+cs serve .                       # long-running HTTP daemon (no Electron)
 ```
 
 `three` (3D renderer) and `ws` are `optionalDependencies`; `electron` is a devDependency. CI runners can skip the 700 MB Electron download entirely.
 
-### Headless — no desktop window needed (CI / SSH / Docker)
+### CLI — `cs` command
+
+After `.exe` install (Path 1) or `npm link` (Paths 2/3), the `cs` command is on your PATH. The Node `codesynapt` and `codesynapt-mcp` aliases also work.
+
+#### Headless — no desktop window needed (CI / SSH / Docker)
 
 ```sh
-node packages/core/bin/codesynapt.cjs scan [path] --summary         # one-shot project overview
-node packages/core/bin/codesynapt.cjs scan [path] --json            # full graph as JSON
-node packages/core/bin/codesynapt.cjs serve [path] --port 7707      # long-running HTTP API daemon
-node packages/core/bin/codesynapt.cjs ci-diff main..HEAD            # PR impact report (Markdown by default)
-node packages/core/bin/codesynapt.cjs ci-gate main..HEAD --max-blast 50   # CI gate, exits 1 on breach
+cs scan [path] --summary               # one-shot project overview
+cs scan [path] --json                  # full graph as JSON
+cs serve [path] --port 7707            # long-running HTTP API daemon
+cs ci-diff main..HEAD                  # PR impact report (Markdown by default)
+cs ci-gate main..HEAD --max-blast 50   # CI gate, exits 1 on breach
 ```
 
-### Connected — talks to a running desktop app or `serve` daemon at :7707
+#### Connected — talks to a running desktop or `cs serve` daemon at :7707
 
 ```sh
+# Setup
+cs ensure                              # ensure desktop is running with cwd loaded
+                                       # (auto-launches if dead, swaps folder if needed, no-op otherwise)
+cs init                                # one-time setup: CLAUDE.md + /codesynapt slash + mcp add hint
+
 # Most useful first:
-node packages/core/bin/codesynapt.cjs summary                       # cheap project overview (Layer 1)
-node packages/core/bin/codesynapt.cjs safety src/x.ts               # 🟢/🟡/🔴 + one-line advice
-node packages/core/bin/codesynapt.cjs bundle src/x.ts --budget 8000 # pack neighbours into token budget
-node packages/core/bin/codesynapt.cjs blast  src/x.ts 3             # transitive dependents + token estimate
-node packages/core/bin/codesynapt.cjs suggest                       # "what to ask the AI next" recommendations
-node packages/core/bin/codesynapt.cjs preflight                     # deploy-readiness check
-node packages/core/bin/codesynapt.cjs env [VAR]                     # .env declared vs used
-node packages/core/bin/codesynapt.cjs secrets                       # server-only env leaked to client?
-node packages/core/bin/codesynapt.cjs feature payment               # keyword → FE/BE/shared cluster
-node packages/core/bin/codesynapt.cjs url /billing                  # URL → file (Next.js/Astro/SvelteKit)
-node packages/core/bin/codesynapt.cjs schema [Model]                # DB models (Prisma/Drizzle/SQLAlchemy)
-node packages/core/bin/codesynapt.cjs external                      # external APIs/websites by domain
-node packages/core/bin/codesynapt.cjs deps  src/x.ts                # what does x.ts import?
-node packages/core/bin/codesynapt.cjs users src/x.ts                # who imports x.ts?
-node packages/core/bin/codesynapt.cjs find  auth                    # substring search across file ids
-node packages/core/bin/codesynapt.cjs ls    --limit 10              # top 10 most-imported files
-node packages/core/bin/codesynapt.cjs focus src/x.ts                # move desktop camera (desktop only)
+cs summary                             # cheap project overview (Layer 1)
+cs safety src/x.ts                     # 🟢/🟡/🔴 + one-line advice
+cs bundle src/x.ts --budget 8000       # pack neighbours into token budget
+cs blast  src/x.ts 3                   # transitive dependents + token estimate
+cs suggest                             # "what to ask the AI next" recommendations
+cs preflight                           # deploy-readiness check
+cs env [VAR]                           # .env declared vs used
+cs secrets                             # server-only env leaked to client?
+cs feature payment                     # keyword → FE/BE/shared cluster
+cs url /billing                        # URL → file (Next.js/Astro/SvelteKit)
+cs schema [Model]                      # DB models (Prisma/Drizzle/SQLAlchemy)
+cs external                            # external APIs/websites by domain
+cs deps  src/x.ts                      # what does x.ts import?
+cs users src/x.ts                      # who imports x.ts?
+cs find  auth                          # substring search across **file ids only** (path match)
+cs search "RUNPOD_API_KEY"             # full-text **content** search (mtime LRU cache, sub-50ms when warm) — best-effort
+cs ls    --limit 10                    # top 10 most-imported files
+cs focus src/x.ts                      # move desktop camera (desktop only)
 ```
 
-The desktop app exposes ~30 endpoints. Run `fg3d --help` for the full
+> **`cs search` caveat**: full-text search is *best-effort*. If invoked while the initial scan is still running, the endpoint returns `503 scan in progress` — retry after a couple of seconds. Under heavy event-loop pressure (large repo + fresh scan), a single search can occasionally hang; this is a known limitation tracked for future `worker_threads` refactor. `cs_query({action:'search'})` MCP returns the same payload; AI agents automatically fall back to Read+Grep on failure.
+
+The desktop app exposes ~30 endpoints. Run `cs --help` for the full
 list including history, restore, refresh, tour, timeline, trace.
 
-Make `fg3d` globally available:
-
-```sh
-npm link        # adds fg3d / fg3d-mcp / codesynapt-server to PATH
-```
+> Used `git clone` (Paths 2/3) and the `cs` command isn't found? Run `npm link` inside the cloned repo — it registers `cs` / `codesynapt` / `codesynapt-mcp` / `codesynapt-server` globally.
 
 ## Hook up your AI agent
 
-### Claude Code (one-time)
+### Claude Code — recommended setup (2 commands)
+
+```sh
+cd <your-project>
+cs init                              # generates CLAUDE.md + installs /codesynapt slash commands
+claude mcp add codesynapt codesynapt-mcp   # registers 8 cs_* tools (one-time, per OS user)
+```
+
+That's it. Inside any Claude Code session in that project:
+
+```
+/codesynapt        ← FORCE mode: cs_* preferred for every non-trivial query/edit
+/codesynapt-auto   ← AUTO mode:  cs_* only for non-trivial work (skips typos/docs)
+```
+
+**Default is OFF** — `cs_*` tools are not called until you enter a mode. `/clear` or new session resets to OFF.
+
+The slash command's first step is `cs ensure` — it guarantees the desktop is running and the **current working directory is loaded**. Auto-launches the desktop if dead, swaps folder if a different one was loaded, no-op otherwise. One command, zero clicks.
+
+### Manual MCP registration (any client)
+
+If you skipped `cs init` or use Cursor/Continue/Cline:
 
 ```sh
 claude mcp add codesynapt node /absolute/path/to/codesynapt/packages/core/bin/codesynapt-mcp.cjs
@@ -157,8 +213,8 @@ Follow up with `action:'bundle'` to get the closest neighbours packed
 into a token budget — the right context for the edit.
 
 **2. CI gate for impact-risky PRs.** Add one line to your CI:
-`fg3d ci-gate main..HEAD --max-blast 50` fails the build if a single
-file changes touches >50 dependents. Or `fg3d ci-diff main..HEAD
+`cs ci-gate main..HEAD --max-blast 50` fails the build if a single
+file changes touches >50 dependents. Or `cs ci-diff main..HEAD
 --format=github-comment` to post a Markdown impact report on the PR.
 
 **3. External API + secret audit.** `cs_intent({action:'external'})`
@@ -248,17 +304,27 @@ For OS-specific installation notes, see **[docs/installation.md](./docs/installa
 
 ## License
 
-codesynapt uses **dual licensing**:
+CodeSynapt uses **dual licensing**:
 
-- **Main app** ([LICENSE](./LICENSE)): [Business Source License 1.1](https://mariadb.com/bsl-faq-adopting/)
-  - ✅ Free for personal, internal, academic, and research use
+- **Main app** ([LICENSE](./LICENSE)): **[AGPL-3.0-or-later](https://www.gnu.org/licenses/agpl-3.0.en.html)**
+  - ✅ Free for personal, internal company, academic, and research use
   - ✅ Free to inspect, modify, and build plugins
-  - ⛔ Commercial redistribution requires a license
-  - 📅 Auto-converts to Apache 2.0 on **2030-05-14**
+  - ⚠️ If you modify CodeSynapt and offer it to others as a network service, your modifications must also be open-sourced under AGPL
+  - 💼 **Commercial license available** for organizations that can't accept AGPL — see [LICENSES.md](./LICENSES.md)
 - **Plugin API** ([plugin-api/LICENSE](./plugin-api/LICENSE)): **MIT**
   - Build and distribute plugins under any license you choose
 
-For commercial licensing or other arrangements, contact `[YOUR_EMAIL]`.
+For commercial licensing inquiries, open a [GitHub Discussion](https://github.com/wing1008/codesynapt/discussions) or DM `@wing1008`.
 
-For a plain-language explanation of the licensing model, see
-**[LICENSES.md](./LICENSES.md)**.
+For a plain-language explanation of the licensing model, see **[LICENSES.md](./LICENSES.md)**.
+
+## Support the project
+
+CodeSynapt is built by one person ([@wing1008](https://github.com/wing1008)) in their spare time. If it saves you time, consider:
+
+- ⭐ **Star the repo** — costs nothing, helps a lot
+- 💚 **[GitHub Sponsors](https://github.com/sponsors/wing1008)** — recurring or one-time
+- ☕ **[Buy me a coffee](https://buymeacoffee.com/wing1008)** — one-time tip
+- 🏢 **[Commercial license](./LICENSES.md)** — if your company needs to ship CodeSynapt without AGPL obligations
+
+Contributions in the form of bug reports, PRs, and docs improvements are also very welcome — see **[CONTRIBUTING.md](./CONTRIBUTING.md)**.

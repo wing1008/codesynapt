@@ -11,7 +11,7 @@
 This package contains the public API surface for filegraph3d plugins.
 It is **MIT-licensed** — you can build and distribute plugins under any
 license you choose, including commercially. The main filegraph3d app
-itself is BSL-licensed; see the top-level `LICENSE` for details.
+itself is AGPL-licensed; see the top-level `LICENSE` for details.
 
 ---
 
@@ -109,6 +109,6 @@ This API package: **MIT** — see [LICENSE](./LICENSE).
 You can publish your plugins under any license you like (MIT,
 Apache-2.0, proprietary, etc).
 
-The filegraph3d app itself: **BSL 1.1** — see [`../LICENSE`](../LICENSE).
+The filegraph3d app itself: **AGPL-3.0** — see [`../LICENSE`](../LICENSE).
 Personal and internal use is free; commercial redistribution requires
 a license.

@@ -31,7 +31,7 @@ In `package.json`, also fill in:
 Open `LICENSE` and replace the copyright line if needed. Current line:
 
 ```
-Copyright (c) 2026 FileGraph 3D contributors
+Copyright (c) 2026 CodeSynapt contributors
 ```
 
 Leave as-is for community ownership, or change to your name/handle.
@@ -63,20 +63,20 @@ git init                      # if not already
 git add .
 git commit -m "Initial public release: v0.10.1"
 git branch -M main
-git remote add origin https://github.com/your-username/filegraph3d.git
+git remote add origin https://github.com/your-username/codesynapt.git
 git push -u origin main
 ```
 
 ## 6. Create the release
 
-filegraph3d uses [release-drafter](https://github.com/release-drafter/release-drafter)
+codesynapt uses [release-drafter](https://github.com/release-drafter/release-drafter)
 to maintain a running draft of the next release notes. Every PR merged
 to `main` is automatically categorized into the draft based on its
 labels — see [`.github/LABELS.md`](../../.github/LABELS.md).
 
 ### Release flow
 
-1. **Review the draft**. Go to the [Releases page](https://github.com/YOUR_USER/filegraph3d/releases)
+1. **Review the draft**. Go to the [Releases page](https://github.com/YOUR_USER/codesynapt/releases)
    and find the draft titled `v$NEXT_VERSION`. It's been kept in sync
    by the `release-drafter` workflow since the last release.
 
@@ -168,9 +168,9 @@ labels — see [`.github/LABELS.md`](../../.github/LABELS.md).
 
 These exist only on the user's machine after they run the app:
 
-- `~/Library/Application Support/FileGraph 3D/state.json` (macOS)
-- `%APPDATA%\FileGraph 3D\state.json` (Windows)
-- `~/.config/FileGraph 3D/state.json` (Linux)
+- `~/Library/Application Support/CodeSynapt/state.json` (macOS)
+- `%APPDATA%\CodeSynapt\state.json` (Windows)
+- `~/.config/CodeSynapt/state.json` (Linux)
 - `localStorage` inside the Electron app (project info, recent
   files, active-set markings, search history)
 

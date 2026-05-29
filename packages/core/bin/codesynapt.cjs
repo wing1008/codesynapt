@@ -66,7 +66,7 @@ function encId(id) { return id.split('/').map(encodeURIComponent).join('/') }
 function printJson(x) { process.stdout.write(JSON.stringify(x, null, 2) + '\n') }
 function die(msg) { process.stderr.write(`error: ${msg}\n`); process.exit(1) }
 
-const USAGE = `filegraph3d CLI — usage:
+const USAGE = `CodeSynapt CLI — usage:
 
   ── Headless (no desktop app needed) ─────────────────────────
   cs scan [path] [--json]   # one-shot scan, emit graph as JSON
@@ -102,7 +102,17 @@ const USAGE = `filegraph3d CLI — usage:
                               #   --all → replace all occurrences (default: must be unique)
   cs deps <id>              # outgoing edges (this -> X)
   cs users <id>             # incoming edges (X -> this)
-  cs find <substring>       # search node ids
+  cs orphans                # all files with no in + no out edges (raw list)
+                              #   includes entry points / configs / manifests (false-positives).
+                              #   For high-confidence cleanup only: \`cs legacy --type orphan\`
+  cs find <substring>       # **filename/path** match only. Cheap, no file read.
+                              #   "find auth"  → src/auth/login.ts, lib/auth-utils.js …
+                              #   For file CONTENTS, use \`cs search\` instead.
+  cs search <query> [--regex] [--case] [--max N] [--json]
+                              # **full-text CONTENT** search across all tracked files.
+                              #   "search RUNPOD_API_KEY" → file:line:col + snippet.
+                              #   mtime LRU cache → repeat searches sub-50ms when warm.
+                              #   503 (scan in progress) → auto-retries 3× × 2s.
   cs focus <id>             # move app camera to node
   cs open <id>              # open inspector for node
   cs history <id>           # list auto-history snapshots
@@ -147,7 +157,7 @@ const USAGE = `filegraph3d CLI — usage:
   cs bench [path]           # 응답시간 벤치마크 (scan + endpoint별 median/p95)
   cs vendors [--json]       # third-party 폴더 자동 감지
                               #   (LICENSE/own manifest/.git/conventional name)
-                              #   → .fg3dignore 권고
+                              #   → .codesynaptignore 권고
   cs secrets [--json]       # frontend 코드에 server-only env 변수
                               #   노출 탐지. public prefix 없는 변수가
                               #   브라우저 번들로 가면 키 유출.
@@ -156,11 +166,18 @@ const USAGE = `filegraph3d CLI — usage:
                               #   PATH 없으면 전체 등록 routes.
                               #   PATH 있으면 매칭 파일 (dynamic seg
                               #   처리).
+  cs ensure [path]            # ensure desktop is running with [path] loaded
+                              #   - desktop alive + same root → noop
+                              #   - alive + different root    → POST /load (swap)
+                              #   - desktop dead              → spawn it with
+                              #                                CS_INITIAL_ROOT
+                              #   used by /codesynapt slash command to give
+                              #   one-shot "open project" UX from Claude Code
   cs init [path] [--agents] [--no-slash-command]
                               # 상시 사용 모드 셋업:
                               #   - CLAUDE.md 또는 AGENTS.md 생성 (사용 규칙)
                               #   - ~/.claude/commands/codesynapt.md 설치
-                              #     → 그 후 Claude Code 안에서 `/codesynapt`
+                              #     → 그 후 Claude Code 안에서 \`/codesynapt\`
                               #       치면 cs_* 모드 진입
                               #   - claude mcp add 명령 안내 출력
   cs context [--output FILE] [--max-routes N] [--max-models N] [--watch]
@@ -180,7 +197,7 @@ const USAGE = `filegraph3d CLI — usage:
   cs changes                # files modified this session
   cs diff <id>              # show first-seen vs current diff for one file
 
-Env: FG3D_PORT (default 7707)`
+Env: CS_PORT (default 7707; legacy alias: FG3D_PORT). CS_AUTH_TOKEN for Bearer auth.`
 
 // ── Headless: load scanner.js (ESM) and run a one-shot scan ──
 async function runHeadlessScan(args) {
@@ -666,6 +683,83 @@ async function main() {
         const r = await req('GET', '/find', { q: args[0] })
         for (const id of r.json) process.stdout.write(id + '\n'); break
       }
+      case 'orphans': {
+        // All files with no incoming and no outgoing edges.
+        // Includes entry points, configs, manifests (false-positives) — use
+        // `cs legacy --type orphan` for the high-confidence subset only.
+        const r = await req('GET', '/graph', { limit: '0' })
+        if (r.status !== 200) return die(r.json?.error || 'failed')
+        const files = r.json.files || []
+        const edges = r.json.edges || []
+        const inc = new Map(), out = new Map()
+        for (const e of edges) {
+          inc.set(e.t, (inc.get(e.t) || 0) + 1)
+          out.set(e.s, (out.get(e.s) || 0) + 1)
+        }
+        const orphans = files
+          .filter((f) => !inc.get(f.id) && !out.get(f.id))
+          .sort((a, b) => (b.loc || 0) - (a.loc || 0))
+        const byExt = {}
+        for (const o of orphans) byExt[o.ext] = (byExt[o.ext] || 0) + 1
+        for (const f of orphans) {
+          process.stdout.write(`${f.id}  (${f.ext}, ${f.loc} LOC)\n`)
+        }
+        const extSummary = Object.entries(byExt).map(([k, v]) => `${k}:${v}`).join(' ')
+        process.stdout.write(`\n${orphans.length} orphan${orphans.length===1?'':'s'} (${extSummary})\n`)
+        process.stdout.write(`Note: includes entry points/configs/manifests (false-positives).\n`)
+        process.stdout.write(`      For high-confidence cleanup only: \`cs legacy --type orphan\`\n`)
+        break
+      }
+      case 'search': {
+        // Full-text content search (vs `find` which matches file IDs only).
+        if (!args[0]) return die('usage: cs search <query> [--regex] [--case] [--max N] [--json]')
+        let query = null
+        let regex = false, caseSensitive = false, max = 100, asJson = false
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i]
+          if      (a === '--regex') regex = true
+          else if (a === '--case')  caseSensitive = true
+          else if (a === '--json')  asJson = true
+          else if (a === '--max' && args[i+1]) max = parseInt(args[++i], 10)
+          else if (!query) query = a
+        }
+        if (!query) return die('usage: cs search <query> [--regex] [--case] [--max N]')
+
+        // Retry on 503 (scan in progress) up to 3 times, 2s apart.
+        let r
+        const params = { q: query, regex: regex ? '1' : '0', case: caseSensitive ? '1' : '0', max: String(max) }
+        for (let attempt = 0; attempt < 4; attempt++) {
+          r = await req('GET', '/search', params)
+          if (r.status !== 503) break
+          if (attempt < 3) {
+            process.stderr.write(`scan in progress (fileCount=${r.json?.fileCount ?? '?'}), retrying in 2s… [${attempt + 1}/3]\n`)
+            await new Promise((res) => setTimeout(res, 2000))
+          }
+        }
+        if (r.status !== 200) return die(r.json?.error || `search failed (status ${r.status})`)
+
+        if (asJson) { printJson(r.json); break }
+
+        const { matches, filesMatched, filesScanned, totalFiles, ms, truncated, cacheStats } = r.json
+        if (matches.length === 0) {
+          process.stdout.write(`no matches for "${query}" (${filesScanned}/${totalFiles} files, ${ms}ms)\n`)
+          break
+        }
+        // Group by file for readable output
+        const byFile = new Map()
+        for (const m of matches) {
+          if (!byFile.has(m.id)) byFile.set(m.id, [])
+          byFile.get(m.id).push(m)
+        }
+        for (const [id, ms] of byFile) {
+          for (const m of ms) {
+            process.stdout.write(`${id}:${m.line}:${m.col}  ${m.snippet.trim()}\n`)
+          }
+        }
+        const truncMark = truncated ? ' (truncated)' : ''
+        process.stdout.write(`\n${matches.length} match${matches.length===1?'':'es'} in ${filesMatched} file${filesMatched===1?'':'s'}${truncMark} — ${filesScanned}/${totalFiles} scanned, ${ms}ms, cache hit-rate ${cacheStats.hitRate ?? 'n/a'}\n`)
+        break
+      }
       case 'focus': {
         if (!args[0]) return die('usage: cs focus <id>')
         const r = await req('POST', '/focus/' + encId(args[0]))
@@ -923,12 +1017,162 @@ async function main() {
         }
         break
       }
+      case 'ensure': {
+        // Make sure the desktop is running and has [path] loaded.
+        // Intended to be called by `/codesynapt` slash command so the user
+        // gets a one-shot "open my project" experience from Claude Code.
+        const fs = require('fs')
+        const path = require('path')
+        const os = require('os')
+        const cp = require('child_process')
+
+        let target = null
+        for (let i = 0; i < args.length; i++) {
+          if (!args[i].startsWith('--') && !target) target = args[i]
+        }
+        target = target || process.cwd()
+        const abs = path.resolve(target)
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) die(`not a directory: ${abs}`)
+
+        // Helper: re-read lock file (PORT was captured at module load; new
+        // desktop may bind a different port).
+        const readPortLock = () => {
+          try {
+            const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
+            if (fs.existsSync(lockPath)) {
+              const p = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10)
+              if (p > 0 && p < 65536) return p
+            }
+          } catch {}
+          return null
+        }
+        const pingHealth = (port) => new Promise((resolve) => {
+          const r = http.request({ host: '127.0.0.1', port, path: '/health', method: 'GET', timeout: 1500 }, (res) => {
+            const chunks = []
+            res.on('data', (c) => chunks.push(c))
+            res.on('end', () => {
+              try { resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }) }
+              catch { resolve(null) }
+            })
+          })
+          r.on('error', () => resolve(null))
+          r.on('timeout', () => { r.destroy(); resolve(null) })
+          r.end()
+        })
+        const postLoad = (port, p) => new Promise((resolve, reject) => {
+          const payload = JSON.stringify({ path: p })
+          const r = http.request({ host: '127.0.0.1', port, path: '/load', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }, timeout: 60000 }, (res) => {
+            const chunks = []
+            res.on('data', (c) => chunks.push(c))
+            res.on('end', () => {
+              try { resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }) }
+              catch { resolve({ status: res.statusCode, body: null }) }
+            })
+          })
+          r.on('error', reject)
+          r.write(payload); r.end()
+        })
+
+        // Stage 1: is the desktop alive?
+        const initialPort = readPortLock() || PORT
+        const h1 = await pingHealth(initialPort)
+        if (h1 && h1.status === 200) {
+          const root = h1.body?.root
+          if (root && path.resolve(root) === abs) {
+            process.stdout.write(`✅ desktop already running at :${initialPort} with ${abs} (${h1.body.fileCount} files)\n`)
+            printJson({ ok: true, action: 'noop', port: initialPort, root: abs, fileCount: h1.body.fileCount })
+            break
+          }
+          // Alive but loaded a different (or no) project → swap via /load
+          process.stdout.write(`📂 swapping desktop project: ${root || '(none)'} → ${abs}\n`)
+          try {
+            const r = await postLoad(initialPort, abs)
+            if (r.status !== 200) die(`load failed: ${r.body?.error || r.status}`)
+            process.stdout.write(`✅ loaded (${r.body.fileCount} files)\n`)
+            printJson({ ok: true, action: 'loaded', port: initialPort, ...r.body })
+          } catch (e) { die(`load request failed: ${e.message}`) }
+          break
+        }
+
+        // Stage 2: desktop is dead → spawn it.
+        //
+        // Two environments to handle:
+        //   (a) Installed via NSIS .exe — fg3dRoot = INSTDIR\resources\app.
+        //       The packaged desktop is at INSTDIR\CodeSynapt.exe (siblings of
+        //       resources\). Spawn it directly with no args; the packaged
+        //       electron auto-runs its bundled main.
+        //   (b) Dev / npm install — fg3dRoot = repo root with node_modules.
+        //       Use require('electron') for the absolute electron binary path
+        //       and pass '.' so electron runs main.cjs.
+        const fg3dRoot = path.resolve(__dirname, '..', '..', '..')
+        const pkgJson = path.join(fg3dRoot, 'package.json')
+        if (!fs.existsSync(pkgJson)) die(`cannot find codesynapt root at ${fg3dRoot} — install may be broken`)
+
+        // (a) Installed environment: INSTDIR\CodeSynapt.exe
+        const installedExe = path.resolve(fg3dRoot, '..', '..', 'CodeSynapt.exe')
+        let spawnExe = null
+        let spawnArgs = []
+        let spawnCwd = fg3dRoot
+
+        if (fs.existsSync(installedExe)) {
+          spawnExe = installedExe
+          spawnArgs = []                   // packaged electron self-launches main
+          spawnCwd  = path.dirname(installedExe)
+        } else {
+          // (b) Dev environment: require('electron')
+          try {
+            const electronExe = require(path.join(fg3dRoot, 'node_modules', 'electron'))
+            if (typeof electronExe === 'string' && fs.existsSync(electronExe)) {
+              spawnExe = electronExe
+              spawnArgs = ['.']
+            }
+          } catch (e) { /* fall through to error */ }
+        }
+
+        if (!spawnExe) {
+          die(`Cannot locate CodeSynapt desktop binary.\n` +
+              `  Tried installed: ${installedExe}\n` +
+              `  Tried dev:       ${path.join(fg3dRoot, 'node_modules', 'electron')}\n` +
+              `  → Install the desktop app, or run \`npm install\` in ${fg3dRoot}.`)
+        }
+
+        process.stdout.write(`🚀 starting desktop (${spawnExe}, CS_INITIAL_ROOT=${abs})\n`)
+        const child = cp.spawn(spawnExe, spawnArgs, {
+          cwd: spawnCwd,
+          env: { ...process.env, CS_INITIAL_ROOT: abs },
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: false,
+        })
+        child.unref()
+
+        // Stage 3: poll /health until root === abs (timeout 60s)
+        const timeoutMs = 60_000
+        const startedAt = Date.now()
+        let last = null
+        while (Date.now() - startedAt < timeoutMs) {
+          await new Promise((r) => setTimeout(r, 1000))
+          const port = readPortLock() || initialPort
+          const h = await pingHealth(port)
+          if (h && h.status === 200) {
+            last = { port, ...h.body }
+            const root = h.body?.root
+            if (root && path.resolve(root) === abs && (h.body.fileCount || 0) > 0) {
+              process.stdout.write(`✅ desktop ready at :${port} (${h.body.fileCount} files, ${((Date.now()-startedAt)/1000).toFixed(1)}s)\n`)
+              printJson({ ok: true, action: 'spawned', port, root: abs, fileCount: h.body.fileCount, elapsedMs: Date.now()-startedAt })
+              process.exit(0)
+            }
+          }
+        }
+        die(`desktop did not load ${abs} within ${timeoutMs/1000}s. last health: ${JSON.stringify(last)}`)
+      }
       case 'init': {
-        // One-shot setup for "always-on mode":
-        //   1. Generate CLAUDE.md (or AGENTS.md) in target project, with
-        //      the AI agent usage rules section.
-        //   2. Install Claude Code slash command at ~/.claude/commands/codesynapt.md
-        //      so user can type `/codesynapt` to explicitly enter cs_* mode.
+        // One-shot setup for opt-in mode:
+        //   1. Generate CLAUDE.md (or AGENTS.md) in target project — project
+        //      snapshot only, NO always-on rules. Default behavior is OFF.
+        //   2. Install TWO Claude Code slash commands:
+        //        ~/.claude/commands/codesynapt.md       — force cs_*-first mode
+        //        ~/.claude/commands/codesynapt-auto.md  — auto mode (non-trivial only)
         //   3. Print exact `claude mcp add` command for the user to copy.
         // Does NOT execute mcp add or npm start automatically — those have
         // user-specific side effects (auth, port choice) so we print
@@ -964,61 +1208,121 @@ async function main() {
         const r = spawnSync(process.execPath, [__filename, 'context', '--output', outFile], { stdio: 'inherit' })
         if (r.status !== 0) die('context generation failed')
 
-        // Install Claude Code slash command (user-level: ~/.claude/commands/)
-        let slashFile = null
+        // Install Claude Code slash commands (user-level: ~/.claude/commands/)
+        //   - codesynapt.md       → force mode (cs_* preferred for any non-trivial)
+        //   - codesynapt-auto.md  → auto mode (cs_* only on non-trivial; skips typos/docs)
+        let slashForceFile = null
+        let slashAutoFile = null
         if (installSlash) {
           const slashDir = path.join(os.homedir(), '.claude', 'commands')
-          slashFile = path.join(slashDir, 'codesynapt.md')
+          slashForceFile = path.join(slashDir, 'codesynapt.md')
+          slashAutoFile  = path.join(slashDir, 'codesynapt-auto.md')
+
+          const forceBody = [
+            '---',
+            'description: CodeSynapt FORCE mode — auto-launch desktop, load cwd, prefer cs_* MCP tools for every non-trivial query/edit',
+            '---',
+            '',
+            '**Step 1 (do this immediately, via Bash):**',
+            '',
+            '```',
+            'cs ensure',
+            '```',
+            '',
+            'This makes sure the CodeSynapt desktop app is running with the current working directory loaded. It is a no-op if the desktop is already loaded with the same folder; otherwise it auto-launches or swaps. Wait for it to print `✅` (up to 60s on first launch).',
+            '',
+            '**Step 2:** From this point on in the session, treat CodeSynapt as the primary code-intelligence backend. Before edits, queries, or "what does this code do" style questions, prefer the cs_* MCP tools over reading raw files or running shell commands.',
+            '',
+            '**Step 3:** call `cs_summary({action:\'project\'})` once now to load the project shape (~300 tokens).',
+            '',
+            '**For the rest of the session, follow these rules:**',
+            '',
+            '| When | Tool |',
+            '|---|---|',
+            '| **Impact analysis** — user says "비활성화", "제거", "지워", "리팩토링", "안전", "영향", "범위", "깨지나", "쓰는 곳", "disable", "remove", "delete", "refactor", "safe to", "impact", "affected", "blast" | **MUST `cs_blast({action:\'safety\', id})` FIRST** — do NOT answer impact questions via grep/read alone. cs_blast is exactly for this. |',
+            '| About to edit a file ≥ 100 LOC, hub file, or refactor | `cs_blast({action:\'safety\', id})` first |',
+            '| Safety 🟡 or 🔴 | `cs_blast({action:\'bundle\', id, budget:8000})` to pack context |',
+            '| 🔴 RISKY verdict | STOP, surface to user, ask for confirmation |',
+            '| "Find the X feature / Y screen / where is the X page" | `cs_intent({action:\'feature\'|\'url\'|\'schema\'})` (NOT grep) |',
+            '| Dependency questions ("who uses X?", "X 쓰는 곳", "X 참조하는") | `cs_query({action:\'users\'|\'deps\', id})` (NOT grep) |',
+            '| Editing non-trivial files | prefer `cs_change({action:\'edit\', id, find, replace})` over your own Edit tool (auto-snapshots + 3D pulse) |',
+            '| Before suggesting a significant commit/deploy | `cs_health({action:\'preflight\'})` |',
+            '| User asks "what next?" / 뭐 할까 | `cs_health({action:\'suggest\', top:5})` |',
+            '| Korean user | add `locale: \'ko\'` to safety/preflight/suggest |',
+            '',
+            '**Hard rule for impact questions**: if the user asks "if I remove/disable/refactor X, what breaks?" — the answer comes from `cs_blast({action:\'safety\', id: X})`. Read+Grep is the fallback, NOT the first move. Doing impact analysis without cs_blast in FORCE mode is a bug.',
+            '',
+            '**Skip cs_* for trivial work**: typos, comment-only changes, formatting, single-literal swaps, README/docs edits, brand-new files in this session, general conversation, or "explain X" questions.',
+            '',
+            "If the user later types `/clear` or starts a new session, this mode resets. To re-enter, call `/codesynapt` again.",
+          ].join('\n') + '\n'
+
+          const autoBody = [
+            '---',
+            'description: CodeSynapt AUTO mode — auto-launch desktop + load cwd, then call cs_* only for non-trivial work',
+            '---',
+            '',
+            '**Step 1 (do this immediately, via Bash):**',
+            '',
+            '```',
+            'cs ensure',
+            '```',
+            '',
+            'This makes sure the CodeSynapt desktop app is running with the current working directory loaded. No-op if already loaded; otherwise auto-launches or swaps. Wait for the `✅` line (up to 60s).',
+            '',
+            "**Step 2:** From this point on in the session, the CodeSynapt MCP server is available. **Do not call cs_* tools for trivial work** — but DO call them automatically when the work is non-trivial (per the table below). When in doubt, lean toward NOT calling.",
+            '',
+            '**Skip cs_* entirely for:**',
+            '- Typos, comment-only changes, formatting, single literal swaps',
+            '- README / docs / CHANGELOG edits',
+            '- Single-line bug fixes in a leaf file',
+            '- General conversation / Q&A / "explain X" questions',
+            '- Brand-new files the user just created this session',
+            '',
+            '**Call cs_* automatically when:**',
+            '',
+            '| Situation | Tool to call |',
+            '|---|---|',
+            '| First message about an unfamiliar project | `cs_summary({action:\'project\'})` once (~300 tokens) |',
+            '| **Impact / removal / refactor questions** ("X 비활성화하면?", "X 제거해도 돼?", "리팩토링 영향", "what breaks if I remove X", "is it safe to delete X") | **MUST `cs_blast({action:\'safety\', id: X})` FIRST**. This is the #1 use case for cs_*. Read+Grep for impact is wrong tool. |',
+            '| Refactor / rename / signature change / removed export / multi-file edit | `cs_blast({action:\'safety\', id})` first |',
+            '| Safety 🟡 or 🔴 | `cs_blast({action:\'bundle\', id, budget:8000})` |',
+            '| 🔴 RISKY verdict | STOP, surface to user, ask for confirmation |',
+            '| "Find the X feature / Y screen / where is the X page" | `cs_intent({action:\'feature\'|\'url\'|\'schema\'})` (NOT grep) |',
+            '| "Who uses X?" / "X 쓰는 곳" / "Is X used anywhere?" | `cs_query({action:\'users\', id})` (NOT grep) |',
+            '| Editing a file ≥ 100 LOC or known hub | prefer `cs_change({action:\'edit\', id, find, replace})` |',
+            '| Before suggesting a significant commit/deploy | `cs_health({action:\'preflight\'})` |',
+            '| User asks "what next?" / 뭐 할까 / open-ended | `cs_health({action:\'suggest\', top:5})` |',
+            '| Korean user | add `locale: \'ko\'` to safety/preflight/suggest |',
+            '',
+            "If the user later types `/clear` or starts a new session, this mode resets. To re-enter, call `/codesynapt-auto` again. For stricter mode (cs_* preferred for everything), call `/codesynapt` instead.",
+          ].join('\n') + '\n'
+
           try {
             fs.mkdirSync(slashDir, { recursive: true })
-            const slashBody = [
-              '---',
-              'description: Enter CodeSynapt mode — use cs_* MCP tools actively for this session',
-              '---',
-              '',
-              "From this point on in the session, treat CodeSynapt as the primary code-intelligence backend. Before edits, queries, or 'what does this code do' style questions, prefer the cs_* MCP tools over reading raw files or running shell commands.",
-              '',
-              '**Mandatory next step**: call `cs_summary({action:\'project\'})` once now to load the project shape (~300 tokens).',
-              '',
-              '**For the rest of the session, follow these rules:**',
-              '',
-              '| When | Tool |',
-              '|---|---|',
-              '| About to edit a file ≥ 100 LOC, hub file, or refactor | `cs_blast({action:\'safety\', id})` first |',
-              '| Safety 🟡 or 🔴 | `cs_blast({action:\'bundle\', id, budget:8000})` to pack context |',
-              '| 🔴 RISKY verdict | STOP, surface to user, ask for confirmation |',
-              '| "Find the X feature / Y screen" | `cs_intent({action:\'feature\'|\'url\'|\'schema\'})` |',
-              '| Dependency questions ("who uses X?") | `cs_query({action:\'users\'|\'deps\', id})` |',
-              '| Editing non-trivial files | prefer `cs_change({action:\'edit\', id, find, replace})` over your own Edit tool (auto-snapshots + 3D pulse) |',
-              '| Before suggesting a significant commit/deploy | `cs_health({action:\'preflight\'})` |',
-              '| User asks "what next?" | `cs_health({action:\'suggest\', top:5})` |',
-              '| Korean user | add `locale: \'ko\'` to safety/preflight/suggest |',
-              '',
-              '**Skip cs_* for trivial work**: typos, comment-only changes, formatting, single-literal swaps, README/docs edits, brand-new files in this session, general conversation, or "explain X" questions.',
-              '',
-              "If the user later types `/clear` or starts a new session, this mode resets. To re-enter, call `/codesynapt` again.",
-            ].join('\n') + '\n'
-            // Preserve any user customisations: only overwrite if file is missing OR identical to our previous template.
-            if (!fs.existsSync(slashFile)) {
-              fs.writeFileSync(slashFile, slashBody, 'utf8')
-            }
+            if (!fs.existsSync(slashForceFile)) fs.writeFileSync(slashForceFile, forceBody, 'utf8')
+            if (!fs.existsSync(slashAutoFile))  fs.writeFileSync(slashAutoFile,  autoBody,  'utf8')
           } catch (e) {
-            slashFile = null
-            process.stderr.write(`⚠ could not write slash command: ${e.message}\n`)
+            slashForceFile = null
+            slashAutoFile = null
+            process.stderr.write(`⚠ could not write slash command(s): ${e.message}\n`)
           }
         }
 
         // Print setup checklist
         const selfMcp = path.resolve(__dirname, 'codesynapt-mcp.cjs')
-        process.stdout.write(`\n✅ CodeSynapt always-on mode setup\n\n`)
+        process.stdout.write(`\n✅ CodeSynapt setup (opt-in mode — OFF by default)\n\n`)
         process.stdout.write(`  1. ${outputName} written to ${outFile}\n`)
-        process.stdout.write(`     → contains AI agent usage rules + project snapshot.\n\n`)
-        if (slashFile && fs.existsSync(slashFile)) {
-          process.stdout.write(`  2. Claude Code slash command installed at ${slashFile}\n`)
-          process.stdout.write(`     → from now on, type \`/codesynapt\` inside a Claude Code session\n`)
-          process.stdout.write(`       to explicitly enter cs_* tool-preferring mode.\n\n`)
+        process.stdout.write(`     → project snapshot only. No always-on rules.\n\n`)
+        if (slashForceFile && fs.existsSync(slashForceFile) && slashAutoFile && fs.existsSync(slashAutoFile)) {
+          process.stdout.write(`  2. Two Claude Code slash commands installed:\n`)
+          process.stdout.write(`     ${slashForceFile}\n`)
+          process.stdout.write(`     ${slashAutoFile}\n\n`)
+          process.stdout.write(`     Inside a Claude Code session, type one of:\n`)
+          process.stdout.write(`       /codesynapt        — FORCE mode: cs_* preferred for every non-trivial query/edit\n`)
+          process.stdout.write(`       /codesynapt-auto   — AUTO mode: cs_* only on non-trivial work; skips typos/docs\n\n`)
         } else {
-          process.stdout.write(`  2. (Slash command skipped — pass --no-slash-command to opt out, or check permissions on ~/.claude/commands/)\n\n`)
+          process.stdout.write(`  2. (Slash commands skipped — pass --no-slash-command to opt out, or check permissions on ~/.claude/commands/)\n\n`)
         }
         process.stdout.write(`  3. Register the MCP server with your AI client (one-time):\n\n`)
         process.stdout.write(`     Claude Code:\n`)
@@ -1029,8 +1333,10 @@ async function main() {
         process.stdout.write(`  5. (Optional) Auto-refresh ${outputName} on every change:\n`)
         process.stdout.write(`       cs context --output ${outFile} --watch\n\n`)
         process.stdout.write(`Usage:\n`)
-        process.stdout.write(`  - Just chat normally → AI uses cs_* tools when warranted (non-trivial work).\n`)
-        process.stdout.write(`  - Type \`/codesynapt\` to explicitly force cs_*-first mode for the session.\n`)
+        process.stdout.write(`  - Default: AI does NOT call cs_* tools (mode OFF).\n`)
+        process.stdout.write(`  - Type \`/codesynapt\`       to enter FORCE mode (cs_* preferred for everything non-trivial).\n`)
+        process.stdout.write(`  - Type \`/codesynapt-auto\`  to enter AUTO mode  (cs_* only when warranted; skips trivial).\n`)
+        process.stdout.write(`  - \`/clear\` or new session → resets back to OFF.\n`)
         break
       }
       case 'context': {
@@ -1150,45 +1456,18 @@ async function main() {
 
         lines.push(`---`)
         lines.push(``)
-        lines.push(`## AI agent usage rules (CodeSynapt MCP — always-on mode)`)
+        lines.push(`## CodeSynapt MCP — opt-in modes`)
         lines.push(``)
-        lines.push(`If a CodeSynapt MCP server is registered, prefer its tools for the situations below.`)
-        lines.push(`Live graph (~300 ms after save) is more accurate than in-context guesses for non-trivial work.`)
+        lines.push(`The CodeSynapt MCP server is registered for this project, but **it is OFF by default**.`)
+        lines.push(`The AI will not call cs_* tools unless one of the two modes below has been explicitly entered.`)
         lines.push(``)
-        lines.push(`### Don't bother calling cs_* for trivial work`)
+        lines.push(`- **\`/codesynapt\`** — force mode. AI prefers cs_* tools for any non-trivial code question or edit until \`/clear\` or new session.`)
+        lines.push(`- **\`/codesynapt-auto\`** — auto mode. AI calls cs_* only for non-trivial work (refactors, hub files, multi-file edits, dependency questions). Skips trivial edits, typos, docs.`)
         lines.push(``)
-        lines.push(`Just use your normal tools — calling MCP here is pure overhead:`)
-        lines.push(`- Typos / comment-only / formatting / single literal value changes`)
-        lines.push(`- README / docs / CHANGELOG edits`)
-        lines.push(`- Single-line bug fixes in a leaf file`)
-        lines.push(`- General Q&A / pseudocode / "explain X"`)
-        lines.push(`- Files the user just created in this session`)
-        lines.push(``)
-        lines.push(`### Recommended for non-trivial work`)
-        lines.push(``)
-        lines.push(`| When the user says / you intend… | Recommended tool |`)
-        lines.push(`|---|---|`)
-        lines.push(`| Starting work on an unfamiliar project (first session) | \`cs_summary({action:'project'})\` once (~300 tokens) |`)
-        lines.push(`| Refactor / rename / function signature change / removed export / multi-file edit | \`cs_blast({action:'safety', id})\` first |`)
-        lines.push(`| Safety says 🟡 or 🔴 | \`cs_blast({action:'bundle', id, budget:8000})\` — pack neighbours |`)
-        lines.push(`| "What files does the X feature live in?" / "Find the / screen" | \`cs_intent({action:'feature' | 'url' | 'schema'})\` |`)
-        lines.push(`| "Is X used anywhere?" / dependency / hub-ness questions | \`cs_query({action:'users', id})\` |`)
-        lines.push(`| Before suggesting commit / deploy on a significant change | \`cs_health({action:'preflight'})\` |`)
-        lines.push(`| User asks "what should I work on next?" / open-ended | \`cs_health({action:'suggest', top:5})\` |`)
-        lines.push(`| Editing a file ≥ 100 LOC or with known dependents | prefer \`cs_change({action:'edit', id, find, replace})\` — auto-snapshots + green pulse |`)
-        lines.push(`| Korean user / 한국어 응답 원할 때 | add \`locale: 'ko'\` to safety / preflight / suggest |`)
-        lines.push(``)
-        lines.push(`### Hard rules (when the tool *was* called)`)
-        lines.push(``)
-        lines.push(`1. **🔴 RISKY** safety verdict → tell the user; do **not** auto-edit. Ask for confirmation.`)
-        lines.push(`2. **\`undeclared\` env var preflight** → do not deploy. Ask user to add to \`.env.example\` first.`)
-        lines.push(`3. **\`server-only env in frontend\`** → security issue, surface to user before continuing.`)
-        lines.push(`4. **\`confidence: 'low'\`** on a queried node → blast/bundle results may be incomplete (DI / eval). Disclose this.`)
-        lines.push(`5. **\`contentHash\` mismatch** when you re-read a file → call \`cs_change({action:'refresh', id})\` then retry.`)
+        lines.push(`If neither command has been typed in the current session, treat this file as project notes only — do NOT call cs_* tools.`)
         lines.push(``)
         lines.push(`## How to use this file`)
-        lines.push(`- Drop into project root as \`CLAUDE.md\`, \`AGENTS.md\`, or \`.cursor/rules\` — the AI reads it on each turn.`)
-        lines.push(`- Live data: prefer the MCP tools listed above.`)
+        lines.push(`- Drop into project root as \`CLAUDE.md\`, \`AGENTS.md\`, or \`.cursor/rules\` — the AI reads it on each turn for the snapshot.`)
         lines.push(`- Regenerate: \`cs context --output CLAUDE.md\` (or \`--watch\` for auto-regen).`)
         lines.push(``)
 

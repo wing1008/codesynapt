@@ -5,6 +5,15 @@ Tip: small, focused PRs are easier to review and merge faster than
 big ones. If you're making a large change, consider breaking it up.
 -->
 
+> **⚠ Required — apply a label.** For this PR to land in the next release's
+> CHANGELOG, a maintainer must add ONE of these GitHub labels before merge:
+> `breaking-change` · `feature` · `bug` · `enhancement` · `documentation` ·
+> `dependencies` · `chore` · `security` · `performance` · `refactor` · `tests`.
+>
+> External contributors: fill in the "Type of change" checkboxes below — a
+> maintainer will translate them into the matching label. (Unlabeled PRs are
+> silently dropped from the changelog by release-drafter.)
+
 ## What this PR does
 
 <!--
@@ -86,7 +95,7 @@ If this is a breaking change, describe:
 - [ ] I made corresponding documentation changes
 - [ ] My changes generate no new warnings
 - [ ] I agree to license my contribution under:
-  - **BSL 1.1** for changes outside `plugin-api/`
+  - **AGPL-3.0-or-later** for changes outside `plugin-api/` (with relicense grant to maintainer)
   - **MIT** for changes inside `plugin-api/`
   (See CONTRIBUTING.md for the full CLA terms.)
 

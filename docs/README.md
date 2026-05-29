@@ -1,4 +1,4 @@
-# filegraph3d documentation
+# codesynapt documentation
 
 This folder contains the main application docs. For **plugin development**,
 see [`../plugin-api/`](../plugin-api/).
@@ -15,7 +15,7 @@ see [`../plugin-api/`](../plugin-api/).
 
 | Doc | What's in it |
 |---|---|
-| [architecture.md](./architecture.md) | How filegraph3d works under the hood — parser, scanner, layout, rendering pipeline |
+| [architecture.md](./architecture.md) | How codesynapt works under the hood — parser, scanner, layout, rendering pipeline |
 | [../plugin-api/README.md](../plugin-api/README.md) | Plugin development (themes, exporters, parsers, etc) |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Contributing code back to the main repo |
 

@@ -92,7 +92,7 @@ const SUGGEST_STRINGS = {
     vendors: {
       title:  (n) => `${n} third-party folder(s) in graph`,
       why:    (s) => `${s} etc. look vendored. They pollute hub / orphan / env results.`,
-      advice: (lines) => `Add to .fg3dignore (one per line, trailing /):\n  ${lines}`,
+      advice: (lines) => `Add to .codesynaptignore (one per line, trailing /):\n  ${lines}`,
     },
     dynamic: {
       title:  (p) => `Dynamic import ratio ${p}%`,
@@ -124,7 +124,7 @@ const SUGGEST_STRINGS = {
     vendors: {
       title:  (n) => `Third-party 폴더 ${n}개 graph에 포함됨`,
       why:    (s) => `${s} 등이 vendored 코드로 보임. graph 분석/hub/orphan 결과가 오염될 수 있음.`,
-      advice: (lines) => `.fg3dignore에 추가 (한 줄씩, 끝에 /):\n  ${lines}`,
+      advice: (lines) => `.codesynaptignore에 추가 (한 줄씩, 끝에 /):\n  ${lines}`,
     },
     dynamic: {
       title:  (p) => `동적 import 패턴 비중 ${p}%`,
@@ -817,7 +817,7 @@ function createControlServer(opts) {
     }
 
     // 4.5. Vendor folders not ignored — graph quality signal.
-    //      If a project has third-party folders not in .fg3dignore,
+    //      If a project has third-party folders not in .codesynaptignore,
     //      hubs/orphans/env results get polluted by vendored code.
     const vendors = scanner.vendorCandidates || []
     const highConfVendors = vendors.filter((v) => v.confidence >= 0.5)
@@ -868,7 +868,7 @@ function createControlServer(opts) {
     return {
       candidates: scanner.vendorCandidates || [],
       count: (scanner.vendorCandidates || []).length,
-      tip: 'Copy paths into .fg3dignore (one per line, trailing /) to hide from the graph.',
+      tip: 'Copy paths into .codesynaptignore (one per line, trailing /) to hide from the graph.',
     }
   }
 
@@ -1147,6 +1147,15 @@ function createControlServer(opts) {
   // ── Main router ───────────────────────────────────────────────
   function handleControlRequest(req, res) {
     const startTs = Date.now()
+    // ─── DNS-rebinding defense: validate Host header ──────────
+    // Browsers can be tricked into resolving attacker.com → 127.0.0.1
+    // and firing requests at our localhost port. Rejecting Host headers
+    // that aren't loopback closes this attack class.
+    const hostHeader = (req.headers.host || '').split(':')[0].toLowerCase()
+    if (hostHeader !== '127.0.0.1' && hostHeader !== 'localhost' && hostHeader !== '[::1]') {
+      writeJson(res, 403, { error: 'forbidden host: ' + hostHeader })
+      return
+    }
     // Audit on response finish (status code captured by then)
     if (auditLogDir) {
       res.on('finish', () => {
@@ -1162,7 +1171,9 @@ function createControlServer(opts) {
     }
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
+        // CORS is intentionally restrictive — only same-origin loopback.
+        // CLI/MCP don't use CORS (no Origin header), so they're unaffected.
+        'Access-Control-Allow-Origin': 'null',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       })
@@ -1185,7 +1196,7 @@ function createControlServer(opts) {
     try {
       if (req.method === 'GET' && parts.length === 0) {
         return writeJson(res, 200, {
-          name: 'filegraph3d',
+          name: 'codesynapt',
           mode: 'headless',
           endpoints: [
             'GET /health', 'GET /summary', 'GET /graph', 'GET /node/:id',

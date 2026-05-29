@@ -2,6 +2,126 @@
 
 All notable changes to CodeSynapt (formerly `CodeSynapse`, originally `filegraph3d`).
 
+## 0.15.0 — 2026-05-29 (license switch: BSL 1.1 → AGPL-3.0 + Commercial Dual)
+
+### Changed (breaking — license)
+- **License: BSL 1.1 → AGPL-3.0-or-later** for the main app. Same dual structure as MariaDB/Plausible/Cal.com:
+  - **AGPL-3.0** for community use (free, including internal company use)
+  - **Commercial license** available for organizations that need to use CodeSynapt without AGPL's source-disclosure obligation (closed-source SaaS, embedded in proprietary product). Pricing scales with revenue tier (Starter / Growth / Enterprise) — see [LICENSES.md](./LICENSES.md).
+  - Plugin API (`plugin-api/`) stays **MIT** — plugin ecosystem unchanged.
+- **Why the switch**: BSL converts to Apache automatically in 2030, removing future commercial leverage. AGPL is permanent copyleft + OSI-approved + the modern dual-license standard (Plausible, Cal.com, Sourcegraph, MariaDB).
+- **What this means for users**:
+  - Personal / internal-company / academic / research use → **unchanged, still free**
+  - Modifying CodeSynapt and offering it as a **public hosted service** → must publish modifications under AGPL OR buy a commercial license
+  - Distributing modified CodeSynapt inside a proprietary product → same
+- **CLA**: contributor license agreement updated so the maintainer (`wing1008`) retains the right to relicense for commercial customers. Plugin API contributions stay MIT.
+
+### Added
+- **GitHub Sponsors + Buy me a Coffee links** activated in `.github/FUNDING.yml`.
+- README **Support the project** section with sponsor / coffee / commercial-license callouts.
+- LICENSES.md fully rewritten — plain-language explanation of the AGPL + Commercial dual model, with revenue-tier guidance for commercial licensing.
+
+### Migration notes
+- `package.json` `"license": "AGPL-3.0-or-later"` (was `BUSL-1.1`).
+- README badge changed (BSL → AGPL + Commercial-Available).
+- Internal docs (AGENTS.md / CLAUDE.md / docs/architecture.md / plugin-api/README.md) updated.
+- The old LICENSE text (BSL 1.1 with `[YOUR_NAME]` placeholders) is replaced by the canonical AGPL-3.0 text plus a CodeSynapt-specific preamble and commercial-license pointer.
+
+
+## 0.14.9 — 2026-05-28 (cs CLI shim + bundled Node + full-text search + 안정성 polish)
+
+### Added
+- **`cs` CLI globally on PATH after `.exe` install** — NSIS installer adds `%LOCALAPPDATA%\Programs\CodeSynapt\bin` to user `PATH`. `cs --help` works in any new shell with zero extra setup.
+- **Bundled Node 22 LTS** — installer auto-detects system Node (`where node`). If present, bundled Node section is unchecked by default (saves 76 MB). If absent, bundled is checked. Both branches always work — shim tries bundled first, falls back to system PATH `node`.
+- **`cs ensure` 두 환경 자동 감지** — installed `.exe` 환경(`%LOCALAPPDATA%\Programs\CodeSynapt\CodeSynapt.exe`)에서는 그걸로 spawn, dev 환경(`node_modules/electron`)에서는 electron 바이너리. spawn 시 `CS_INITIAL_ROOT` env 주입.
+- **Full-text search** (`cs search <q>` / `cs_query({action:'search'})` / `GET /search?q=`) — mtime-keyed LRU 캐시 (100 MB), concurrency 32 + per-file 5s timeout, batch 256, early-bail at max=100, regex/case 옵션.
+  - Cache invalidation: scanner의 `file-changed` / `file-removed` 이벤트 자동 hook + stat 기반 보험. 변경/추가/제거 모두 자동 반영.
+  - **Scan-progress guard**: 초기 scan 진행 중 503 응답 ("scan in progress") — hang 회피. `scanner.initialScanComplete` flag 기준.
+  - **Known limitation**: 거대 repo + cold + scan 직후의 race 케이스에서 search가 가끔 hang. AI는 자동으로 Read+Grep fallback. worker_threads 격리는 별도 작업으로 보류.
+- **`window.codesynapt` IPC namespace** — preload.cjs가 새 정식 이름 + legacy `window.fg3d` alias 동시 노출. renderer 48 사이트 (`window.fg3d.` → `window.codesynapt.`) 일괄 갱신. 외부 플러그인은 alias로 그대로 동작.
+
+### Changed
+- **`asar: false`** — 패키징 시 source를 unpack 상태로. `cs ensure` 및 `cs *` CLI shim이 `node_modules` 외부에서 `codesynapt.cjs`를 require 가능하도록.
+- **WebGPU UI 정직성** — 설정 패널의 "GPU only" 라디오를 disabled + greyed out + tooltip "Coming in v0.6 / Always CPU for now". 한국어/영어 i18n 텍스트 모두 정정 (이전 "최고 성능" 약속 제거). backend 코드는 이전부터 정직 stub (`stepGPU = null`).
+- **README 3-path 셋업** — Path 1 (.exe), Path 2 (git clone + npm link), Path 3 (CLI/MCP only). `cs init` + `/codesynapt` 슬래시 흐름 명시.
+- **CLI 표기 일관성** — README 전반에서 `node packages/core/bin/codesynapt.cjs xxx` → `cs xxx`.
+
+### Fixed
+- **NSIS spawn `EINVAL`** (Windows) — `npm.cmd start` + `detached + shell:false` 조합 회피. `require('electron')` 또는 installed `CodeSynapt.exe`를 직접 spawn.
+- **`window.fg3d` legacy alias 유지** — 새 namespace로 마이그레이션하되 옛 이름도 같은 객체에 노출해 점진 마이그레이션 가능.
+- **`perf-test.js` orphan** → `scripts/perf-test.js` 이동 + `package.json` `"bench": "node scripts/perf-test.js"` 추가. root 정리.
+
+### Build
+- Windows 빌드는 **Developer Mode 필수** (winCodeSign 캐시 추출 시 macOS .dylib symlink 권한).
+- `build/installer.nsh` NSIS hook: Components 페이지에 "Bundled Node.js 22" + "Add cs command to PATH" 두 옵션. PATH 등록은 `build/installer-bin/add-to-path.ps1` (uninstaller가 `remove-from-path.ps1` 호출) — NSIS StrFunc 의존성 회피.
+
+### Tests
+- 68/68 통과 — control-server name/scanner ignore 패턴 fixture 갱신.
+
+### Fixed (계속)
+- **`scanner.snapshot()` dynamicPatterns 누락** — `/graph` 응답의 files 배열에 `hasDynamicResolution` / `dynamicPatterns` 필드가 빠져 있어 `summary.dynamicPatternFileCount` (정답 4) vs `/graph` enumeration (0) 카운트 불일치. snapshot()에 두 필드 추가로 일치. `confidence` + `pkg` 도 같이 노출.
+- **`/search` 안정성 + 186배 성능 — 5-layer fix** (이전 "Known issues"에 있었던 worker_threads 보류 작업 완료):
+  1. **worker_threads 격리** (`packages/core/lib/search-worker.cjs` + `_searchInWorker` in main.cjs) — search를 main thread에서 분리. chokidar/scanner saturation 영향 0.
+  2. **`MAX_SEARCH_BYTES = 5 MB`** — Gemma 토크나이저 JSON 같은 거대 파일이 libuv thread를 점유하던 hang 차단. `skipped: [{ reason: 'too-large' }]`로 보고.
+  3. **stat skip on cache hit** — chokidar invalidation 메시지를 신뢰. 반복 검색 시 stat 호출 1776 × 회피.
+  4. **`scanContent` fast-reject** — `if (hay.indexOf(needle) === -1) return []` 한 줄. 매칭 없는 파일 (대부분) 즉시 skip. **30 초 → 168 ms (186 배 개선)**.
+  5. **concurrency 8** — libuv pool 적정선.
+- **`cs search` / `cs_query({action:'search'})` 자동 retry** — 503 (scan in progress) 받으면 2 초 wait × 3 회 자동 재시도. 사용자/AI가 첫 503 마주칠 일 사라짐.
+- **`/search` benchmark (Aiotv_v2 1776 파일)**:
+  - RUNPOD_API_KEY cold 168ms, warm 82ms
+  - asjfbnka_miss 45ms (no match — fast-reject 효과)
+  - import (max=100, early-bail) 5ms
+  - hang 0 (이전 ~50% 빈도로 hang)
+
+### Added (계속)
+- **`cs orphans` CLI** — `/graph` 직접 enumeration. confidence-filtered `cs legacy`와 별개로 raw orphan 목록. entry/config/manifest 같은 false-positive 포함, 사용자 직접 분류.
+- **`scanner.initialScanComplete` flag** + `/search` scan-progress 가드 — 초기 scan 진행 중에는 503 + retry hint. Worker가 saturated main thread에서 hang하지 않도록.
+- **debug 인프라**: `F:/tmp/cs-search-trace.log` 에 main + worker 양쪽 trace append. 향후 디버그 빠름.
+
+### Security (multi-agent audit 후속, 2026-05-28)
+- **`server.js` LAN 노출 차단** — 기본 `0.0.0.0` 바인딩이었음. `127.0.0.1` 강제로 카페/공유 wifi의 LAN 사용자 접근 차단.
+- **DNS rebinding 방어 — Host 헤더 검증** — `127.0.0.1`/`localhost`/`[::1]` 외 reject (403). control-server.cjs + main.cjs 두 곳. 외부 origin이 7707 호출 차단.
+- **CORS `*` → `null`** — cross-origin browser fetch 차단 (CLI/MCP는 CORS 무관, 영향 0).
+- **`@electron/fuses` afterPack hook** — `RunAsNode:false` / `NodeOptions:false` / `NodeCliInspect:false` / `CookieEncryption:true`. signed binary의 `ELECTRON_RUN_AS_NODE=1` RCE 벡터 차단.
+- **`will-navigate` + permission deny** — main.cjs 의 `web-contents-created` 안에 추가. CSP 외 defense-in-depth.
+- **`electron-updater` 통합** — GitHub Releases provider. `autoDownload: false` (사용자 클릭 후 다운로드). `CS_DISABLE_UPDATER=1` env로 옵트아웃 가능. publish 설정 추가 (build.publish = github wing1008/codesynapt).
+
+### Added (계속)
+- **`packages/core/lib/logger.cjs`** — minimal NDJSON structured logger (level/module/ts/msg, stderr fallback). pino-equivalent 50줄, runtime dep 0. main.cjs 핵심 7 사이트 (control listen / migration / retention / updater 등) 교체됨, 나머지는 점진.
+- **Log retention (30일 default)** — `pruneOldLogs()` boot 시 `~/.codesynapt/audit/*.jsonl` + project `.codesynapt/traces/*.jsonl` 자동 삭제. `CS_AUDIT_RETENTION_DAYS` env override. SECURITY.md 안내.
+- **SBOM CI** — `npm sbom --sbom-format=cyclonedx --sbom-type=application > sbom.cyclonedx.json`. release artifact로 첨부 (Linux runner 1회). 기업 도입 가속.
+- **PR template label 강제** — `.github/PULL_REQUEST_TEMPLATE.md` 최상단에 "Required — apply a label" 박스 + 11 라벨 enumeration. release-drafter 누락 방지.
+- **`scripts/fuses-after-pack.cjs`** — electron-builder `afterPack` hook.
+
+### Known issues / deferred
+- 거대 monorepo (50k+ 파일) ripgrep wrap — 현 타겟 (~1k 파일)에 불필요해서 보류.
+- WebGPU compute shader 구현 — `stepGPU = null` stub. UI 토글은 disabled + "Coming in v0.6" tooltip으로 정직성 fix됨. backend dispatcher 인프라는 준비됨.
+- **자동 Bearer token (`~/.codesynapt/token`)** — CORS `null` + Host 검증으로 80%는 충족. Jupyter 패턴 자동 토큰은 추후 polish.
+- **Azure Artifact Signing ($120/년)** + **Apple Developer ($99/년)** — 출시 결정 시.
+- **README GIF 3개 + `npm publish` + `.exe` GitHub Release upload** — 채택률 위한 마케팅, 사용자 액션.
+
+## 0.14.6 — 2026-05-27 (.exe installer + opt-in modes + rename cleanup)
+
+### Added
+- **NSIS Windows installer** (`CodeSynapt-Setup-${version}.exe`) — `perMachine: false`, `appId: io.codesynapt.desktop` 고정, `deleteAppDataOnUninstall: false`. 같은 `appId` 덕에 0.14.x → 0.14.x+1 upgrade 시 자동 uninstall + install (사용자 데이터 보존).
+- **Single-instance lock** (`electron/main.cjs`) — 두 번째 `CodeSynapt.exe` 실행 시 main 창 focus + CS_INITIAL_ROOT가 있으면 그 폴더 load. 7707 포트 / 두 윈도우 충돌 방지.
+- **`CS_INITIAL_ROOT` env** + **`POST /load`** — `cs ensure`가 GUI 자동 spawn 또는 swap 시 사용. 슬래시 `/codesynapt` 한 번에 desktop 띄움 + 현재 폴더 자동 로드.
+- **`/codesynapt` + `/codesynapt-auto` 슬래시 두 모드** — 기본 OFF, 명시 진입. AUTO는 비-사소 작업만 cs_* 호출.
+- **`cs ensure` CLI** — desktop alive 확인 → noop / `POST /load` / electron 바이너리 직접 spawn (Windows `EINVAL` 회피).
+
+### Changed
+- **Window title**: `FileGraph 3D` → `CodeSynapt` (`public/index.html`, `electron/main.cjs:140`).
+- **CLI USAGE header**: `filegraph3d CLI — usage:` → `CodeSynapt CLI — usage:`.
+- **`localStorage` prefix**: `filegraph3d:*` → `codesynapt:*` (28 occurrences) + **one-time migration** copies legacy keys on first run (old keys retained for safety).
+- **Per-project data folder**: `.filegraph3d/` → `.codesynapt/` (history/ + traces/). `migrateLegacyHistoryDir(root)` renames the whole folder on first scan (skipped if both exist).
+- **Carbon theme empty prompt**: `$ filegraph3d --init` → `$ cs init`.
+- **Download filenames**: `filegraph3d-*.png/json/csv` → `codesynapt-*`.
+- **API `GET /` response `name`**: `filegraph3d` → `codesynapt`.
+
+### Build
+- `build.appId` = `io.codesynapt.desktop` (절대 변경 금지 — 변경 시 NSIS가 "별개 앱"으로 인식해 업그레이드 충돌).
+- Windows 빌드는 **Developer Mode 필수** (winCodeSign 캐시 추출 시 macOS .dylib symlink 권한).
+
 ## 0.14.4 — 2026-05-22 (CI matrix + bench memory + suggest i18n + content hash)
 
 ### Added

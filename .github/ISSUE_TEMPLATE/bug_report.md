@@ -33,7 +33,7 @@ See SECURITY.md and report it privately.
 ## Environment
 
 - **OS**: <!-- e.g. macOS 14.4, Windows 11 23H2, Ubuntu 22.04 -->
-- **filegraph3d version**: <!-- Settings → About, or check package.json -->
+- **CodeSynapt version**: <!-- Settings → About, or check package.json -->
 - **Install method**: <!-- .dmg / .exe / .AppImage / .tar.gz / built from source -->
 - **Node.js version** (if built from source): <!-- node --version -->
 - **Graph size**: <!-- approximately how many files in the folder you opened -->

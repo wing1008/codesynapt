@@ -1,9 +1,16 @@
 {
   "name": "codesynapt",
-  "version": "0.14.4",
+  "version": "0.15.0",
   "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
-  "license": "BUSL-1.1",
-  "author": "",
+  "license": "AGPL-3.0-or-later",
+  "author": {
+    "name": "wing1008",
+    "url": "https://github.com/wing1008"
+  },
+  "funding": [
+    { "type": "github", "url": "https://github.com/sponsors/wing1008" },
+    { "type": "individual", "url": "https://buymeacoffee.com/wing1008" }
+  ],
   "homepage": "https://github.com/wing1008/codesynapt#readme",
   "repository": {
     "type": "git",
@@ -51,10 +58,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:smoke": "node test.js",
+    "bench": "node scripts/perf-test.js",
     "license-check": "node scripts/license-check.js",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win",
+    "dist:win": "node scripts/download-bundled-node.cjs && electron-builder --win",
     "dist:linux": "electron-builder --linux"
   },
   "dependencies": {
@@ -67,27 +75,46 @@
     "ws": "^8.16.0"
   },
   "devDependencies": {
+    "@electron/fuses": "^2.1.1",
     "electron": "^41.0.0",
     "electron-builder": "^25.0.0",
+    "electron-updater": "^6.8.3",
     "vitest": "^2.1.9"
   },
   "build": {
-    "appId": "io.filegraph3d.app",
-    "productName": "FileGraph 3D",
-    "asar": true,
-    "asarUnpack": [
-      "node_modules/fsevents/**/*"
-    ],
+    "appId": "io.codesynapt.desktop",
+    "productName": "CodeSynapt",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "afterPack": "scripts/fuses-after-pack.cjs",
+    "asar": false,
     "files": [
       "electron/**/*",
       "public/**/*",
-      "parser.js",
-      "scanner.js",
+      "packages/core/**/*",
+      "plugin-api/**/*",
+      "scripts/**/*",
+      "server.js",
       "package.json"
     ],
-    "extraResources": [],
+    "extraResources": [
+      {
+        "from": "build/bundled-node/",
+        "to": "bundled-node/",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/installer-bin/",
+        "to": "installer-bin/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "directories": {
-      "buildResources": "build"
+      "buildResources": "build",
+      "output": "dist"
     },
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -119,19 +146,22 @@
           "arch": [
             "x64"
           ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
         }
       ]
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CodeSynapt",
+      "uninstallDisplayName": "CodeSynapt ${version}",
+      "deleteAppDataOnUninstall": false,
+      "differentialPackage": false,
+      "runAfterFinish": true,
+      "include": "build/installer.nsh"
     },
     "linux": {
       "target": [
@@ -155,10 +185,16 @@
         }
       ],
       "category": "Development",
-      "synopsis": "Real-time 3D code dependency visualizer",
-      "description": "FileGraph 3D visualizes how files in a codebase connect to each other. Drop a folder and watch every file orbit into place, with edges showing imports."
+      "synopsis": "MCP-native code graph visualizer for AI coding agents",
+      "description": "CodeSynapt visualizes how files in a codebase connect to each other in 3D, and exposes the dependency graph to AI coding agents via MCP — so agents can see blast radius before editing."
     },
-    "publish": null
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "wing1008",
+        "repo": "codesynapt"
+      }
+    ]
   },
   "engines": {
     "node": ">=20"
