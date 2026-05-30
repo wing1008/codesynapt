@@ -89,6 +89,12 @@ async function startScanner(root) {
   // Stop any in-flight scanner cleanly before installing a new one
   currentRoot = root
   timelineCache = { root: null, data: null, building: false }   // invalidate
+  // Drop every scanner-version-keyed cache so the next /summary, /packages,
+  // /legacy call recomputes against the freshly-loaded project instead of
+  // returning stale data from the previous project.
+  _summaryCache  = { version: -1, data: null }
+  _packagesCache = { version: -1, data: null }
+  _legacyCache   = { version: -1, data: null }
   migrateLegacyHistoryDir(root)
   addRecent(root)
   scanner = new Scanner(root)
@@ -787,10 +793,22 @@ function buildSummary() {
   // External services (already aggregated)
   const ext = getExternalUrls()
   const topExternal = ext.domains.slice(0, 5).map((d) => d.domain)
+  // `asset` edges are HTML/CSS/etc. referencing image/script/style files
+  // (jQuery, jazzy.js, theme CSS, image tags). They're useful when you
+  // ask "what assets does this page link to?" but they shouldn't dominate
+  // the code-structure stats — a 300-page Jazzy-generated docs tree would
+  // make `edgeCount` swing by thousands without representing any source
+  // dependency. Split them into their own counter.
+  let codeEdges = 0, assetEdges = 0
+  for (const e of scanner.edges) {
+    if (e.kind === 'asset' || e.k === 'asset') assetEdges++
+    else codeEdges++
+  }
   return {
     root: currentRoot,
     fileCount: files.length,
-    edgeCount: scanner.edges.length,
+    edgeCount: codeEdges,
+    assetEdgeCount: assetEdges,
     extMix,
     topFolders,
     topHubs,
@@ -1453,11 +1471,20 @@ function handleControlRequest(req, res) {
     }
 
     if (req.method === 'GET' && seg0 === 'health') {
+      // Edge count is split into code-structure edges and asset edges
+      // (HTML→image/script/style links), so a docs-heavy repo can't
+      // make health stats lie about the code graph size.
+      let codeEdges = 0, assetEdges = 0
+      if (scanner) for (const e of scanner.edges) {
+        if (e.kind === 'asset' || e.k === 'asset') assetEdges++
+        else codeEdges++
+      }
       return writeJson(res, 200, {
         ok: true,
         root: currentRoot,
         fileCount: scanner ? scanner.files.size : 0,
-        edgeCount: scanner ? scanner.edges.length : 0,
+        edgeCount: codeEdges,
+        assetEdgeCount: assetEdges,
         historyEnabled,
       })
     }
