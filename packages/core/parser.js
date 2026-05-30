@@ -1185,6 +1185,65 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
     return null
   }
 
+  // Go — `import "github.com/owner/repo/sub/pkg"`.
+  //
+  // Internal vs external is determined by reading the repo's go.mod once
+  // and caching the module declaration; anything prefixed with that path
+  // is internal and the suffix maps to a directory of .go files.
+  if (fromExt === 'go' && /^[A-Za-z0-9_]/.test(spec)) {
+    const modPrefix = getGoModulePrefix(rootAbs)
+    let internalPath = null
+    if (modPrefix && spec === modPrefix) internalPath = ''
+    else if (modPrefix && spec.startsWith(modPrefix + '/')) {
+      internalPath = spec.slice(modPrefix.length + 1)
+    }
+    if (internalPath != null) {
+      // Return any .go file inside that subdir (graph-level — we just
+      // need *some* node in the target package).
+      const prefix = internalPath ? internalPath + '/' : ''
+      for (const id of validIds) {
+        if (id.startsWith(prefix) && id.endsWith('.go')
+            && !id.slice(prefix.length).includes('/')) return id
+      }
+      // Fallback: any .go anywhere under the dir
+      for (const id of validIds) {
+        if (id.startsWith(prefix) && id.endsWith('.go')) return id
+      }
+    }
+    return null
+  }
+
+  // Rust — `use crate::a::b::c`, `use self::x`, `use super::x`, `mod x;`.
+  //
+  // Maps the module path to `src/a/b/c.rs`, `src/a/b/c/mod.rs`, or for
+  // `mod x;` resolved relative to the importing file's directory.
+  if (fromExt === 'rs' && /^[A-Za-z_]/.test(spec)) {
+    return resolveRustModule(fromAbsPath, spec, rootAbs, validIds)
+  }
+
+  // Java / Kotlin — `import com.foo.bar.Baz` → look for any file ending
+  // in `com/foo/bar/Baz.{java,kt}`. Source roots vary (`src/main/java/`,
+  // `src/`, etc.), so we suffix-match instead of trying to enumerate
+  // them. We also try shortening the FQN (Spring/Guava `import a.b.*`
+  // wildcards end up as just `a.b` — match it as a directory).
+  if ((fromExt === 'java' || fromExt === 'kt') && /^[A-Za-z_]/.test(spec)) {
+    const cleaned = spec.replace(/\.\*$/, '')   // strip wildcard
+    const parts = cleaned.split('.')
+    if (parts.length < 2) return null
+    // Try Foo.java / Foo.kt (innermost segment as the class name)
+    const exts = fromExt === 'kt' ? ['.kt', '.java'] : ['.java', '.kt']
+    for (let i = parts.length; i >= 2; i--) {
+      const tail = parts.slice(0, i).join('/')
+      for (const ext of exts) {
+        const suffix = '/' + tail + ext
+        for (const id of validIds) {
+          if (id.endsWith(suffix)) return id
+        }
+      }
+    }
+    return null
+  }
+
   // PowerShell `Import-Module Name` → look for Name.psm1 / Name/Name.psm1
   if (fromExt === 'ps1' && /^[A-Za-z]/.test(spec) && !spec.includes('/')) {
     const candidates = [`${spec}.psm1`, `${spec}/${spec}.psm1`, `${spec}.ps1`]
@@ -1267,4 +1326,86 @@ function resolvePythonRelative(fromAbsPath, spec, rootAbs, validIds) {
 
 function idOf(rootAbs, absPath) {
   return path.relative(rootAbs, absPath).split(path.sep).join('/')
+}
+
+// ─── Go module prefix cache ─────────────────────────────────────
+// Reads `module github.com/owner/repo` from the repo's go.mod once per
+// rootAbs. Used to decide which imports point inside the repo vs
+// external packages.
+const _goModCache = new Map()
+function getGoModulePrefix(rootAbs) {
+  if (_goModCache.has(rootAbs)) return _goModCache.get(rootAbs)
+  let prefix = null
+  try {
+    const p = path.join(rootAbs, 'go.mod')
+    if (fs.existsSync(p)) {
+      const txt = fs.readFileSync(p, 'utf8')
+      const m = txt.match(/^\s*module\s+(\S+)/m)
+      if (m) prefix = m[1]
+    }
+  } catch {}
+  _goModCache.set(rootAbs, prefix)
+  return prefix
+}
+
+// ─── Rust module resolution ─────────────────────────────────────
+// Maps `use crate::a::b`, `use self::x`, `use super::x`, `mod x;` into
+// a file path inside the repo. Best-effort: we look at `src/` first
+// (cargo convention) and also resolve relative to the importing file
+// for `self::` / `super::` / bare `mod x;`.
+function resolveRustModule(fromAbsPath, spec, rootAbs, validIds) {
+  // Strip any item suffix — `use crate::a::Foo` → module is `crate::a`.
+  // The item itself (Foo) is just a symbol export, not a file. We try
+  // both the full path and the parent.
+  const candidates = []
+  const segments = spec.split('::')
+  function addModuleCandidates(relSegs) {
+    if (!relSegs.length) return
+    const sub = relSegs.join('/')
+    candidates.push(sub + '.rs')
+    candidates.push(sub + '/mod.rs')
+  }
+  if (segments[0] === 'crate') {
+    addModuleCandidates(segments.slice(1))
+    addModuleCandidates(segments.slice(1, -1))   // strip item
+  } else if (segments[0] === 'self' || segments[0] === 'super') {
+    let base = path.dirname(fromAbsPath)
+    let i = 0
+    while (i < segments.length && segments[i] === 'super') {
+      base = path.dirname(base); i++
+    }
+    if (segments[i] === 'self') i++
+    const rest = segments.slice(i)
+    if (rest.length) {
+      const cand1 = path.join(base, ...rest) + '.rs'
+      const cand2 = path.join(base, ...rest, 'mod.rs')
+      candidates.push(idOf(rootAbs, cand1))
+      candidates.push(idOf(rootAbs, cand2))
+      // Also strip item
+      if (rest.length > 1) {
+        candidates.push(idOf(rootAbs, path.join(base, ...rest.slice(0, -1)) + '.rs'))
+      }
+    }
+  } else {
+    // Bare `mod foo;` — resolve relative to the importing file's dir.
+    const base = path.dirname(fromAbsPath)
+    candidates.push(idOf(rootAbs, path.join(base, ...segments) + '.rs'))
+    candidates.push(idOf(rootAbs, path.join(base, ...segments, 'mod.rs')))
+    // Also try src/ as a fallback root
+    addModuleCandidates(segments)
+  }
+  // Search src/ as a default crate root too
+  if (segments[0] === 'crate' || !['self','super'].includes(segments[0])) {
+    const segs = segments[0] === 'crate' ? segments.slice(1) : segments
+    const inSrc = ['src', ...segs].join('/')
+    candidates.push(inSrc + '.rs')
+    candidates.push(inSrc + '/mod.rs')
+    if (segs.length > 1) {
+      candidates.push(['src', ...segs.slice(0, -1)].join('/') + '.rs')
+    }
+  }
+  for (const c of candidates) {
+    if (validIds.has(c)) return c
+  }
+  return null
 }
