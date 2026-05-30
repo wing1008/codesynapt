@@ -117,14 +117,22 @@ const T = {
     'search.stats.title':   '그래프 통계 (S)',
     'search.rightrail.title':'오른쪽 패널 토글 (M)',
     'search.changes.title': 'AI 작업물 — 이번 세션에 변경된 파일',
-    'search.tour.title':    '프로젝트 가이드 투어',
     'search.timelapse.title':'타임랩스 — git 히스토리 재생',
     'search.packages.title':'모노레포 패키지 보기',
     'search.legacy.title':  '레거시 청소 후보 감사 (마이그레이션)',
     'search.settings.title':'설정 (Ctrl/Cmd+,)',
+    'search.more.title':    '더 많은 도구',
+    'sb.group.search':      '검색',
+    'sb.group.view':        '뷰',
+    'sb.group.ai':          'AI 도구',
+    'sb.group.more':        '더보기',
+    'more.timelapse':       '타임랩스',
+    'more.packages':        '패키지',
+    'more.legacy':          '레거시 감사',
+    'more.lang':            '언어 전환',
+    'more.settings':        '설정',
     // Panel titles (kickers)
     'kicker.ai_work':       'ai 작업물 · 세션 변경',
-    'kicker.guided_tour':   '가이드 투어',
     'kicker.timelapse':     '타임랩스',
     'kicker.packages':      '모노레포 · 패키지',
     'kicker.settings':      '설정',
@@ -157,6 +165,8 @@ const T = {
     'kicker.files':         '파일',
     'kicker.pipelines':     '파이프라인',
     'kicker.recent':        '최근',
+    'recent.empty':         '최근 본 파일이 없음',
+    'inspector.empty':      '파일을 선택하면 정보가 표시됩니다',
     'kicker.legend':        '확장자',
     'kicker.ai_trace':      'ai 트레이스',
     'kicker.inspector':     '인스펙터',
@@ -280,8 +290,6 @@ const T = {
     'changes.empty':             '아직 수정된 파일 없음.<br>AI(Claude Code/Cursor)나 에디터로 파일을 저장하면 여기 표시됩니다.',
     'changes.requires_electron': 'Changes 패널은 데스크탑 앱에서만 사용 가능',
     // Tour / Time-lapse
-    'tour.requires_electron':       '투어는 데스크탑 앱에서만 사용 가능',
-    'tour.no_stops':                '투어 항목이 없음 — import가 적은 폴더입니다',
     'timelapse.requires_electron':  '타임랩스는 데스크탑 앱에서만 사용 가능',
     // Hints bar
     'hints.drag':    '드래그',
@@ -361,13 +369,21 @@ const T = {
     'search.stats.title':   'Graph stats (S)',
     'search.rightrail.title':'Toggle right panel (M)',
     'search.changes.title': 'AI work — files changed this session',
-    'search.tour.title':    'Guided tour of the project',
     'search.timelapse.title':'Time-lapse: replay git history',
     'search.packages.title':'View monorepo packages',
     'search.legacy.title':  'Legacy / migration audit — cleanup candidates',
     'search.settings.title':'Settings (Ctrl/Cmd+,)',
+    'search.more.title':    'More tools',
+    'sb.group.search':      'search',
+    'sb.group.view':        'view',
+    'sb.group.ai':          'AI tools',
+    'sb.group.more':        'more',
+    'more.timelapse':       'Time-lapse',
+    'more.packages':        'Packages',
+    'more.legacy':          'Legacy audit',
+    'more.lang':            'Language',
+    'more.settings':        'Settings',
     'kicker.ai_work':       'ai work · session changes',
-    'kicker.guided_tour':   'guided tour',
     'kicker.timelapse':     'time-lapse',
     'kicker.packages':      'monorepo · packages',
     'kicker.settings':      'settings',
@@ -400,6 +416,8 @@ const T = {
     'kicker.files':         'files',
     'kicker.pipelines':     'pipelines',
     'kicker.recent':        'recent',
+    'recent.empty':         'No recently viewed files',
+    'inspector.empty':      'Select a file to see its info',
     'kicker.legend':        'extensions',
     'kicker.ai_trace':      'ai trace',
     'kicker.inspector':     'inspector',
@@ -514,8 +532,6 @@ const T = {
     'editor.diff.skip_next':    'Save without prompting (this session)',
     'changes.empty':             'No files modified yet.<br>Edits by AI (Claude Code / Cursor) or your editor will appear here.',
     'changes.requires_electron': 'Changes panel requires the desktop app',
-    'tour.requires_electron':       'Tour requires the desktop app',
-    'tour.no_stops':                'No tour stops found — does this folder have enough imports?',
     'timelapse.requires_electron':  'Time-lapse requires the desktop app',
     'hints.drag':    'drag',
     'hints.orbit':   'orbit',
@@ -598,8 +614,10 @@ function setLang(lang) {
   // pathLabel: if no folder loaded, show translated label; otherwise leave the path alone
   const pl = document.getElementById('pathLabel')
   if (pl && !state.root) pl.textContent = t('topbar.open_folder.label')
-  const btn = document.getElementById('langToggle')
-  if (btn) btn.textContent = lang === 'ko' ? 'EN' : '한'
+  // Language toggle lives inside the More menu — only update its icon span
+  // so we don't clobber the menu item's `<span class="more-label">`.
+  const langIcon = document.getElementById('langCurrent')
+  if (langIcon) langIcon.textContent = lang === 'ko' ? 'EN' : '한'
 }
 
 const MAX_NODES = 300_000
@@ -1577,9 +1595,12 @@ function tickCamera(dt) {
   cam.target.lerp(cam.targetGoal, k)
   // Idle auto-rotate — gentle spin around the focus target when the
   // user hasn't touched anything for a few seconds. Stops the moment
-  // they interact. Disabled during active tour playback.
+  // they interact, and respects the ❚❚ pause button.
   const idleFor = performance.now() - lastUserInteractionAt
-  if (idleFor > IDLE_ROTATE_THRESHOLD_MS && !state.draggingNode && !state.cameraDragging) {
+  if (!state.paused
+      && idleFor > IDLE_ROTATE_THRESHOLD_MS
+      && !state.draggingNode
+      && !state.cameraDragging) {
     // Ease in over 1 second after threshold
     const ease = Math.min(1, (idleFor - IDLE_ROTATE_THRESHOLD_MS) / 1000)
     cam.theta += dt * IDLE_ROTATE_SPEED * ease
@@ -2890,11 +2911,10 @@ function renderPipelinesPanel() {
   const list = document.getElementById('pipelinesList')
   if (!panel || !list) return
 
-  // Show the panel only when we have a folder open. Hide it when
-  // there are no pipelines AND no starred files (nothing to show).
+  // The panel always shows inside its left-rail tab; an empty state
+  // message is rendered when nothing is active.
   const empty = state.pipelines.length === 0 && state.activeFiles.size === 0
-  if (!state.root) { panel.classList.add('hidden'); return }
-  panel.classList.remove('hidden')
+  if (!state.root) { list.innerHTML = ''; return }
 
   // Mode button reflects current mode
   const modeBtn = document.getElementById('ppModeBtn')
@@ -3022,8 +3042,10 @@ function renderRecentFiles() {
   const list = state.root ? loadRecent(state.root) : []
   // Filter to ones that still exist in the current graph
   const valid = list.filter((id) => state.nodes.has(id))
-  if (valid.length === 0) { panel.classList.add('hidden'); return }
-  panel.classList.remove('hidden')
+  if (valid.length === 0) {
+    host.innerHTML = `<div class="rf-empty">${t('recent.empty')}</div>`
+    return
+  }
   host.innerHTML = valid.map((id) => {
     const n = state.nodes.get(id)
     const color = n.hex || '#888'
@@ -3298,8 +3320,12 @@ function render() {
   tickCamera(dt)
   if (!state.paused) backend.runStep(dt, stepCPU, stepGPU)
 
-  starfield.rotation.y += dt * 0.008
-  nebula.rotation.y -= dt * 0.005
+  // Background ambience moves only while the simulation is running, so
+  // the ❚❚ pause button freezes the whole scene including stars/nebula.
+  if (!state.paused) {
+    starfield.rotation.y += dt * 0.008
+    nebula.rotation.y -= dt * 0.005
+  }
 
   // Throttled picking (only when mouse moved + cool-down)
   if (state.mouseMoved && (now - state.lastPickAt) > PICK_THROTTLE_MS
@@ -3934,10 +3960,10 @@ window.addEventListener('keydown', (e) => {
     if (sp) sp.classList.toggle('hidden')
     return
   }
-  // M — toggle right rail (minimap + context panel)
+  // M — toggle the minimap (right sidebar itself is permanent)
   if (e.key === 'm' || e.key === 'M') {
     e.preventDefault()
-    const btn = document.getElementById('rightRailBtn')
+    const btn = document.getElementById('minimapToggle')
     if (btn) btn.click()
     return
   }
@@ -3972,12 +3998,18 @@ async function selectNode(id) {
   if (id && !state.nodes.has(id)) id = null
   state.selectedId = id
   bus.emit('selection:changed', id)
-  if (!id) { inspector.classList.add('hidden'); return }
-  // If inspector is already open (user opened it earlier), update its content
-  // to the newly-selected node. Otherwise just pre-warm content silently.
-  if (!inspector.classList.contains('hidden')) {
-    renderInspector(id)
+  if (!id) {
+    // Inside the right-rail layout the inspector stays visible — reset its
+    // body to the empty placeholder so the user sees "no selection".
+    inspector.classList.add('hidden')
+    if (inspectorBody) {
+      inspectorBody.innerHTML = `<div class="rs-empty">${t('inspector.empty')}</div>`
+    }
+    return
   }
+  // Inspector is always visible in the right sidebar — render every time
+  // the selection changes.
+  renderInspector(id)
   const content = await readFile(id)
   setPreview(id, content)
 }
@@ -4714,54 +4746,6 @@ setInterval(() => {
   if (!changesPanel.classList.contains('hidden')) refreshChanges()
 }, 3000)
 
-// ─── Guided tour ─────────────────────────────────────────────
-const tourPanel = document.getElementById('tour')
-const tourStopEl = document.getElementById('tourStop')
-const tourFileEl = document.getElementById('tourFile')
-const tourHintEl = document.getElementById('tourHint')
-let tourStops = []
-let tourIdx = 0
-function renderTourStop() {
-  if (!tourStops.length) return
-  const s = tourStops[tourIdx]
-  tourStopEl.textContent = `${tourIdx + 1} / ${tourStops.length}  [${s.kind}]`
-  tourFileEl.textContent = s.id
-  tourHintEl.textContent = s.hint
-  const node = state.nodes.get(s.id)
-  if (node) {
-    cam.targetGoal.copy(node.p)
-    recordTrace(s.id, 'focus')
-  }
-}
-async function openTour() {
-  if (!isElectron) return toast(t('tour.requires_electron'))
-  try {
-    const data = await window.codesynapt.getTour()
-    if (!data || data.error) return toast(`tour error: ${data?.error || 'failed'}`)
-    if (!data.stops || !data.stops.length) return toast(t('tour.no_stops'))
-    tourStops = data.stops
-    tourIdx = 0
-    tourPanel.classList.remove('hidden')
-    renderTourStop()
-  } catch (e) { toast(`tour error: ${e.message}`) }
-}
-function closeTour() { tourPanel.classList.add('hidden'); tourStops = [] }
-document.getElementById('tourBtn')?.addEventListener('click', () => {
-  if (tourPanel.classList.contains('hidden')) openTour()
-  else closeTour()
-})
-document.getElementById('tourClose')?.addEventListener('click', closeTour)
-document.getElementById('tourPrev')?.addEventListener('click', () => {
-  if (!tourStops.length) return
-  tourIdx = (tourIdx - 1 + tourStops.length) % tourStops.length
-  renderTourStop()
-})
-document.getElementById('tourNext')?.addEventListener('click', () => {
-  if (!tourStops.length) return
-  tourIdx = (tourIdx + 1) % tourStops.length
-  renderTourStop()
-})
-
 // ─── Packages panel (monorepo) ───────────────────────────────
 const pkgPanel       = document.getElementById('packages')
 const pkgMetaEl      = document.getElementById('packagesMeta')
@@ -5406,10 +5390,11 @@ document.addEventListener('click', (e) => {
   pswPanel.classList.add('hidden')
 })
 
-// ─── Language toggle ─────────────────────────────────────────
+// ─── Language toggle (button lives inside More menu now) ─────
 const langToggleBtn = document.getElementById('langToggle')
 if (langToggleBtn) {
-  langToggleBtn.textContent = CURRENT_LANG === 'ko' ? 'EN' : '한'
+  const langIcon = document.getElementById('langCurrent')
+  if (langIcon) langIcon.textContent = CURRENT_LANG === 'ko' ? 'EN' : '한'
   langToggleBtn.addEventListener('click', () => {
     setLang(CURRENT_LANG === 'ko' ? 'en' : 'ko')
   })
@@ -6558,39 +6543,28 @@ minimapCanvas.addEventListener('pointerup', endMinimapDrag)
 minimapCanvas.addEventListener('pointercancel', endMinimapDrag)
 window.addEventListener('blur', () => { minimapDragging = false; minimapPointerId = null })
 
-// ─── Right rail toggle (header button + inline minimap button) ──
-const RIGHT_RAIL_KEY = 'codesynapt:right_rail_collapsed'
+// ─── Minimap collapse (right sidebar itself is permanent) ──────
+const MINIMAP_KEY = 'codesynapt:minimap_collapsed'
 const rightRail = document.getElementById('rightRail')
-const rightRailBtn = document.getElementById('rightRailBtn')
+const minimapWrap = document.getElementById('minimapWrap')
 const minimapToggleBtn = document.getElementById('minimapToggle')
 
-function setRightRailCollapsed(collapsed) {
-  rightRail.classList.toggle('collapsed', collapsed)
-  document.body.classList.toggle('rail-collapsed', collapsed)
-  // Header button: active = panel is OPEN
-  rightRailBtn.classList.toggle('active', !collapsed)
-  rightRailBtn.textContent = collapsed ? '▶' : '◀'
-  rightRailBtn.title = collapsed
-    ? 'Show right panel (M)'
-    : 'Hide right panel (M)'
-  // Inline minimap button: text shows the action it'll take
-  minimapToggleBtn.textContent = collapsed ? '+' : '−'
-  try { localStorage.setItem(RIGHT_RAIL_KEY, collapsed ? 'true' : 'false') } catch {}
+function setMinimapCollapsed(collapsed) {
+  if (!minimapWrap) return
+  minimapWrap.classList.toggle('collapsed', collapsed)
+  if (minimapToggleBtn) minimapToggleBtn.textContent = collapsed ? '+' : '−'
+  try { localStorage.setItem(MINIMAP_KEY, collapsed ? 'true' : 'false') } catch {}
 }
 
-// Initial state — default open, restore from localStorage if previously closed
-let initialCollapsed = false
-try {
-  initialCollapsed = localStorage.getItem(RIGHT_RAIL_KEY) === 'true'
-} catch {}
-setRightRailCollapsed(initialCollapsed)
+let initialMinimapCollapsed = false
+try { initialMinimapCollapsed = localStorage.getItem(MINIMAP_KEY) === 'true' } catch {}
+setMinimapCollapsed(initialMinimapCollapsed)
 
-rightRailBtn.addEventListener('click', () => {
-  setRightRailCollapsed(!rightRail.classList.contains('collapsed'))
-})
-minimapToggleBtn.addEventListener('click', () => {
-  setRightRailCollapsed(!rightRail.classList.contains('collapsed'))
-})
+if (minimapToggleBtn) {
+  minimapToggleBtn.addEventListener('click', () => {
+    setMinimapCollapsed(!minimapWrap.classList.contains('collapsed'))
+  })
+}
 
 // Subscribe context panel and project-info bootstrap to events.
 bus.on('selection:changed', renderContextPanel)
@@ -6717,6 +6691,66 @@ function refreshThemePicker() {
     grid.parentElement?.insertBefore(manageBtn, grid.nextSibling)
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  Left sidebar — tab switching
+// ═══════════════════════════════════════════════════════════════
+const LEFT_TAB_KEY = 'codesynapt:left-tab'
+function leftSetTab(name) {
+  const rail = document.getElementById('leftRail')
+  if (!rail) return
+  for (const btn of rail.querySelectorAll('.left-tab')) {
+    btn.classList.toggle('active', btn.dataset.tab === name)
+  }
+  for (const pane of rail.querySelectorAll('.left-tab-pane')) {
+    pane.classList.toggle('hidden', pane.dataset.pane !== name)
+  }
+  try { localStorage.setItem(LEFT_TAB_KEY, name) } catch {}
+}
+;(function initLeftTabs() {
+  const rail = document.getElementById('leftRail')
+  if (!rail) return
+  rail.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.left-tab')
+    if (!btn) return
+    leftSetTab(btn.dataset.tab)
+  })
+  let saved = 'files'
+  try { saved = localStorage.getItem(LEFT_TAB_KEY) || 'files' } catch {}
+  leftSetTab(saved)
+})()
+
+// ═══════════════════════════════════════════════════════════════
+//  Top bar — More popover (⋯ button)
+// ═══════════════════════════════════════════════════════════════
+;(function initMoreMenu() {
+  const btn = document.getElementById('moreBtn')
+  const menu = document.getElementById('moreMenu')
+  if (!btn || !menu) return
+  function position() {
+    const r = btn.getBoundingClientRect()
+    menu.style.top = (r.bottom + 6) + 'px'
+    menu.style.left = (r.right - menu.offsetWidth) + 'px'
+  }
+  function open() { menu.classList.remove('hidden'); btn.classList.add('active'); position() }
+  function close() { menu.classList.add('hidden'); btn.classList.remove('active') }
+  function toggle() { menu.classList.contains('hidden') ? open() : close() }
+  btn.addEventListener('click', (ev) => { ev.stopPropagation(); toggle() })
+  menu.addEventListener('click', (ev) => {
+    if (ev.target.closest('.more-item')) close()
+  })
+  document.addEventListener('click', (ev) => {
+    if (menu.classList.contains('hidden')) return
+    if (ev.target.closest('#moreMenu') || ev.target.closest('#moreBtn')) return
+    close()
+  })
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !menu.classList.contains('hidden')) close()
+  })
+  window.addEventListener('resize', () => {
+    if (!menu.classList.contains('hidden')) position()
+  })
+})()
 
 // Allow plugin themes to be persisted/restored just like built-in ones.
 // (VALID_THEMES is checked early — we don't strictly need to add plugin

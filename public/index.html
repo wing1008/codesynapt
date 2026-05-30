@@ -12,26 +12,57 @@
     <div class="drag-region"></div>
     <div class="brand">
       <span class="dot"></span>
-      <span class="label">filegraph<span class="accent">3d</span></span>
+      <span class="label">code<span class="accent">synapt</span></span>
     </div>
-    <button id="openFolderBtn" class="folder-btn" data-i18n-title="topbar.open_folder.title">
-      <span class="icon">📂</span>
-      <span id="pathLabel">Open Folder…</span>
-    </button>
-    <button id="projectSwitchBtn" class="folder-btn" data-i18n-title="topbar.project_switch.title">
-      <span class="icon">▾</span>
-    </button>
-    <button id="refreshBtn" class="folder-btn" data-i18n-title="topbar.refresh.title" disabled>
-      <span class="icon">↻</span>
-    </button>
-    <button id="treeToggleBtn" class="folder-btn" data-i18n-title="topbar.tree_toggle.title">
-      <span class="icon">🗂</span>
-    </button>
+
+    <!-- Group: file ops -->
+    <div class="tb-group">
+      <button id="openFolderBtn" class="folder-btn" data-i18n-title="topbar.open_folder.title">
+        <span class="icon">📂</span>
+        <span id="pathLabel">Open Folder…</span>
+      </button>
+      <button id="projectSwitchBtn" class="folder-btn" data-i18n-title="topbar.project_switch.title">
+        <span class="icon">▾</span>
+      </button>
+      <button id="refreshBtn" class="folder-btn" data-i18n-title="topbar.refresh.title" disabled>
+        <span class="icon">↻</span>
+      </button>
+    </div>
+
+    <!-- Group: search -->
+    <div class="tb-group">
+      <div class="search-input-wrap">
+        <input id="search" type="text" data-i18n-placeholder="search.placeholder" autocomplete="off" />
+        <span id="searchCount" class="search-count"></span>
+      </div>
+      <button id="searchSyntaxBtn" class="micro-btn" data-i18n-title="search.syntax.title">aA</button>
+      <button id="searchModeBtn" class="micro-btn" data-i18n-title="search.mode.title">◐</button>
+    </div>
+
+    <!-- Group: view controls -->
+    <div class="tb-group">
+      <button id="pause" data-i18n-title="search.pause.title">❚❚</button>
+      <button id="recenter" data-i18n-title="search.recenter.title">⊕</button>
+    </div>
+
+    <!-- Group: AI tools -->
+    <div class="tb-group">
+      <button id="changesBtn" data-i18n-title="search.changes.title">📝</button>
+      <button id="statsBtn" class="micro-btn" data-i18n-title="search.stats.title">📊</button>
+    </div>
+
     <div id="filterBadges" class="filter-badges"></div>
+
+    <div class="tb-spacer"></div>
+
+    <!-- Group: meta + more -->
     <div class="meta">
       <span id="stat-files">—</span>
       <span class="sep">·</span>
       <span id="stat-edges">—</span>
+    </div>
+    <div class="tb-group">
+      <button id="moreBtn" data-i18n-title="search.more.title">⋯</button>
     </div>
   </header>
 
@@ -40,32 +71,24 @@
   <!-- View cube — small 3D widget showing current viewing angle, syncs with main camera -->
   <canvas id="viewCubeCanvas" width="120" height="120"></canvas>
 
-  <!-- Vertical zoom slider (left edge of canvas, next to file tree) -->
-  <div id="zoomSliderWrap" data-i18n-title="zoom.slider.title" title="줌 조절 (위: 가까이, 아래: 멀리)">
-    <button id="zoomSliderIn" class="zoom-slider-btn" title="줌 인">+</button>
-    <input type="range" id="zoomSlider" min="0" max="1000" value="700" orient="vertical">
-    <button id="zoomSliderOut" class="zoom-slider-btn" title="줌 아웃">−</button>
-  </div>
 
-  <!-- Search bar -->
-  <div id="searchbar">
-    <div class="search-input-wrap">
-      <input id="search" type="text" data-i18n-placeholder="search.placeholder" autocomplete="off" />
-      <span id="searchCount" class="search-count"></span>
-    </div>
-    <button id="searchSyntaxBtn" class="micro-btn" data-i18n-title="search.syntax.title">aA</button>
-    <button id="searchModeBtn" class="micro-btn" data-i18n-title="search.mode.title">◐</button>
-    <button id="pause" data-i18n-title="search.pause.title">❚❚</button>
-    <button id="recenter" data-i18n-title="search.recenter.title">⊕</button>
-    <button id="statsBtn" class="micro-btn" data-i18n-title="search.stats.title">📊</button>
-    <button id="rightRailBtn" class="micro-btn" data-i18n-title="search.rightrail.title">◀</button>
-    <button id="langToggle" data-i18n-title="lang.toggle.title">EN</button>
-    <button id="changesBtn" data-i18n-title="search.changes.title">📝</button>
-    <button id="tourBtn" data-i18n-title="search.tour.title">🧭</button>
-    <button id="timelapseBtn" data-i18n-title="search.timelapse.title">⏱</button>
-    <button id="packagesBtn" data-i18n-title="search.packages.title">📦</button>
-    <button id="legacyBtn" data-i18n-title="search.legacy.title">🧹</button>
-    <button id="settingsBtn" data-i18n-title="search.settings.title">⚙</button>
+  <!-- More popover — opens under the ⋯ button -->
+  <div id="moreMenu" class="hidden">
+    <button id="timelapseBtn" class="more-item" data-i18n-title="search.timelapse.title">
+      <span class="more-icon">⏱</span><span class="more-label" data-i18n="more.timelapse">Time-lapse</span>
+    </button>
+    <button id="packagesBtn" class="more-item" data-i18n-title="search.packages.title">
+      <span class="more-icon">📦</span><span class="more-label" data-i18n="more.packages">Packages</span>
+    </button>
+    <button id="legacyBtn" class="more-item" data-i18n-title="search.legacy.title">
+      <span class="more-icon">🧹</span><span class="more-label" data-i18n="more.legacy">Legacy audit</span>
+    </button>
+    <button id="langToggle" class="more-item" data-i18n-title="lang.toggle.title">
+      <span class="more-icon" id="langCurrent">A文</span><span class="more-label" data-i18n="more.lang">Language</span>
+    </button>
+    <button id="settingsBtn" class="more-item" data-i18n-title="search.settings.title">
+      <span class="more-icon">⚙</span><span class="more-label" data-i18n="more.settings">Settings</span>
+    </button>
   </div>
 
   <!-- Project switcher popover (anchored under the ▾ button) -->
@@ -90,18 +113,6 @@
     <div id="changesList" class="changes-list"></div>
   </aside>
 
-  <!-- Tour overlay -->
-  <div id="tour" class="hidden">
-    <div class="tour-head">
-      <span class="kicker" data-i18n="kicker.guided_tour">guided tour</span>
-      <span id="tourStop" class="tour-stop">— / —</span>
-      <button id="tourPrev" class="tl-btn">◀</button>
-      <button id="tourNext" class="tl-btn">▶</button>
-      <button id="tourClose" class="tl-btn">✕</button>
-    </div>
-    <div id="tourFile" class="tour-file">—</div>
-    <div id="tourHint" class="tour-hint">—</div>
-  </div>
 
   <!-- Packages panel (monorepo overview) -->
   <aside id="packages" class="hidden">
@@ -352,61 +363,64 @@
     </div>
   </aside>
 
-  <!-- Unified left rail: file tree, pipelines, recent, legend -->
+  <!-- Unified left rail: file tree, pipelines, recent, legend
+       Each <section> is a `.lp-panel` that can be collapsed (click header)
+       and the `.lp-resize` strips between them are draggable vertical grips.
+       State persists in localStorage (codesynapt:left-rail). -->
+  <!-- Left sidebar with tab strip: files / pipelines / recent / legend.
+       Only one tab body is visible at a time. Active tab persists in
+       localStorage (codesynapt:left-tab). -->
   <aside id="leftRail">
-    <!-- File tree panel -->
-    <section id="fileTreePanel">
-      <div class="ft-head">
-        <span class="kicker" data-i18n="kicker.files">files</span>
-        <div class="ft-actions">
-          <button id="ftCollapseAll" class="micro-btn" data-i18n-title="ft.collapse_all.title">⌃</button>
-          <button id="ftToggle" class="micro-btn" data-i18n-title="ft.hide.title">−</button>
+    <div class="left-tabs" role="tablist">
+      <button class="left-tab active" data-tab="files"     role="tab" data-i18n="kicker.files">files</button>
+      <button class="left-tab"        data-tab="pipelines" role="tab" data-i18n="kicker.pipelines">pipelines</button>
+      <button class="left-tab"        data-tab="recent"    role="tab" data-i18n="kicker.recent">recent</button>
+      <button class="left-tab"        data-tab="legend"    role="tab" data-i18n="kicker.legend">extensions</button>
+    </div>
+    <div class="left-tab-pane" data-pane="files">
+      <section id="fileTreePanel">
+        <div class="ft-head">
+          <span class="kicker" data-i18n="kicker.files">files</span>
+          <div class="ft-actions">
+            <button id="ftCollapseAll" class="micro-btn" data-i18n-title="ft.collapse_all.title">⌃</button>
+            <button id="ftToggle" class="micro-btn" data-i18n-title="ft.hide.title">−</button>
+          </div>
         </div>
-      </div>
-      <div id="ftRoot" class="ft-root" title=""></div>
-      <div id="fileTreeBody" class="ft-body"></div>
-    </section>
-
-    <!-- Pipelines -->
-    <section id="pipelinesPanel" class="hidden">
-      <div class="pp-head">
-        <span class="kicker" data-i18n="kicker.pipelines">pipelines</span>
-        <div class="pp-actions">
-          <button id="ppAddBtn" class="micro-btn" data-i18n-title="pp.add.title">+</button>
-          <button id="ppModeBtn" class="micro-btn" data-i18n-title="pp.mode.title">◐</button>
+        <div id="ftRoot" class="ft-root" title=""></div>
+        <div id="fileTreeBody" class="ft-body"></div>
+      </section>
+    </div>
+    <div class="left-tab-pane hidden" data-pane="pipelines">
+      <section id="pipelinesPanel">
+        <div class="pp-head">
+          <span class="kicker" data-i18n="kicker.pipelines">pipelines</span>
+          <div class="pp-actions">
+            <button id="ppAddBtn" class="micro-btn" data-i18n-title="pp.add.title">+</button>
+            <button id="ppModeBtn" class="micro-btn" data-i18n-title="pp.mode.title">◐</button>
+          </div>
         </div>
-      </div>
-      <div id="pipelinesList" class="pp-list"></div>
-    </section>
-
-    <!-- Recent files -->
-    <section id="recentFiles" class="hidden">
-      <div class="rf-head">
-        <span class="kicker" data-i18n="kicker.recent">recent</span>
-        <button id="recentClearBtn" class="micro-btn" data-i18n-title="recent.clear.title">✕</button>
-      </div>
-      <div id="recentList-files" class="rf-list"></div>
-    </section>
-
-    <!-- Legend -->
-    <section id="legend">
-      <div class="legend-title" data-i18n="kicker.legend">extensions</div>
-      <div id="legend-items"></div>
-    </section>
+        <div id="pipelinesList" class="pp-list"></div>
+      </section>
+    </div>
+    <div class="left-tab-pane hidden" data-pane="recent">
+      <section id="recentFiles">
+        <div class="rf-head">
+          <span class="kicker" data-i18n="kicker.recent">recent</span>
+          <button id="recentClearBtn" class="micro-btn" data-i18n-title="recent.clear.title">✕</button>
+        </div>
+        <div id="recentList-files" class="rf-list"></div>
+      </section>
+    </div>
+    <div class="left-tab-pane hidden" data-pane="legend">
+      <section id="legend">
+        <div class="legend-title" data-i18n="kicker.legend">extensions</div>
+        <div id="legend-items"></div>
+      </section>
+    </div>
   </aside>
 
   <!-- Folder name labels — one per cluster when grouping is on -->
   <div id="folderLabels" class="folder-labels"></div>
-
-  <!-- AI trace panel — pulses when an MCP client / CLI hits the graph -->
-  <aside id="aiTracePanel">
-    <div class="ai-trace-head">
-      <span class="kicker" data-i18n="kicker.ai_trace">ai trace</span>
-      <span class="trace-dot"></span>
-      <button id="aiTraceFullBtn" class="ai-trace-mini" data-i18n-title="trace.full.title">⤢</button>
-    </div>
-    <div id="aiTraceBody"><div class="trace-empty" data-i18n="trace.panel.empty"></div></div>
-  </aside>
 
   <!-- Full AI trace panel — session log, stats, sessions, replay, export -->
   <aside id="traceFull" class="hidden">
@@ -432,14 +446,6 @@
     <div id="traceFullBody" class="trace-full-body"></div>
   </aside>
 
-  <!-- Inspector -->
-  <aside id="inspector" class="hidden">
-    <div class="inspector-head">
-      <div class="kicker" data-i18n="kicker.inspector">inspector</div>
-      <button id="closeInspector">✕</button>
-    </div>
-    <div id="inspector-body"></div>
-  </aside>
 
   <!-- Controls hint -->
   <div id="hints">
@@ -494,7 +500,7 @@
         </div>
 
         <h1 class="welcome-title">
-          <span class="welcome-bracket">[</span>filegraph<span class="accent">3d</span><span class="welcome-bracket">]</span>
+          <span class="welcome-bracket">[</span>code<span class="accent">synapt</span><span class="welcome-bracket">]</span>
         </h1>
         <p class="welcome-sub" data-i18n="welcome.subtitle">a dependency observatory · point at any directory, watch the graph form</p>
 
@@ -517,20 +523,41 @@
     </div>
   </div>
 
-  <!-- Right rail: minimap + context panel (always visible) -->
+  <!-- Right sidebar: minimap (top) + inspector + project context.
+       AI trace stays as a floating panel anchored to the canvas, not here. -->
   <aside id="rightRail">
-    <div id="minimapWrap">
+    <section id="minimapWrap" class="rs-section">
       <canvas id="minimapCanvas" width="280" height="280"></canvas>
       <div class="minimap-corner top-left" data-i18n="kicker.overview">overview</div>
       <button id="minimapToggle" class="minimap-corner top-right" data-i18n-title="minimap.hide.title">−</button>
-    </div>
-    <div id="contextPanel">
-      <div class="ctx-head">
+    </section>
+
+    <section id="inspector" class="rs-section">
+      <div class="inspector-head rs-head">
+        <div class="kicker" data-i18n="kicker.inspector">inspector</div>
+        <button id="closeInspector">✕</button>
+      </div>
+      <div id="inspector-body"><div class="rs-empty" data-i18n="inspector.empty">파일을 선택하면 정보가 표시됩니다</div></div>
+    </section>
+
+    <section id="contextPanel" class="rs-section">
+      <div class="ctx-head rs-head">
         <span id="ctxKicker" class="kicker" data-i18n="kicker.project">project</span>
         <button id="ctxEditBtn" class="micro-btn" data-i18n-title="project.edit.title" style="display:none">✎</button>
       </div>
       <div id="ctxBody" class="ctx-body">—</div>
+    </section>
+  </aside>
+
+  <!-- AI trace panel — floats over the canvas at bottom-right
+       (pulses when an MCP client / CLI hits the graph) -->
+  <aside id="aiTracePanel">
+    <div class="ai-trace-head">
+      <span class="kicker" data-i18n="kicker.ai_trace">ai trace</span>
+      <span class="trace-dot"></span>
+      <button id="aiTraceFullBtn" class="ai-trace-mini" data-i18n-title="trace.full.title">⤢</button>
     </div>
+    <div id="aiTraceBody"><div class="trace-empty" data-i18n="trace.panel.empty"></div></div>
   </aside>
 
   <!-- Project info setup dialog -->

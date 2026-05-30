@@ -345,13 +345,13 @@ body.no-folder            { grid-template-columns: 0 1fr 0; column-gap: 0; paddi
   letter-spacing: 0.02em;
 }
 
-/* ─── Top bar — observatory console header ────────────── */
+/* ─── Top bar — IDE-style toolbar with grouped controls ─── */
 #topbar {
   margin: 0 calc(var(--grid-pad) * -1);  /* extend topbar full-width over grid padding */
-  padding: 0 var(--space-5);
-  display: flex; align-items: center; gap: var(--space-5);
+  padding: 0 12px;
+  display: flex; align-items: center; gap: 4px;
   background:
-    linear-gradient(180deg, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.35) 100%);
+    linear-gradient(180deg, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.55) 100%);
   backdrop-filter: blur(14px) saturate(140%);
   -webkit-backdrop-filter: blur(14px) saturate(140%);
   border-bottom: 1px solid var(--border-edge);
@@ -540,15 +540,69 @@ body.is-mac #topbar { padding-left: 88px; }
 }
 
 /* ─── Search bar ───────────────────────────────────────── */
-#searchbar {
-  grid-area: can;
-  align-self: start;
-  justify-self: start;
-  margin: 12px;
+/* Top-bar grouped buttons — each `.tb-group` is a small flex row.
+   Adjacent groups get a faint vertical divider between them so the
+   user can see which controls cluster (file / search / view / AI). */
+.tb-group {
   display: flex; align-items: center; gap: 4px;
-  z-index: 11;
+  padding: 0 8px;
+  height: 30px;
+  border-right: 1px solid var(--border-edge);
 }
-body.no-folder #searchbar { display: none; }
+.tb-group:last-of-type { border-right: 0; }
+.tb-spacer { flex: 1 1 auto; }
+
+/* "More" popover — anchored under the ⋯ button. Sits above every other
+   panel (right rail is z-index 40), so we force it to z-index 100. */
+#moreMenu {
+  position: fixed;
+  top: 60px;
+  right: 12px;
+  min-width: 200px;
+  background: #0b0f17;
+  border: 1px solid var(--border-hot);
+  border-radius: var(--radius);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 18px 48px rgba(0, 0, 0, 0.75);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 100;
+}
+#moreMenu.hidden { display: none; }
+.more-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s var(--ease-out), border-color 0.12s, color 0.12s;
+}
+.more-item:hover {
+  background: rgba(126, 207, 207, 0.08);
+  border-color: rgba(126, 207, 207, 0.25);
+  color: var(--accent);
+}
+.more-item.active {
+  background: rgba(126, 207, 207, 0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.more-icon {
+  width: 22px;
+  text-align: center;
+  font-size: 13px;
+  flex: 0 0 22px;
+}
+.more-label { flex: 1 1 auto; }
 
 #search {
   width: 240px;
@@ -574,7 +628,9 @@ body.no-folder #searchbar { display: none; }
   opacity: 0.7;
 }
 
-#searchbar button {
+/* Plain icon buttons inside top-bar groups (pause, recenter, AI tools, more).
+   `.folder-btn` keeps its own larger styling — these are the 30×30 squares. */
+#topbar .tb-group > button:not(.folder-btn) {
   width: 30px; height: 30px;
   background: var(--bg-glass);
   border: 1px solid var(--border);
@@ -588,12 +644,12 @@ body.no-folder #searchbar { display: none; }
   transition: all 0.18s var(--ease-out);
   letter-spacing: 0.02em;
 }
-#searchbar button:hover {
+#topbar .tb-group > button:not(.folder-btn):hover {
   border-color: var(--border-hot);
   color: var(--accent);
   background: rgba(126, 207, 207, 0.04);
 }
-#searchbar button.active {
+#topbar .tb-group > button:not(.folder-btn).active {
   border-color: var(--accent);
   color: var(--accent);
   background: rgba(126, 207, 207, 0.08);
@@ -983,34 +1039,6 @@ body.no-folder #legend { display: none; }
 .tl-btn:hover { border-color: var(--accent); color: var(--accent); }
 #tlSlider { width: 100%; }
 .tl-meta { font-family: var(--font-mono); font-size: 10px; color: var(--fg-mute); }
-
-/* ─── Tour overlay (top-center) ──────────────────────────────── */
-#tour {
-  grid-area: can;
-  align-self: start;
-  justify-self: center;
-  margin: 70px auto 0;
-  width: min(560px, 80%);
-  padding: 12px 16px;
-  background: var(--bg-glass);
-  border: 1px solid rgba(180, 130, 255, 0.45);
-  border-radius: var(--radius);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
-  z-index: 12;
-  box-shadow: 0 0 0 1px rgba(180,130,255,0.2), 0 8px 32px rgba(0,0,0,0.4);
-}
-#tour.hidden { display: none; }
-.tour-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-family: var(--font-mono); font-size: 11px; }
-.tour-stop { color: rgb(200, 170, 255); flex: 1; font-weight: bold; }
-.tour-file {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--accent);
-  margin-bottom: 6px;
-  word-break: break-all;
-}
-.tour-hint { font-size: 12px; color: var(--fg); line-height: 1.5; }
 
 /* ─── AI changes panel (sits in canvas grid, like inspector) ──── */
 #changes {
@@ -2013,23 +2041,112 @@ body:not(.no-folder) #welcome { display: none; }
   border-color: var(--accent);
 }
 
-/* ─── Right rail: minimap + context panel ──────────────── */
+/* ─── Right sidebar shell — fills grid area "rgt" ──────── */
 #rightRail {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0;
   z-index: 40;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
-  padding-top: 12px;
+  overflow-y: auto;
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border-edge);
+  margin: 0 calc(var(--grid-pad) * -1) 0 0;
   transition: opacity 0.22s ease;
 }
-#rightRail.collapsed {
-  display: none;
+/* Minimap can collapse to a header-only strip (− button next to it). */
+#rightRail #minimapWrap.collapsed {
+  aspect-ratio: auto;
+  height: 28px;
+  max-height: 28px;
 }
-#rightRail > * { pointer-events: auto; }
-#rightRail.collapsed > * { pointer-events: none; }
+#rightRail #minimapWrap.collapsed > #minimapCanvas { display: none; }
+#rightRail #minimapWrap.collapsed > .minimap-corner.top-left {
+  top: 50%;
+  transform: translateY(-50%);
+}
+#rightRail #minimapWrap.collapsed > #minimapToggle {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Sections inside the right rail stack vertically with thin dividers. */
+.rs-section {
+  border-bottom: 1px solid var(--border-edge);
+  flex: 0 0 auto;
+}
+.rs-section:last-child { border-bottom: 0; flex: 1 1 auto; min-height: 0; }
+.rs-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-edge);
+}
+.rs-empty {
+  padding: 14px 16px;
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  font-style: italic;
+  text-align: center;
+  opacity: 0.7;
+}
+
+/* Override floating positioning when these panels live inside #rightRail. */
+#rightRail #inspector {
+  grid-area: auto;
+  align-self: auto;
+  justify-self: auto;
+  margin: 0;
+  width: auto;
+  max-width: none;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  z-index: auto;
+  max-height: none;
+  flex: 0 0 auto;
+}
+#rightRail #inspector::before,
+#rightRail #inspector::after { display: none; }
+#rightRail #aiTracePanel {
+  grid-area: auto;
+  align-self: auto;
+  justify-self: auto;
+  margin: 0;
+  width: auto;
+  max-width: none;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  z-index: auto;
+}
+#rightRail #minimapWrap {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  max-height: var(--rail-w);
+  border-radius: 0;
+  border: 0;
+  box-shadow: none;
+}
+#rightRail #contextPanel {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+#rightRail #contextPanel > .ctx-body { padding: 10px 16px 14px; }
+#rightRail #inspector > #inspector-body {
+  padding: 12px 16px;
+}
+/* Inside the right rail the inspector is permanent — `.hidden` from other
+   code paths is ignored; an empty body just shows the placeholder text. */
+#rightRail #inspector.hidden { display: flex; }
 
 #minimapWrap {
   position: relative;
@@ -2538,19 +2655,62 @@ body.rail-collapsed #statsPanel {
   font-size: 10.5px;
 }
 .rf-item.active { background: rgba(126, 207, 207, 0.16); color: var(--accent); }
+.rf-empty {
+  padding: 16px 14px;
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  text-align: center;
+  opacity: 0.7;
+}
 
-/* ─── File tree panel (left top) ──────────────────────── */
-/* ─── Unified left rail (file tree + pipelines + recent + legend) ─── */
+/* ─── Left sidebar shell — fills grid area "lft" ──────── */
 #leftRail {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  z-index: 20;
-  padding-top: 12px;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border-edge);
+  margin: 0 calc(var(--grid-pad) * -1) 0 calc(var(--grid-pad) * -1);
+  /* extend full-width into grid gap so it visually anchors to viewport edge */
 }
+
+/* ═══ Left sidebar: tabs + single visible pane ═══ */
+.left-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-edge);
+  background: rgba(0, 0, 0, 0.25);
+  flex: 0 0 32px;
+}
+.left-tab {
+  flex: 1;
+  height: 32px;
+  background: transparent;
+  border: 0;
+  color: var(--fg-mute);
+  font: inherit;
+  font-size: 10.5px;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.left-tab:hover { color: var(--fg); background: rgba(126, 207, 207, 0.04); }
+.left-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: rgba(126, 207, 207, 0.06);
+}
+.left-tab-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.left-tab-pane.hidden { display: none; }
 body.no-folder #leftRail { display: none; }
 /* Tree collapse hides only the file tree section — the other left-rail
    panels (pipelines, recent, legend) remain visible. */
