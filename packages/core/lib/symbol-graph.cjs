@@ -213,11 +213,12 @@ class SymbolGraph {
       if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
       const parser = PARSERS[entry.ext]
       if (!parser) continue
-      let content
+      let content, fileMtimeMs = 0
       try {
         const stat = fs.statSync(entry.absPath)
         if (stat.size > MAX_FILE_BYTES) continue   // skip giant files (minified bundles, vendored libs)
         content = fs.readFileSync(entry.absPath, 'utf8')
+        fileMtimeMs = stat.mtimeMs
       } catch { continue }
       fileContents.set(entry.id, content)
       let symbols
@@ -225,8 +226,28 @@ class SymbolGraph {
         const ret = parser.extractSymbols(content, entry.id)
         symbols = (await ret) || []
       } catch (e) { symbols = [] }
+      // Lazy split per file — used by the deprecated probe below.
+      // Most files have no deprecated marker, so the .test() short-
+      // circuits and we never pay the split cost.
+      let _lines = null
+      const lines = () => _lines ??= content.split('\n')
+      const DEPRECATED_RE = /@?deprecated\b|todo\s*[:_-]?\s*remove|fixme\s*[:_-]?\s*remove/i
+      const fileHasDeprecated = DEPRECATED_RE.test(content)
       for (const s of symbols) {
         if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
+        // Stamp every symbol with the file's mtime — explore uses it
+        // for the `legacy` classification (old + low in-degree). Cost
+        // is one extra Map allocation per symbol; the stat call was
+        // already happening above.
+        s.mtimeMs = fileMtimeMs
+        // Deprecated marker — look at the 5 lines directly above the
+        // symbol declaration. Cheaper + more precise than fighting
+        // babel's export-wrapper leading-comment attachment quirk.
+        if (fileHasDeprecated && s.startLine) {
+          const start = Math.max(0, s.startLine - 1 - 5)
+          const prelude = lines().slice(start, s.startLine - 1).join('\n')
+          if (DEPRECATED_RE.test(prelude)) s.deprecated = true
+        }
         this.addNode(s)
       }
       fileCount++

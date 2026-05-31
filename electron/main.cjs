@@ -140,6 +140,43 @@ const EXPLORE_STOPWORDS = new Set([
   'when','where','which','who','why','will','with',
 ])
 
+// Break a token at camelCase / PascalCase / digit boundaries so query
+// "getUserName" also tries [get, user, name]. Without this the query
+// "user" matches a symbol named `getUserName` (substring works), but
+// the query "getUserName" only finds exact-or-substring matches and
+// misses symbols named just `getName`.
+function splitCamelCase(w) {
+  const parts = w.match(/[a-z]+|[A-Z][a-z]+|[A-Z]+(?=[A-Z]|$)|[0-9]+/g) || []
+  return parts.map((s) => s.toLowerCase())
+}
+
+// Very small English stemmer — strips common suffixes only. Lets a
+// query for "authenticate" / "authentication" / "authenticator" all
+// find a symbol named `authenticate`. We don't ship a real Porter
+// stemmer (extra dep + locale-specific) — this is the long-tail
+// covered by 12 common suffixes.
+function stem(w) {
+  if (w.length < 5) return w
+  for (const suf of ['ization','ational','tional','ation','tion','ness','ment',
+                     'ence','ance','able','ible','ical','ying','ing','er','or',
+                     'es','ly','ed','s']) {
+    if (w.endsWith(suf) && w.length - suf.length >= 4) return w.slice(0, -suf.length)
+  }
+  return w
+}
+
+// Deprecated / TODO-remove markers. SymbolGraph.build sets
+// `node.deprecated` from the 5 lines above each symbol (handles
+// babel's quirky export-wrapper leading-comment attachment). We
+// also fall back to scanning doc/signature for parsers that do
+// surface comments correctly (regex/tree-sitter parsers).
+function isDeprecatedSymbol(node) {
+  if (node.deprecated === true) return true
+  const d = ((node.doc || '') + ' ' + (node.signature || '')).toLowerCase()
+  if (!d) return false
+  return /(\s|^)@?deprecated\b|todo\s*[:_-]?\s*remove|fixme\s*[:_-]?\s*remove/.test(d)
+}
+
 // One-shot "answer" — codegraph's `context` analog. Selects symbols
 // whose name/qualified name/doc match the query keywords, then pulls
 // their source bodies up to the token budget.
@@ -152,7 +189,19 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
   // contain matching Korean-named symbols (or matching transliterated
   // English ones when the query mixes scripts).
   const rawTokens = q.split(/[^\p{L}\p{N}_]+/u).filter(Boolean)
-  const keywords = rawTokens.filter((t) => t.length > 1 && !EXPLORE_STOPWORDS.has(t))
+  // Expand each raw token through two lightweight transforms:
+  //   1. camelCase split — "getUserName" → also tries get/user/name
+  //   2. English stem    — "authenticate" → also tries "authentic"
+  // The original token stays in the set, so substring matches that
+  // already worked still work. Tokens that survive after the two
+  // expansions are deduplicated through the Set.
+  const expanded = new Set(rawTokens)
+  for (const t of rawTokens) {
+    for (const p of splitCamelCase(t)) if (p.length > 1) expanded.add(p)
+    const s = stem(t)
+    if (s !== t && s.length > 2) expanded.add(s)
+  }
+  const keywords = [...expanded].filter((t) => t.length > 1 && !EXPLORE_STOPWORDS.has(t))
   if (!keywords.length) return { query, entryPoints: [], snippets: [], note: 'no usable keywords' }
 
   // Score every symbol. Heavier weight on exact name hits and
@@ -240,6 +289,18 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     // Prefer exported and class/function over const/type clutter.
     if (node.exported) score += 2
     if (node.kind === 'class' || node.kind === 'function' || node.kind === 'method') score += 1
+    // Graph-aware signal: in-degree (how many other symbols call this
+    // one) is a direct proxy for "actually used in production code".
+    // log2 + cap so a Logger/Config used 500× doesn't crush real
+    // domain hubs called 5–20 times.
+    const inDeg  = g.inAdj.get(node.id)?.size || 0
+    const outDeg = g.outAdj.get(node.id)?.size || 0
+    if (inDeg > 0) score += Math.min(Math.log2(inDeg + 1) * 4, 12)
+    // Orphan damping — neither called nor calling anything is a strong
+    // signal for dead/backup/leftover code. Halve the score so an
+    // unused exported class can't outrank a real implementation just
+    // because it shares a keyword.
+    if (inDeg === 0 && outDeg === 0) score = Math.floor(score * 0.5)
     // Deprioritise test files (×0.2).
     if (isTestPath(node.file)) score = Math.floor(score * 0.2)
     // Test-wrapper-named symbols.
@@ -250,6 +311,10 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     // code that almost never represents the real answer to a query.
     // Heavy damp so a real implementation always beats a vendored copy.
     if (isAuxExplorePath(node.file)) score = Math.floor(score * 0.25)
+    // Deprecated / TODO-remove markers — the author explicitly said
+    // "don't use this". Drop to 30 % so the live replacement that
+    // shares the name wins.
+    if (isDeprecatedSymbol(node)) score = Math.floor(score * 0.3)
     if (score > 0) scored.push({ node, score })
   }
   scored.sort((a, b) => b.score - a.score)
@@ -265,7 +330,34 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     const c = fileCounts.get(node.file) || 0
     if (c >= PER_FILE_CAP) continue
     fileCounts.set(node.file, c + 1)
-    entryPoints.push(node)
+    // Lifecycle classification — AI agents (and the desktop UI)
+    // can filter "active" vs ignore "test/orphan/aux/legacy/deprecated"
+    // without re-deriving from the raw graph. Same signals the scorer
+    // already used; just exposed.
+    //
+    // Precedence (most specific wins):
+    //   deprecated → test → aux → orphan → legacy → active → normal
+    //
+    // `legacy` adds an mtime-aware bucket on top of graph signal:
+    // low-but-nonzero in-degree + an old file → classic "code that's
+    // still wired in but nobody touches". 365-day threshold is what
+    // the legacy-audit module already uses internally.
+    const id = node.id
+    const inD = g.inAdj.get(id)?.size || 0
+    const ouD = g.outAdj.get(id)?.size || 0
+    const mtime = node.mtimeMs || 0
+    const ageMs = mtime ? (Date.now() - mtime) : 0
+    const ONE_YEAR = 365 * 86400_000
+    let classification = 'normal'
+    if (isDeprecatedSymbol(node))             classification = 'deprecated'
+    else if (isTestPath(node.file)
+     || /^test[A-Z_]/.test(node.name || '')
+     || /(_test$|spec$|Spec$)/.test(node.name || '')) classification = 'test'
+    else if (isAuxExplorePath(node.file))     classification = 'aux'
+    else if (inD === 0 && ouD === 0)          classification = 'orphan'
+    else if (ageMs > ONE_YEAR && inD < 2)     classification = 'legacy'
+    else if (inD >= 3)                        classification = 'active'
+    entryPoints.push({ ...node, classification, inDegree: inD, outDegree: ouD, ageDays: mtime ? Math.floor(ageMs / 86400_000) : null })
   }
   const snippets = []
   let used = 0
@@ -295,12 +387,20 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     relatedSymbols = [...callees, ...callers]
   }
 
+  // Lifecycle counts across all returned entry points — surfaced in
+  // every mode so AI agents can see at a glance whether the matches
+  // are real code or test/orphan/vendored leftovers.
+  const classCounts = {}
+  for (const ep of entryPoints) {
+    classCounts[ep.classification] = (classCounts[ep.classification] || 0) + 1
+  }
+
   // Default mode = the rich entry+body shape we've shipped so far.
   if (mode === 'default') {
     return {
       query, mode, keywords,
       entryPoints, relatedSymbols, snippets,
-      counts: { totalCandidates: scored.length, entryPoints: entryPoints.length, snippets: snippets.length },
+      counts: { totalCandidates: scored.length, entryPoints: entryPoints.length, snippets: snippets.length, classification: classCounts },
     }
   }
 
