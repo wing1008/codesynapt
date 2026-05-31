@@ -3,6 +3,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
+const os = require('os')
 const { execFile } = require('child_process')
 const { promisify } = require('util')
 const pExecFile = promisify(execFile)
@@ -1665,6 +1666,40 @@ async function handleControlRequest(req, res) {
       if (forceRebuild || !symbolGraph) {
         if (!_symbolBuilding) {
           _symbolBuilding = (async () => {
+            // Optional disk cache for big projects. Opt-in via env var
+            // CS_SYMBOL_CACHE=1; defaults off so the in-memory speed
+            // moat stays the default. Cache key is sha-of-root-path +
+            // newest-file-mtime. If anything in the repo has changed
+            // since the cache was written, we rebuild.
+            const cacheEnabled = !forceRebuild && process.env.CS_SYMBOL_CACHE === '1'
+            const cacheDir = path.join(os.homedir(), '.codesynapt', 'symbol-cache')
+            const cacheKey = require('crypto').createHash('sha1').update(currentRoot || '').digest('hex')
+            const cachePath = path.join(cacheDir, cacheKey + '.json')
+            if (cacheEnabled) {
+              try {
+                if (fs.existsSync(cachePath)) {
+                  const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8'))
+                  // Newest mtime in the file set must be older than the
+                  // cache mtime for it to be valid.
+                  let newest = 0
+                  for (const f of scanner.files.values()) {
+                    try { const t = fs.statSync(f.absPath).mtimeMs; if (t > newest) newest = t } catch {}
+                  }
+                  const cacheMtime = fs.statSync(cachePath).mtimeMs
+                  if (newest > 0 && cacheMtime >= newest) {
+                    const g = new SymbolGraph()
+                    for (const n of cached.nodes) g.addNode(n)
+                    for (const e of cached.edges) g.addEdge(e)
+                    g.fileCount = cached.fileCount
+                    g.builtAt = cached.builtAt
+                    g.scanMs = 0
+                    symbolGraph = g
+                    _symbolBuilding = null
+                    return g
+                  }
+                }
+              } catch {}
+            }
             const g = new SymbolGraph()
             const entries = [...scanner.files.values()]
               .filter((f) => f.absPath && f.ext)
@@ -1797,6 +1832,19 @@ async function handleControlRequest(req, res) {
                   }
                 }
               }
+            }
+            // ─── Persist symbol graph to cache (opt-in) ──────────
+            if (cacheEnabled) {
+              try {
+                fs.mkdirSync(cacheDir, { recursive: true })
+                const payload = {
+                  nodes: [...g.nodes.values()],
+                  edges: g.edges,
+                  fileCount: g.fileCount,
+                  builtAt: g.builtAt,
+                }
+                fs.writeFileSync(cachePath, JSON.stringify(payload))
+              } catch {}
             }
             // ─── Route → handler edges ───────────────────────────
             // Walk every file's `routes` list (extracted by file

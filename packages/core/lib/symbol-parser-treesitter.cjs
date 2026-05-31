@@ -49,7 +49,27 @@ const LANG_CONFIG = {
   rs:    { grammar: 'rust' },
   java:  { grammar: 'java' },
   kt:    { grammar: 'kotlin' },
+  kts:   { grammar: 'kotlin' },
   swift: { grammar: 'swift' },
+  // Phase B-3 — wider language reach. tree-sitter-wasms@0.1.13 ships
+  // grammars for all of these; we just register them.
+  cs:    { grammar: 'c_sharp' },
+  rb:    { grammar: 'ruby' },
+  php:   { grammar: 'php' },
+  scala: { grammar: 'scala' },
+  lua:   { grammar: 'lua' },
+  sh:    { grammar: 'bash' },
+  bash:  { grammar: 'bash' },
+  dart:  { grammar: 'dart' },
+  elm:   { grammar: 'elm' },
+  ex:    { grammar: 'elixir' },
+  exs:   { grammar: 'elixir' },
+  c:     { grammar: 'c' },
+  h:     { grammar: 'c' },
+  cpp:   { grammar: 'cpp' },
+  cc:    { grammar: 'cpp' },
+  hpp:   { grammar: 'cpp' },
+  hh:    { grammar: 'cpp' },
 }
 
 // Node types per grammar.
@@ -88,12 +108,63 @@ const NODE_TYPES = {
     call:   ['call_expression'],
   },
   swift: {
-    // tree-sitter-swift uses `class_declaration` for both `class X {}`
-    // and `struct X {}` (distinguished by an inner `struct` keyword
-    // child); `protocol_declaration` is separate. `function_declaration`
-    // covers both top-level funcs and methods.
     fn:     ['function_declaration', 'init_declaration', 'deinit_declaration'],
     cls:    ['class_declaration', 'protocol_declaration'],
+    call:   ['call_expression'],
+  },
+  c_sharp: {
+    fn:     ['method_declaration', 'constructor_declaration', 'local_function_statement'],
+    cls:    ['class_declaration', 'interface_declaration', 'struct_declaration', 'record_declaration', 'enum_declaration'],
+    call:   ['invocation_expression', 'object_creation_expression'],
+  },
+  ruby: {
+    fn:     ['method', 'singleton_method'],
+    cls:    ['class', 'module'],
+    call:   ['call', 'method_call', 'identifier'],  // Ruby calls often look like identifiers
+  },
+  php: {
+    fn:     ['function_definition', 'method_declaration'],
+    cls:    ['class_declaration', 'interface_declaration', 'trait_declaration'],
+    call:   ['function_call_expression', 'method_call_expression', 'object_creation_expression'],
+  },
+  scala: {
+    fn:     ['function_definition', 'function_declaration'],
+    cls:    ['class_definition', 'object_definition', 'trait_definition', 'enum_definition'],
+    call:   ['call_expression', 'generic_function'],
+  },
+  lua: {
+    fn:     ['function_declaration', 'function_definition', 'local_function'],
+    cls:    [],  // Lua has no classes (table-based OOP)
+    call:   ['function_call'],
+  },
+  bash: {
+    fn:     ['function_definition'],
+    cls:    [],
+    call:   ['command'],
+  },
+  dart: {
+    fn:     ['function_signature', 'function_body'],
+    cls:    ['class_definition', 'mixin_declaration', 'extension_declaration'],
+    call:   ['method_invocation'],
+  },
+  elm: {
+    fn:     ['function_declaration_left'],
+    cls:    ['type_declaration', 'type_alias_declaration'],
+    call:   ['function_call_expr'],
+  },
+  elixir: {
+    fn:     ['call'],  // Elixir uses macros for `def`
+    cls:    [],
+    call:   ['call'],
+  },
+  c: {
+    fn:     ['function_definition'],
+    cls:    ['struct_specifier', 'union_specifier', 'enum_specifier'],
+    call:   ['call_expression'],
+  },
+  cpp: {
+    fn:     ['function_definition', 'declaration'],
+    cls:    ['class_specifier', 'struct_specifier'],
     call:   ['call_expression'],
   },
 }

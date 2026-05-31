@@ -273,11 +273,30 @@ function extractReferences(content, fileId, index) {
     return null
   }
   function harvestTypesFrom(fnNode) {
-    // Scan the function body for shallow `const x = new X()` and
-    // TS `let x: X = ...` patterns. Cheap: only direct VariableDeclarator
-    // children of the body, no nested traversal here.
     const types = topTypes()
     if (!types) return
+    // 1) TypeScript parameter annotations: `function f(user: User)`
+    //    Also catches destructured/rest patterns when the annotation
+    //    is on the simple identifier directly.
+    if (Array.isArray(fnNode.params)) {
+      for (const p of fnNode.params) {
+        if (p?.type === 'Identifier') {
+          const ann = p.typeAnnotation?.typeAnnotation
+          const annName = extractTypeName(ann)
+          if (annName) types.set(p.name, annName)
+        }
+        // `function f({ name }: User)` — destructured param with type
+        if (p?.type === 'ObjectPattern' && p.typeAnnotation) {
+          const annName = extractTypeName(p.typeAnnotation.typeAnnotation)
+          for (const prop of p.properties || []) {
+            if (prop.value?.type === 'Identifier' && annName) {
+              types.set(prop.value.name, annName)
+            }
+          }
+        }
+      }
+    }
+    // 2) Body-level declarations
     const body = fnNode.body?.body
     if (!Array.isArray(body)) return
     for (const stmt of body) {
@@ -292,7 +311,27 @@ function extractReferences(content, fileId, index) {
         // `new User()` / `new User(args)` initializer
         if (d.init?.type === 'NewExpression') {
           const cls = extractTypeName(d.init.callee)
-          if (cls) types.set(varName, cls)
+          if (cls) { types.set(varName, cls); continue }
+        }
+        // 3) `const u = User.find(...)` / `User.create(...)` — assume
+        //    static factory returns the same type. Heuristic but
+        //    extremely common in ORM/DDD code.
+        if (d.init?.type === 'CallExpression'
+            && d.init.callee?.type === 'MemberExpression'
+            && d.init.callee.object?.type === 'Identifier'
+            && /^[A-Z]/.test(d.init.callee.object.name)
+            && /^(find|findOne|findFirst|findMany|create|build|new|of|from|get|fetch)/.test(
+                 d.init.callee.property?.name || '')) {
+          types.set(varName, d.init.callee.object.name)
+        }
+        // 4) `const u = makeUser()` / `getUser()` — heuristic on
+        //    factory names that contain a capitalised noun: `makeUser`
+        //    → User, `getOrder` → Order.
+        if (d.init?.type === 'CallExpression'
+            && d.init.callee?.type === 'Identifier') {
+          const fnName = d.init.callee.name
+          const m = fnName.match(/^(?:make|create|build|get|fetch|find|new|of|to)?([A-Z][a-zA-Z0-9]+)$/)
+          if (m) types.set(varName, m[1])
         }
       }
     }

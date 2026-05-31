@@ -148,36 +148,51 @@ class SymbolGraph {
   // `fileImports` (optional) is a Map<fileId, Set<importedFileId>>
   // built from the file-mode edge list; lets resolveCall prefer
   // imported targets.
-  async build(fileEntries, fileImports = null) {
+  async build(fileEntries, fileImports = null, options = {}) {
     const start = Date.now()
     this.clear()
     // Set imports *after* clear so the host-provided map survives.
     if (fileImports) this.fileImports = fileImports
+    // Big-repo safety knobs. None of them block — they cap the work
+    // so a runaway monorepo (100k+ symbols) doesn't OOM the process.
+    const MAX_SYMBOLS = options.maxSymbols
+      || parseInt(process.env.CS_MAX_SYMBOLS || '200000', 10)
+    const MAX_EDGES = options.maxEdges
+      || parseInt(process.env.CS_MAX_EDGES || '1000000', 10)
+    const MAX_FILE_BYTES = options.maxFileBytes
+      || parseInt(process.env.CS_MAX_FILE_BYTES || '524288', 10)  // 512KB
+    let abortedAt = null
     // Pass 1 — symbols. We need every symbol indexed before we can
     // resolve references in pass 2.
     let fileCount = 0
     const fileContents = new Map()    // fileId → content (kept for pass 2)
     for (const entry of fileEntries) {
+      if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
       const parser = PARSERS[entry.ext]
       if (!parser) continue
       let content
-      try { content = fs.readFileSync(entry.absPath, 'utf8') }
-      catch { continue }
+      try {
+        const stat = fs.statSync(entry.absPath)
+        if (stat.size > MAX_FILE_BYTES) continue   // skip giant files (minified bundles, vendored libs)
+        content = fs.readFileSync(entry.absPath, 'utf8')
+      } catch { continue }
       fileContents.set(entry.id, content)
       let symbols
       try {
         const ret = parser.extractSymbols(content, entry.id)
-        // Parsers may be sync or async — await is a no-op on a plain
-        // array, so handling both shapes is one line.
         symbols = (await ret) || []
       } catch (e) { symbols = [] }
-      for (const s of symbols) this.addNode(s)
+      for (const s of symbols) {
+        if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
+        this.addNode(s)
+      }
       fileCount++
     }
     // Pass 2 — references. Per-file, ask the language parser to find
     // call/extends/implements edges. Parsers consult `this` (the
     // symbol index) to resolve names.
     for (const [fileId, content] of fileContents) {
+      if (this.edges.length >= MAX_EDGES) { abortedAt = abortedAt || 'edges'; break }
       const ext = extFor(fileId)
       const parser = PARSERS[ext]
       if (!parser || !parser.extractReferences) continue
@@ -187,6 +202,7 @@ class SymbolGraph {
         refs = (await ret) || []
       } catch (e) { refs = [] }
       for (const r of refs) {
+        if (this.edges.length >= MAX_EDGES) { abortedAt = abortedAt || 'edges'; break }
         if (this.nodes.has(r.source) && this.nodes.has(r.target)) {
           this.addEdge(r)
         }
@@ -195,6 +211,7 @@ class SymbolGraph {
     this.fileCount = fileCount
     this.builtAt = Date.now()
     this.scanMs = this.builtAt - start
+    this.abortedAt = abortedAt          // null or 'symbols'/'edges'
     return this.stats()
   }
 
@@ -215,6 +232,7 @@ class SymbolGraph {
       byEdgeKind,
       scanMs: this.scanMs,
       builtAt: this.builtAt,
+      abortedAt: this.abortedAt || null,   // null | 'symbols' | 'edges'
     }
   }
 }

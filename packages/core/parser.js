@@ -92,14 +92,17 @@ export function parseFile(absPath, content, ext) {
     // false positives are filtered downstream during route↔call matching.
     if (ext === 'js' || ext === 'jsx' || ext === 'mjs' || ext === 'cjs'
         || ext === 'ts' || ext === 'tsx') {
-      r.routes   = extractJSRoutes(content)
+      // JS/TS web frameworks: Express-style + NestJS-style decorators
+      r.routes   = [...extractJSRoutes(content), ...extractAnnotationRoutes(content)]
       r.apiCalls = extractJSApiCalls(content)
     } else if (ext === 'py' || ext === 'pyw') {
       r.routes   = extractPyRoutes(content)
       r.apiCalls = extractPyApiCalls(content)
+    } else if (ext === 'go') {
+      r.routes   = extractGoRoutes(content)
+    } else if (ext === 'java' || ext === 'kt') {
+      r.routes   = extractAnnotationRoutes(content)
     } else if (ext === 'vue' || ext === 'svelte' || ext === 'astro') {
-      // Component files: only the <script> block was passed to parseJS;
-      // re-scan raw content for routes/apiCalls too (covers SFC <script setup>).
       r.routes   = extractJSRoutes(content)
       r.apiCalls = extractJSApiCalls(content)
     }
@@ -1065,18 +1068,75 @@ function extractPyRoutes(content) {
   while ((m = decRe.exec(content))) {
     const verb = m[1].toLowerCase()
     const path = m[2]
+    // Look one line below the decorator for `def handler_name(...)`
+    // so the file-graph builder can link the route to its handler.
+    const after = content.slice(m.index + m[0].length)
+    const hm = after.match(/^[^\n]*\n\s*(?:async\s+)?def\s+(\w+)/)
+    const handler = hm ? hm[1] : null
     if (verb === 'route') {
-      // Flask: @app.route('/x', methods=['POST','GET'])
       const mm = m[3].match(/methods\s*=\s*\[([^\]]+)\]/i)
       if (mm) {
         const methods = [...mm[1].matchAll(/['"](\w+)['"]/g)].map(x => x[1].toUpperCase())
-        for (const method of methods) routes.push({ method, path })
+        for (const method of methods) routes.push({ method, path, handler })
       } else {
-        routes.push({ method: 'GET', path })   // Flask default
+        routes.push({ method: 'GET', path, handler })   // Flask default
       }
     } else {
-      routes.push({ method: verb.toUpperCase(), path })
+      routes.push({ method: verb.toUpperCase(), path, handler })
     }
+  }
+  return routes
+}
+
+// Go / Gin / Echo / Chi router calls
+//   r.GET("/users", getUsers)
+//   router.POST("/u/:id", h.UpdateUser)
+//   e.Any("/x", handler)
+function extractGoRoutes(content) {
+  const routes = []
+  const re = new RegExp(
+    `\\b(?:r|router|engine|app|e|mux|api|grp|group)\\.(${HTTP_METHODS.join('|')}|Any|Handle|HandleFunc)\\s*\\(\\s*"([^"]+)"\\s*,([^)]*)\\)`,
+    'gi'
+  )
+  let m
+  while ((m = re.exec(content))) {
+    const method = m[1].toUpperCase() === 'ANY' || m[1].toUpperCase() === 'HANDLE' || m[1].toUpperCase() === 'HANDLEFUNC' ? 'ANY' : m[1].toUpperCase()
+    const path = m[2]
+    const handlerStr = (m[3] || '').trim()
+    const hm = handlerStr.match(/([A-Za-z_][\w.]*)\s*$/)
+    let handler = null
+    if (hm && !/(func\b|\{)/.test(handlerStr)) {
+      // For receiver.Method form, take the rightmost segment
+      handler = hm[1].split('.').pop()
+    }
+    routes.push({ method, path, handler })
+  }
+  return routes
+}
+
+// Spring (Java) / NestJS (TS) / Quarkus (Java) annotation routes
+//   @GetMapping("/users")              public List<User> getUsers()
+//   @RequestMapping(value="/u", method=RequestMethod.GET)
+//   @Get('/users')                     getUsers(): User[]
+//   @Post('/u')                        @Body() body
+function extractAnnotationRoutes(content) {
+  const routes = []
+  // Spring single-method mappings
+  const springRe = /@(Get|Post|Put|Delete|Patch|Options|Head)Mapping\s*\(\s*(?:value\s*=\s*)?(?:"|')([^"']+)(?:"|')(?:[^)]*)\)\s*[\s\S]{0,200}?(?:public|private|protected)?\s*[\w<>\[\],?\s.]*\s+(\w+)\s*\(/g
+  let m
+  while ((m = springRe.exec(content))) {
+    routes.push({ method: m[1].toUpperCase(), path: m[2], handler: m[3] })
+  }
+  // @RequestMapping(value="/x", method=RequestMethod.GET)
+  const rmRe = /@RequestMapping\s*\([^)]*?value\s*=\s*"([^"]+)"[^)]*?method\s*=\s*RequestMethod\.(\w+)[^)]*\)\s*[\s\S]{0,200}?(?:public|private|protected)?\s*[\w<>\[\],?\s.]*\s+(\w+)\s*\(/g
+  while ((m = rmRe.exec(content))) {
+    routes.push({ method: m[2].toUpperCase(), path: m[1], handler: m[3] })
+  }
+  // NestJS-style decorators (TypeScript)
+  //   @Get('/users')  getUsers() { ... }
+  const nestRe = /@(Get|Post|Put|Delete|Patch|Options|Head|All)\s*\(\s*['"`]([^'"`]+)['"`][^)]*\)\s*(?:@\w+\s*\([^)]*\)\s*)*\s*(?:public|private|protected|async)?\s*(\w+)\s*\(/g
+  while ((m = nestRe.exec(content))) {
+    routes.push({ method: m[1].toUpperCase(), path: m[2], handler: m[3] })
   }
   return routes
 }
