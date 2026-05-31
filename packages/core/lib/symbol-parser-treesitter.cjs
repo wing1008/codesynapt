@@ -198,6 +198,22 @@ function walk(node, ctx) {
       ctx.symbols.push(sym)
       ctx.classStack.push({ name, sym })
       pushedCls = true
+      // Inheritance edges (pass 2 only — we need every symbol indexed
+      // first before we can resolve the parent name).
+      if (ctx.passTwo) {
+        const supers = extractInheritance(node, ctx.lang)
+        for (const { name: parentName, kind } of supers) {
+          const target = ctx.resolve(parentName, { forCall: true })
+          if (!target || target.id === sym.id) continue
+          const key = sym.id + '|' + target.id + '|' + kind
+          if (ctx.seen.has(key)) continue
+          ctx.seen.add(key)
+          ctx.edges.push({
+            source: sym.id, target: target.id, kind,
+            line: node.startPosition.row + 1,
+          })
+        }
+      }
     }
   }
   // Rust impl blocks — track the target type so methods get qualified
@@ -302,6 +318,62 @@ function walk(node, ctx) {
 
   if (pushedFn) ctx.fnStack.pop()
   if (pushedCls || pushedImpl) ctx.classStack.pop()
+}
+
+// Pull inheritance targets from a class-like node. Per-language node
+// names vary; this is best-effort and silently skips unknown shapes.
+// Returns [{ name: 'Bar', kind: 'extends' | 'implements' }].
+function extractInheritance(node, lang) {
+  const out = []
+  const walkType = (n) => {
+    if (!n) return null
+    if (n.type === 'type_identifier' || n.type === 'identifier' || n.type === 'simple_identifier') return n.text
+    // Member / qualified — take last identifier
+    for (let i = n.namedChildCount - 1; i >= 0; i--) {
+      const r = walkType(n.namedChild(i))
+      if (r) return r
+    }
+    return null
+  }
+  // Standard fields when grammars expose them
+  const superField = node.childForFieldName?.('superclass')
+                  || node.childForFieldName?.('parent_class')
+  if (superField) {
+    const name = walkType(superField)
+    if (name) out.push({ name, kind: 'extends' })
+  }
+  // Walk named children for inheritance-related sub-nodes.
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const c = node.namedChild(i)
+    const ct = c.type
+    if (ct === 'superclass' || ct === 'extends_type_clause' || ct === 'class_inheritance_modifiers') {
+      const name = walkType(c)
+      if (name) out.push({ name, kind: 'extends' })
+    } else if (ct === 'super_interfaces' || ct === 'implements_clause' || ct === 'super_interface_specification') {
+      // Java/Kotlin — may contain multiple type_identifier children
+      for (let j = 0; j < c.namedChildCount; j++) {
+        const name = walkType(c.namedChild(j))
+        if (name) out.push({ name, kind: 'implements' })
+      }
+    } else if (ct === 'inheritance_specifier') {
+      // Swift — single base type or protocol
+      const name = walkType(c)
+      if (name) out.push({ name, kind: 'extends' })
+    } else if (ct === 'argument_list' && lang === 'python') {
+      // Python `class Foo(Bar, Baz):` — base classes as `argument_list`
+      for (let j = 0; j < c.namedChildCount; j++) {
+        const name = walkType(c.namedChild(j))
+        if (name) out.push({ name, kind: 'extends' })
+      }
+    } else if (ct === 'type_spec_list' && lang === 'go') {
+      // Go interface embedding: `type Foo interface { Bar }`
+      for (let j = 0; j < c.namedChildCount; j++) {
+        const name = walkType(c.namedChild(j))
+        if (name) out.push({ name, kind: 'extends' })
+      }
+    }
+  }
+  return out
 }
 
 function classKind(nodeType) {

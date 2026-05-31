@@ -65,6 +65,24 @@ function parseAst(content, ext) {
 
 function mkId(file, name, line) { return `${file}#${name}@${line}` }
 
+// Resolve a type-position node to its top identifier name.
+//   `Bar`                            → "Bar"
+//   `Bar.Baz`                        → "Baz"   (rightmost segment)
+//   `Generic<T>` (TSTypeReference)   → "Generic"
+//   `Foo extends Bar` superClass     → handled by caller's recursion
+function extractTypeName(node) {
+  if (!node) return null
+  switch (node.type) {
+    case 'Identifier':              return node.name
+    case 'MemberExpression':        return extractTypeName(node.property)
+    case 'TSTypeReference':         return extractTypeName(node.typeName)
+    case 'TSQualifiedName':         return extractTypeName(node.right)
+    case 'TSExpressionWithTypeArguments': return extractTypeName(node.expression)
+    case 'CallExpression':          return extractTypeName(node.callee)  // mixin patterns
+  }
+  return null
+}
+
 // Extract a one-line signature from a function/class declaration.
 function signatureOf(node, content) {
   if (!node?.loc) return ''
@@ -253,21 +271,42 @@ function extractReferences(content, fileId, index) {
       enter(path) {
         const n = path.node
         currentClass = n.id?.name || null
-        // class itself doesn't act as the enclosing function — its
-        // methods do, so we don't push to the stack here.
-        if (n.superClass?.type === 'Identifier' && currentClass && n.loc) {
-          const target = resolveByName(n.superClass.name)
-          if (target) {
-            edges.push({
-              source: mkId(fileId, currentClass, n.loc.start.line),
-              target: target.id,
-              kind: 'extends',
-              line: n.loc.start.line,
-            })
+        if (currentClass && n.loc) {
+          const classId = mkId(fileId, currentClass, n.loc.start.line)
+          // `class Foo extends Bar` / `extends Bar.Baz` / `extends Generic<T>`
+          const superName = extractTypeName(n.superClass)
+          if (superName) {
+            const t = resolveCall(superName)
+            if (t) edges.push({ source: classId, target: t.id, kind: 'extends', line: n.loc.start.line })
+          }
+          // TypeScript `class Foo implements IFoo, IBar`
+          if (Array.isArray(n.implements)) {
+            for (const imp of n.implements) {
+              const name = extractTypeName(imp.expression || imp)
+              if (!name) continue
+              const t = resolveCall(name)
+              if (t) edges.push({ source: classId, target: t.id, kind: 'implements', line: n.loc.start.line })
+            }
           }
         }
       },
       exit() { currentClass = null },
+    },
+    // TS `interface Foo extends Bar, Baz`
+    TSInterfaceDeclaration: {
+      enter(path) {
+        const n = path.node
+        if (!n.id || !n.loc) return
+        const ifaceId = mkId(fileId, n.id.name, n.loc.start.line)
+        if (Array.isArray(n.extends)) {
+          for (const ext of n.extends) {
+            const name = extractTypeName(ext.expression || ext)
+            if (!name) continue
+            const t = resolveCall(name)
+            if (t) edges.push({ source: ifaceId, target: t.id, kind: 'extends', line: n.loc.start.line })
+          }
+        }
+      },
     },
     ClassMethod: {
       enter(path) {
