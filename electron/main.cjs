@@ -125,7 +125,7 @@ const EXPLORE_STOPWORDS = new Set([
 // One-shot "answer" — codegraph's `context` analog. Selects symbols
 // whose name/qualified name/doc match the query keywords, then pulls
 // their source bodies up to the token budget.
-function buildExploreResponse(g, query, budget = 8000) {
+function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
   const q = (query || '').toLowerCase()
   const rawTokens = q.split(/[^a-z0-9_]+/i).filter(Boolean)
   const keywords = rawTokens.filter((t) => t.length > 1 && !EXPLORE_STOPWORDS.has(t))
@@ -208,13 +208,124 @@ function buildExploreResponse(g, query, budget = 8000) {
     relatedSymbols = [...callees, ...callers]
   }
 
+  // Default mode = the rich entry+body shape we've shipped so far.
+  if (mode === 'default') {
+    return {
+      query, mode, keywords,
+      entryPoints, relatedSymbols, snippets,
+      counts: { totalCandidates: scored.length, entryPoints: entryPoints.length, snippets: snippets.length },
+    }
+  }
+
+  // ─── structural ────────────────────────────────────────────────
+  // "What's the shape?" — class / interface / module summary with
+  // method lists and inheritance, no bodies. Tuned for "show me the
+  // architecture" questions.
+  if (mode === 'structural') {
+    const seenClasses = new Set()
+    const classes = []
+    for (const node of entryPoints) {
+      const className = node.qualifiedName.split('.')[0]
+      if (seenClasses.has(className)) continue
+      seenClasses.add(className)
+      const allMembers = [...g.byName.values()]
+        .flatMap((set) => [...set].map((id) => g.nodes.get(id)))
+        .filter((n) => n && n.qualifiedName.startsWith(className + '.'))
+      classes.push({
+        name: className,
+        file: node.file,
+        line: node.startLine,
+        kind: node.kind,
+        members: allMembers.slice(0, 30).map((m) => ({
+          name: m.name, qualifiedName: m.qualifiedName, kind: m.kind, line: m.startLine,
+        })),
+        extends: g.edges
+          .filter((e) => e.source === node.id && e.kind === 'extends')
+          .map((e) => g.nodes.get(e.target)?.qualifiedName)
+          .filter(Boolean),
+        implements: g.edges
+          .filter((e) => e.source === node.id && e.kind === 'implements')
+          .map((e) => g.nodes.get(e.target)?.qualifiedName)
+          .filter(Boolean),
+      })
+      if (classes.length >= 5) break
+    }
+    return {
+      query, mode, keywords,
+      classes,
+      counts: { totalCandidates: scored.length, classes: classes.length },
+    }
+  }
+
+  // ─── behavioral ────────────────────────────────────────────────
+  // "How does it flow?" — for each top entry, the chain of callers
+  // and callees up to depth 2. No source bodies. Tuned for "trace
+  // the request" / "how does X reach Y" questions.
+  if (mode === 'behavioral') {
+    const flows = entryPoints.slice(0, 5).map((node) => {
+      const expand = (id, depth, dir, visited = new Set()) => {
+        if (depth <= 0 || visited.has(id)) return []
+        visited.add(id)
+        const adj = dir === 'in' ? g.inAdj.get(id) : g.outAdj.get(id)
+        if (!adj) return []
+        return [...adj].slice(0, 8).map((nid) => {
+          const child = g.nodes.get(nid)
+          if (!child) return null
+          return {
+            id: nid, qualifiedName: child.qualifiedName, kind: child.kind,
+            file: child.file, line: child.startLine,
+            children: expand(nid, depth - 1, dir, visited),
+          }
+        }).filter(Boolean)
+      }
+      return {
+        center: { id: node.id, qualifiedName: node.qualifiedName, file: node.file, line: node.startLine },
+        callers: expand(node.id, 2, 'in'),
+        callees: expand(node.id, 2, 'out'),
+      }
+    })
+    return {
+      query, mode, keywords,
+      flows,
+      counts: { totalCandidates: scored.length, flows: flows.length },
+    }
+  }
+
+  // ─── dataflow ──────────────────────────────────────────────────
+  // "Where does the data come from / go to?" — heuristic: pull
+  // references on top entries grouped by source symbol's kind.
+  // Tuned for "where is User created" / "what reads this DB model".
+  if (mode === 'dataflow') {
+    const flows = entryPoints.slice(0, 5).map((node) => {
+      const producers = (g.inAdj.get(node.id) || new Set())
+      const consumers = (g.outAdj.get(node.id) || new Set())
+      return {
+        center: { id: node.id, qualifiedName: node.qualifiedName, kind: node.kind, file: node.file, line: node.startLine },
+        producedBy: [...producers].slice(0, 12).map((id) => {
+          const n = g.nodes.get(id); return n && {
+            qualifiedName: n.qualifiedName, kind: n.kind, file: n.file, line: n.startLine,
+          }
+        }).filter(Boolean),
+        usedBy: [...consumers].slice(0, 12).map((id) => {
+          const n = g.nodes.get(id); return n && {
+            qualifiedName: n.qualifiedName, kind: n.kind, file: n.file, line: n.startLine,
+          }
+        }).filter(Boolean),
+      }
+    })
+    return {
+      query, mode, keywords,
+      flows,
+      counts: { totalCandidates: scored.length, flows: flows.length },
+    }
+  }
+
+  // Unknown mode — fall back to default with a hint.
   return {
-    query,
-    keywords,
-    entryPoints,
-    relatedSymbols,
-    snippets,
+    query, mode: 'default', keywords,
+    entryPoints, relatedSymbols, snippets,
     counts: { totalCandidates: scored.length, entryPoints: entryPoints.length, snippets: snippets.length },
+    note: `unknown mode "${mode}" — supported: default / structural / behavioral / dataflow`,
   }
 }
 
@@ -1938,7 +2049,11 @@ async function handleControlRequest(req, res) {
       if (req.method === 'GET' && sub === 'explore') {
         const q = url.searchParams.get('q') || ''
         const budget = parseInt(url.searchParams.get('budget') || '8000', 10)
-        const payload = buildExploreResponse(g, q, budget)
+        // B-4 — response shape selector. Default keeps the existing
+        // behaviour (entry symbols + bodies). Other modes return a
+        // smaller, focused payload tuned for the question type.
+        const mode = (url.searchParams.get('mode') || 'default').toLowerCase()
+        const payload = buildExploreResponse(g, q, budget, mode)
         return writeJson(res, 200, withMeta(payload))
       }
       if (req.method === 'POST' && sub === 'scan') {

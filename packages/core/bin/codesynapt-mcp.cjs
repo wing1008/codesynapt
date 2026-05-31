@@ -445,18 +445,25 @@ const TOOLS = [
   {
     name: 'cs_symbol_explore',
     description:
-      'One-shot answer for a natural-language architecture question. Returns ranked entry-point symbols + the source for each, sized to a token budget. Use this in place of grep+Read for "how does X work / how does X reach Y" questions — replies are the same shape as codegraph_explore.',
+      'One-shot answer for a natural-language architecture question. Default mode returns entry-point symbols with source bodies. Four modes:\n' +
+      '  · default     — entry symbols + full source bodies (best for "what does X do")\n' +
+      '  · structural  — class/interface summaries with member lists + extends/implements (best for "show me the architecture")\n' +
+      '  · behavioral  — call-chain trees (callers + callees, depth 2) per entry (best for "trace the request / how does X reach Y")\n' +
+      '  · dataflow    — for each entry, producers (who creates this) + consumers (who reads/uses this) (best for "where is X created / what reads Y")',
     inputSchema: {
       type: 'object',
       properties: {
         q:      { type: 'string', description: 'the natural-language question' },
-        budget: { type: 'number', description: 'token budget for snippet bodies (default 8000)' },
+        mode:   { type: 'string', enum: ['default', 'structural', 'behavioral', 'dataflow'], description: 'response shape (default: default)' },
+        budget: { type: 'number', description: 'token budget for snippet bodies (default 8000, only used in default mode)' },
       },
       required: ['q'],
     },
-    handler: async ({ q, budget }) => {
+    handler: async ({ q, mode, budget }) => {
       if (!q) bad('q is required')
-      const u = '/symbol/explore?q=' + encodeURIComponent(q) + (budget ? '&budget=' + budget : '')
+      let u = '/symbol/explore?q=' + encodeURIComponent(q)
+      if (mode) u += '&mode=' + encodeURIComponent(mode)
+      if (budget) u += '&budget=' + budget
       return (await apiReq('GET', u)).data
     },
   },
