@@ -115,6 +115,12 @@ const EXPLORE_AUX_SEGMENTS = new Set([
   'scripts', 'script', 'tools', 'tool',
   'build', 'dist', 'out', 'bin',
   'fixtures', 'fixture',
+  // Additional rarely-production segments — common in OSS layouts
+  // but never the answer to "how does X actually work".
+  'mocks', 'mock', '__mocks__',
+  'stubs', 'stub',
+  'storybook', '.storybook', 'stories',
+  'docs-src', 'documentation',
 ])
 function isAuxExplorePath(filePath) {
   if (!filePath) return false
@@ -125,10 +131,12 @@ function isAuxExplorePath(filePath) {
 function isTestPath(filePath) {
   if (!filePath) return false
   const p = filePath.toLowerCase().replace(/\\/g, '/')
-  // path segments: …/tests/, …/test/, …/__tests__/, …/spec/
-  if (/\/(tests?|__tests__|spec|specs|e2e|fixtures?)\//.test('/' + p + '/')) return true
-  // suffixes: foo_test.go, foo.test.ts, FooTests.swift, FooTest.java
-  if (/(?:_test|\.test|\.spec)\.[a-z]+$/.test(p)) return true
+  // path segments: …/tests/, …/test/, …/__tests__/, …/spec/,
+  // …/e2e/, …/integration/, …/bench/ (perf test)
+  if (/\/(tests?|__tests__|spec|specs|e2e|integration|integration[_-]tests?|fixtures?|bench(es|marks?)?)\//.test('/' + p + '/')) return true
+  // suffixes: foo_test.go, foo.test.ts, FooTests.swift, FooTest.java,
+  //          foo.bench.ts, foo_bench.go, foo.spec.tsx
+  if (/(?:_test|\.test|\.spec|\.bench|_bench|\.e2e)\.[a-z]+$/.test(p)) return true
   if (/tests?\.(swift|kt|java)$/.test(p)) return true
   return false
 }
@@ -141,26 +149,63 @@ const EXPLORE_STOPWORDS = new Set([
 ])
 
 // Break a token at camelCase / PascalCase / digit boundaries so query
-// "getUserName" also tries [get, user, name]. Without this the query
-// "user" matches a symbol named `getUserName` (substring works), but
-// the query "getUserName" only finds exact-or-substring matches and
-// misses symbols named just `getName`.
+// "getUserName" also tries [get, user, name]. Acronym-aware: keeps
+// uppercase runs together when followed by another word (HTTPRequest
+// → [HTTP, Request], not [H, T, T, P, Request]). Each alternative
+// covers a specific shape and the order matters:
+//   1. [A-Z]+(?=[A-Z][a-z])  — leading acronym before a word
+//      ("HTTP" in "HTTPRequest")
+//   2. [A-Z]?[a-z]+          — normal camel word
+//      ("Request" / "get" / "Name")
+//   3. [A-Z]+                 — trailing acronym
+//      ("HTML" at end of "URL2HTML")
+//   4. [0-9]+                 — digit group
 function splitCamelCase(w) {
-  const parts = w.match(/[a-z]+|[A-Z][a-z]+|[A-Z]+(?=[A-Z]|$)|[0-9]+/g) || []
+  const parts = w.match(/[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+/g) || []
   return parts.map((s) => s.toLowerCase())
 }
 
-// Very small English stemmer — strips common suffixes only. Lets a
-// query for "authenticate" / "authentication" / "authenticator" all
-// find a symbol named `authenticate`. We don't ship a real Porter
-// stemmer (extra dep + locale-specific) — this is the long-tail
-// covered by 12 common suffixes.
+// Simplified Porter-style stemmer. Two phases:
+//   Step 2 — derivational suffix MAP (rewrite, not strip)
+//            "authentication" → "authentic + ate" → "authenticate"
+//   Step 4 — terminal suffix STRIP if stem stays ≥ 4 chars
+//            "processing"/"processed"/"processor" → "process"
+//
+// Mapping suffixes first preserves the "verb form" so different
+// noun/adjective inflections normalize back to it. Plain strip-only
+// (the previous 12-suffix version) wasn't enough — "authentication"
+// would just lose "ation" and become "authentic", which doesn't
+// substring-match "authenticate".
+//
+// Stem length lower bound (>=4) guards against over-stripping
+// "rate" → "r" etc. We deliberately don't strip bare "s" or "es":
+// risks of mangling "process"/"business"/"axis" outweigh the wins.
+const STEM_STEP2 = [
+  ['ization', 'ize'], ['ational', 'ate'], ['fulness', 'ful'],
+  ['ousness', 'ous'], ['iveness', 'ive'], ['tional', 'tion'],
+  ['ation', 'ate'], ['ator', 'ate'], ['ative', 'ate'],
+  ['izer', 'ize'], ['icate', 'ic'], ['alize', 'al'],
+  ['ical', 'ic'],
+]
+const STEM_STEP4 = [
+  'ement', 'ements', 'ance', 'ances', 'ence', 'ences',
+  'ment', 'ments', 'tion', 'tions', 'sion', 'sions',
+  'able', 'ables', 'ible', 'ibles', 'ism', 'isms',
+  'ness', 'nesses', 'ful', 'fully', 'ous', 'ously',
+  'ive', 'ives', 'ize', 'izes', 'ized', 'izing',
+  'ing', 'ed', 'ly', 'er', 'or',
+]
 function stem(w) {
   if (w.length < 5) return w
-  for (const suf of ['ization','ational','tional','ation','tion','ness','ment',
-                     'ence','ance','able','ible','ical','ying','ing','er','or',
-                     'es','ly','ed','s']) {
-    if (w.endsWith(suf) && w.length - suf.length >= 4) return w.slice(0, -suf.length)
+  for (const [from, to] of STEM_STEP2) {
+    if (w.endsWith(from) && w.length - from.length >= 3) {
+      return w.slice(0, -from.length) + to
+    }
+  }
+  for (const suf of STEM_STEP4) {
+    if (w.endsWith(suf) && w.length - suf.length >= 4) {
+      return w.slice(0, -suf.length)
+    }
   }
   return w
 }
@@ -175,6 +220,28 @@ function isDeprecatedSymbol(node) {
   const d = ((node.doc || '') + ' ' + (node.signature || '')).toLowerCase()
   if (!d) return false
   return /(\s|^)@?deprecated\b|todo\s*[:_-]?\s*remove|fixme\s*[:_-]?\s*remove/.test(d)
+}
+
+// Public entry detection — symbols that an external caller reaches
+// (a `main`, a route handler, a CLI bin script, an SDK default
+// export) often have in-degree zero in *our* graph because the
+// caller lives outside the codebase (OS shell, HTTP request, npm
+// consumer). Without flagging these, the orphan damping treats
+// them as dead code. We flag only when the symbol is exported AND
+// either the name or the containing file matches an entry pattern
+// — both signals so we don't sweep every exported util into the
+// "entry" bucket.
+const ENTRY_NAMES = new Set([
+  'main', 'run', 'start', 'init', 'handler', 'bootstrap',
+  'setup', 'listen', 'serve', 'cli', 'app', 'default',
+])
+const ENTRY_FILE_RE = /(?:^|\/)(?:main|index|entry|server|app|cli|bin|run)(?:\.[a-z]+)?$/i
+function isPublicEntry(node) {
+  if (!node.exported) return false
+  const name = (node.name || '').toLowerCase()
+  if (ENTRY_NAMES.has(name)) return true
+  if (ENTRY_FILE_RE.test(node.file || '')) return true
+  return false
 }
 
 // One-shot "answer" — codegraph's `context` analog. Selects symbols
@@ -299,8 +366,13 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     // Orphan damping — neither called nor calling anything is a strong
     // signal for dead/backup/leftover code. Halve the score so an
     // unused exported class can't outrank a real implementation just
-    // because it shares a keyword.
-    if (inDeg === 0 && outDeg === 0) score = Math.floor(score * 0.5)
+    // because it shares a keyword. Public entries (main, CLI, route
+    // handlers, default exports) are skipped — their callers live
+    // outside the codebase so in-degree 0 is expected, not a death
+    // signal.
+    if (inDeg === 0 && outDeg === 0 && !isPublicEntry(node)) {
+      score = Math.floor(score * 0.5)
+    }
     // Deprioritise test files (×0.2).
     if (isTestPath(node.file)) score = Math.floor(score * 0.2)
     // Test-wrapper-named symbols.
@@ -354,10 +426,16 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
      || /^test[A-Z_]/.test(node.name || '')
      || /(_test$|spec$|Spec$)/.test(node.name || '')) classification = 'test'
     else if (isAuxExplorePath(node.file))     classification = 'aux'
+    else if (isPublicEntry(node))             classification = 'entry'
     else if (inD === 0 && ouD === 0)          classification = 'orphan'
     else if (ageMs > ONE_YEAR && inD < 2)     classification = 'legacy'
     else if (inD >= 3)                        classification = 'active'
-    entryPoints.push({ ...node, classification, inDegree: inD, outDegree: ouD, ageDays: mtime ? Math.floor(ageMs / 86400_000) : null })
+    // Reachability — hint only. Our entry detection misses things
+    // (React components, framework hooks), so a `reachable: false`
+    // result is a weak dead-code signal not a verdict. We expose it
+    // and let the AI / UI decide how strongly to weight it.
+    const reachable = g._reachable ? g._reachable.has(id) : null
+    entryPoints.push({ ...node, classification, inDegree: inD, outDegree: ouD, ageDays: mtime ? Math.floor(ageMs / 86400_000) : null, reachable })
   }
   const snippets = []
   let used = 0
@@ -2025,6 +2103,7 @@ async function handleControlRequest(req, res) {
                     g.fileCount = cached.fileCount
                     g.builtAt = cached.builtAt
                     g.scanMs = 0
+                    try { g.computeReachability(isPublicEntry) } catch {}
                     symbolGraph = g
                     _symbolBuilding = null
                     return g
@@ -2219,6 +2298,13 @@ async function handleControlRequest(req, res) {
                   meta: { method: route.method, path: route.path, definedIn: f.id },
                 })
               }
+            }
+            // Reachability pass — BFS from every detected public
+            // entry. Lets explore tag `unreachable` results as a
+            // weak dead-code hint without paying the BFS cost per
+            // query. Cheap: O(V+E) over the symbol graph.
+            try { g.computeReachability(isPublicEntry) } catch (e) {
+              console.warn('[symbol] reachability pass failed:', e.message)
             }
             symbolGraph = g
             _symbolBuilding = null

@@ -159,6 +159,37 @@ class SymbolGraph {
     this.inAdj.get(edge.target).add(edge.source)
   }
 
+  // BFS along outAdj from every symbol the host considers a public
+  // entry (main, route handler, exported CLI bin, etc). Symbols not
+  // reachable from any entry are likely dead code. The host passes
+  // its own isEntry predicate so this module stays parser-agnostic.
+  //
+  // Important caveat documented in the explore code: our entry
+  // heuristic (name + path patterns) misses some real entries
+  // (React components, framework callbacks, decorator-bound
+  // handlers), so a `reachable: false` flag is a *hint*, not a
+  // verdict — we expose it as data and let the ranker / UI choose
+  // how strongly to weight it.
+  computeReachability(isEntry) {
+    const reachable = new Set()
+    const queue = []
+    for (const node of this.nodes.values()) {
+      try {
+        if (isEntry(node)) { reachable.add(node.id); queue.push(node.id) }
+      } catch {}
+    }
+    while (queue.length) {
+      const id = queue.shift()
+      const callees = this.outAdj.get(id)
+      if (!callees) continue
+      for (const c of callees) {
+        if (!reachable.has(c)) { reachable.add(c); queue.push(c) }
+      }
+    }
+    this._reachable = reachable
+    return reachable
+  }
+
   callersOf(id) {
     const set = this.inAdj.get(id)
     if (!set) return []
@@ -233,6 +264,16 @@ class SymbolGraph {
       const lines = () => _lines ??= content.split('\n')
       const DEPRECATED_RE = /@?deprecated\b|todo\s*[:_-]?\s*remove|fixme\s*[:_-]?\s*remove/i
       const fileHasDeprecated = DEPRECATED_RE.test(content)
+      // File-level deprecated marker — if the first 5 lines flag the
+      // whole file as deprecated (common pattern: file header with
+      // `// @deprecated — moved to …`), tag every symbol the file
+      // exports. Avoids the case where the file header is far above
+      // any declaration's 5-line probe window.
+      let fileLevelDeprecated = false
+      if (fileHasDeprecated) {
+        const head = lines().slice(0, 5).join('\n')
+        fileLevelDeprecated = DEPRECATED_RE.test(head)
+      }
       for (const s of symbols) {
         if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
         // Stamp every symbol with the file's mtime — explore uses it
@@ -243,7 +284,9 @@ class SymbolGraph {
         // Deprecated marker — look at the 5 lines directly above the
         // symbol declaration. Cheaper + more precise than fighting
         // babel's export-wrapper leading-comment attachment quirk.
-        if (fileHasDeprecated && s.startLine) {
+        if (fileLevelDeprecated) {
+          s.deprecated = true
+        } else if (fileHasDeprecated && s.startLine) {
           const start = Math.max(0, s.startLine - 1 - 5)
           const prelude = lines().slice(start, s.startLine - 1).join('\n')
           if (DEPRECATED_RE.test(prelude)) s.deprecated = true
