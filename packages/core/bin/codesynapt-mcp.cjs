@@ -395,6 +395,71 @@ const TOOLS = [
       }
     },
   },
+  // ─── Symbol mode (codegraph-equivalent layer) ──────────────────
+  // Three tools mirroring codegraph's most-used three. File mode tools
+  // above stay available — agents pick whichever matches the question.
+  {
+    name: 'cs_symbol_summary',
+    description:
+      'Symbol-mode project overview: total symbols, breakdown by kind (function/class/struct/…) and edge kind. Triggers the symbol scan on first call after a project is loaded. Use this once at the start of a symbol-level investigation.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    handler: async () => (await apiReq('GET', '/symbol/summary')).data,
+  },
+  {
+    name: 'cs_symbol_search',
+    description:
+      'Symbol-mode search and graph navigation. Four actions:\n' +
+      '  · find    — symbols whose name contains `q` (case-insensitive)\n' +
+      '  · callers — symbols that call this symbol id\n' +
+      '  · callees — symbols that this symbol id calls\n' +
+      '  · node    — one symbol with its source body\n' +
+      'Use after cs_symbol_summary when an answer needs a specific function or class, not just the project shape.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['find', 'callers', 'callees', 'node'] },
+        q:      { type: 'string', description: 'search query (action=find)' },
+        id:     { type: 'string', description: 'symbol id (action=callers/callees/node)' },
+        limit:  { type: 'number', description: 'max results (action=find), default 50' },
+      },
+      required: ['action'],
+    },
+    handler: async ({ action, q, id, limit }) => {
+      switch (action) {
+        case 'find':
+          if (!q) bad('q is required for action=find')
+          return (await apiReq('GET', '/symbol/find?q=' + encodeURIComponent(q) + (limit ? '&limit=' + limit : ''))).data
+        case 'callers':
+          if (!id) bad('id is required for action=callers')
+          return (await apiReq('GET', '/symbol/callers/' + encId(id))).data
+        case 'callees':
+          if (!id) bad('id is required for action=callees')
+          return (await apiReq('GET', '/symbol/callees/' + encId(id))).data
+        case 'node':
+          if (!id) bad('id is required for action=node')
+          return (await apiReq('GET', '/symbol/node/' + encId(id))).data
+        default: bad('unknown action: ' + action)
+      }
+    },
+  },
+  {
+    name: 'cs_symbol_explore',
+    description:
+      'One-shot answer for a natural-language architecture question. Returns ranked entry-point symbols + the source for each, sized to a token budget. Use this in place of grep+Read for "how does X work / how does X reach Y" questions — replies are the same shape as codegraph_explore.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        q:      { type: 'string', description: 'the natural-language question' },
+        budget: { type: 'number', description: 'token budget for snippet bodies (default 8000)' },
+      },
+      required: ['q'],
+    },
+    handler: async ({ q, budget }) => {
+      if (!q) bad('q is required')
+      const u = '/symbol/explore?q=' + encodeURIComponent(q) + (budget ? '&budget=' + budget : '')
+      return (await apiReq('GET', u)).data
+    },
+  },
 ]
 
 // ─── JSON-RPC over stdio ───────────────────────────────────────

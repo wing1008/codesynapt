@@ -328,6 +328,8 @@ const T = {
     'status.files':        '파일',
     'status.edges':        '엣지',
     'status.comp':         '컴포넌트',
+    'status.symbols':      '심볼',
+    'status.symbols.title':'심볼 그래프 (codegraph 호환 레이어). 클릭해서 빌드 — function/class 단위로 인덱싱.',
     'status.files.title':  '그래프의 전체 파일',
     'status.edges.title':  '전체 연결',
     'status.comp.title':   '연결된 컴포넌트',
@@ -565,6 +567,8 @@ const T = {
     'status.files':        'files',
     'status.edges':        'edges',
     'status.comp':         'comp',
+    'status.symbols':      'syms',
+    'status.symbols.title':'Symbol graph (codegraph-equivalent layer). Click to build — indexes function/class-level nodes.',
     'status.files.title':  'Total files in graph',
     'status.edges.title':  'Total connections',
     'status.comp.title':   'Connected components',
@@ -3256,6 +3260,20 @@ function updateStatusBar() {
   document.getElementById('sb_comps').innerHTML = componentCacheStale
     ? `<span class="v">—</span> ${t('status.comp')}`
     : `<span class="v">${cachedComponentCount.toLocaleString()}</span> ${t('status.comp')}`
+
+  // Symbol-mode cell — built lazily; shows current symbol count if
+  // built, or a dash + click hint otherwise.
+  const sbSyms = document.getElementById('sb_symbols')
+  if (sbSyms) {
+    const s = symbolModeState
+    if (s.loading) {
+      sbSyms.innerHTML = `<span class="v">…</span> ${t('status.symbols')}`
+    } else if (s.count != null) {
+      sbSyms.innerHTML = `<span class="v">${s.count.toLocaleString()}</span> ${t('status.symbols')}`
+    } else {
+      sbSyms.innerHTML = `<span class="v">—</span> ${t('status.symbols')}`
+    }
+  }
 
   // Sim state
   let stateLabel, stateClass = ''
@@ -6691,6 +6709,49 @@ function refreshThemePicker() {
     grid.parentElement?.insertBefore(manageBtn, grid.nextSibling)
   }
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  Symbol-mode status cell — clickable in the status bar.
+//  Click → builds the symbol graph (codegraph-equivalent layer).
+//  Reset whenever the loaded folder changes (snapshot:applied event).
+// ═══════════════════════════════════════════════════════════════
+const symbolModeState = { count: null, edges: null, loading: false, lastRoot: null }
+
+async function buildSymbolGraph() {
+  if (symbolModeState.loading) return
+  const cell = document.getElementById('sb_symbols')
+  if (!cell) return
+  symbolModeState.loading = true
+  cell.classList.add('loading', 'sb-clickable')
+  try {
+    // GET /symbol/summary triggers a lazy build server-side; the
+    // response also gives us the symbol count + edge count.
+    const r = await fetch('http://127.0.0.1:7707/symbol/summary')
+    const j = await r.json()
+    symbolModeState.count = j.symbolCount ?? null
+    symbolModeState.edges = j.edgeCount ?? null
+    cell.title = `${symbolModeState.count?.toLocaleString() || '?'} symbols · ${symbolModeState.edges?.toLocaleString() || '?'} edges · click to re-scan`
+  } catch (e) {
+    cell.title = 'symbol build failed: ' + (e.message || e)
+  } finally {
+    symbolModeState.loading = false
+    cell.classList.remove('loading')
+  }
+}
+
+;(function initSymbolCell() {
+  const cell = document.getElementById('sb_symbols')
+  if (!cell) return
+  cell.addEventListener('click', buildSymbolGraph)
+  // Reset whenever a new project loads.
+  bus.on('snapshot:applied', ({ root }) => {
+    if (root && root !== symbolModeState.lastRoot) {
+      symbolModeState.lastRoot = root
+      symbolModeState.count = null
+      symbolModeState.edges = null
+    }
+  })
+})()
 
 // ═══════════════════════════════════════════════════════════════
 //  Left sidebar — tab switching

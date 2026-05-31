@@ -2551,6 +2551,24 @@ body.rail-collapsed #statsPanel {
 .status-cell .accent { color: var(--accent); }
 .status-cell.bad { color: #E879A6; }
 .status-cell.good { color: #6BCB77; }
+.status-cell.sb-clickable {
+  cursor: pointer;
+  transition: color .15s, background .15s;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.status-cell.sb-clickable:hover {
+  color: var(--accent);
+  background: rgba(126,207,207,0.08);
+}
+.status-cell.sb-clickable.loading {
+  color: var(--warn);
+  animation: sb-pulse 1.2s ease-in-out infinite;
+}
+@keyframes sb-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
 
 /* Bottom-anchored overlays need to lift above the status bar */
 #scanToast    { bottom: 36px !important; }

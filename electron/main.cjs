@@ -42,6 +42,143 @@ async function loadScannerModule() {
   return Scanner
 }
 
+// Symbol-mode graph (codegraph-equivalent layer). Lazy: built on the
+// first /symbol/* request after a project loads. Reset on every
+// project swap so it never returns stale symbols from a prior repo.
+const { SymbolGraph, registerParser } = require('../packages/core/lib/symbol-graph.cjs')
+const jsSymbolParser = require('../packages/core/lib/symbol-parser-js.cjs')
+const pySymbolParser = require('../packages/core/lib/symbol-parser-py.cjs')
+const miscSymbolParsers = require('../packages/core/lib/symbol-parser-misc.cjs')
+// Stage 3 — tree-sitter exact parsers. Default ON; CS_SYMBOL_PARSER=regex
+// falls back to the regex/Babel parsers above for comparison or when
+// the WASM grammars aren't shipped (e.g. a stripped portable build).
+let _tsParserModule = null
+try { _tsParserModule = require('../packages/core/lib/symbol-parser-treesitter.cjs') } catch {}
+const SYMBOL_PARSER_MODE = process.env.CS_SYMBOL_PARSER || 'treesitter'
+
+function registerSymbolParsers() {
+  // Always register the Stage-1/2 parsers as the fallback set.
+  registerParser(['js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx'], jsSymbolParser)
+  registerParser(['py'], pySymbolParser)
+  registerParser(['go'],   miscSymbolParsers.go)
+  registerParser(['rs'],   miscSymbolParsers.rust)
+  registerParser(['java', 'kt'], miscSymbolParsers.javaKt)
+  registerParser(['swift'], miscSymbolParsers.swift)
+  if (SYMBOL_PARSER_MODE !== 'treesitter' || !_tsParserModule) return
+  // Override per-extension with tree-sitter parsers where a grammar
+  // is available. The fallback set above still answers for languages
+  // without a shipped wasm.
+  try {
+    for (const ext of _tsParserModule.availableExtensions()) {
+      const tsP = _tsParserModule.makeParser(ext)
+      if (tsP) registerParser([ext], tsP)
+    }
+  } catch (e) {
+    console.error('[symbol] tree-sitter init failed, falling back to regex:', e.message)
+  }
+}
+registerSymbolParsers()
+let symbolGraph = null            // SymbolGraph instance; rebuilt per project
+let _symbolBuilding = null        // in-flight build promise (avoid double work)
+
+// Path looks like a test file? Used by explore() ranking to push real
+// implementation symbols above test fixtures with similar names.
+function isTestPath(filePath) {
+  if (!filePath) return false
+  const p = filePath.toLowerCase().replace(/\\/g, '/')
+  // path segments: …/tests/, …/test/, …/__tests__/, …/spec/
+  if (/\/(tests?|__tests__|spec|specs|e2e|fixtures?)\//.test('/' + p + '/')) return true
+  // suffixes: foo_test.go, foo.test.ts, FooTests.swift, FooTest.java
+  if (/(?:_test|\.test|\.spec)\.[a-z]+$/.test(p)) return true
+  if (/tests?\.(swift|kt|java)$/.test(p)) return true
+  return false
+}
+
+// Stopwords stripped from the explore query before keyword matching.
+const EXPLORE_STOPWORDS = new Set([
+  'a','an','and','are','as','at','be','by','do','does','for','from','how','in',
+  'into','is','it','its','of','on','or','the','their','this','to','using','what',
+  'when','where','which','who','why','will','with',
+])
+
+// One-shot "answer" — codegraph's `context` analog. Selects symbols
+// whose name/qualified name/doc match the query keywords, then pulls
+// their source bodies up to the token budget.
+function buildExploreResponse(g, query, budget = 8000) {
+  const q = (query || '').toLowerCase()
+  const rawTokens = q.split(/[^a-z0-9_]+/i).filter(Boolean)
+  const keywords = rawTokens.filter((t) => t.length > 1 && !EXPLORE_STOPWORDS.has(t))
+  if (!keywords.length) return { query, entryPoints: [], snippets: [], note: 'no usable keywords' }
+
+  // Score every symbol. Heavier weight on exact name hits and
+  // qualifiedName hits over loose doc matches.
+  const scored = []
+  for (const node of g.nodes.values()) {
+    let score = 0
+    const name = (node.name || '').toLowerCase()
+    const qn   = (node.qualifiedName || '').toLowerCase()
+    const doc  = (node.doc || '').toLowerCase()
+    const sig  = (node.signature || '').toLowerCase()
+    for (const k of keywords) {
+      if (name === k)              score += 50
+      else if (name.includes(k))   score += 18
+      if (qn !== name && qn.includes(k)) score += 12
+      if (sig.includes(k))         score += 4
+      if (doc.includes(k))         score += 3
+    }
+    // Prefer exported and class/function over const/type clutter.
+    if (node.exported) score += 2
+    if (node.kind === 'class' || node.kind === 'function' || node.kind === 'method') score += 1
+    // Deprioritise test files — `RealInterceptorChain.request` matters
+    // more than `TestEngineHandleContextNoRouteWithGroupMiddleware`.
+    // Cuts score in half; doesn't remove (sometimes tests are the
+    // best example of what the user asked about).
+    if (isTestPath(node.file)) score = Math.floor(score / 2)
+    if (score > 0) scored.push({ node, score })
+  }
+  scored.sort((a, b) => b.score - a.score)
+
+  // Pick top entry points (high-score nodes) and pull source for each
+  // until we hit the budget. Approximate tokens = chars / 4.
+  const entryPoints = scored.slice(0, 8).map((s) => s.node)
+  const snippets = []
+  let used = 0
+  const MAX_LINES_PER_SNIPPET = 40
+  for (const node of entryPoints) {
+    if (used >= budget) break
+    try {
+      const filePath = path.join(currentRoot, node.file)
+      const lines = fs.readFileSync(filePath, 'utf8').split('\n')
+      const end = Math.min(node.endLine, node.startLine + MAX_LINES_PER_SNIPPET - 1)
+      const source = lines.slice(node.startLine - 1, end).join('\n')
+      const cost = Math.ceil(source.length / 4)
+      if (used + cost > budget && snippets.length > 0) break
+      snippets.push({
+        id: node.id, file: node.file, line: node.startLine,
+        name: node.name, kind: node.kind, source,
+      })
+      used += cost
+    } catch {}
+  }
+
+  // Related symbols: 1-hop neighbours of the top entry point.
+  let relatedSymbols = []
+  if (entryPoints[0]) {
+    const callees = g.calleesOf(entryPoints[0].id).slice(0, 12)
+    const callers = g.callersOf(entryPoints[0].id).slice(0, 12)
+    relatedSymbols = [...callees, ...callers]
+  }
+
+  return {
+    query,
+    keywords,
+    entryPoints,
+    relatedSymbols,
+    snippets,
+    counts: { totalCandidates: scored.length, entryPoints: entryPoints.length, snippets: snippets.length },
+  }
+}
+
 // Legacy audit module — lazy-loaded ESM. Cached by snapshotVersion.
 let _legacyAudit = null
 let _legacyCache = { version: -1, data: null }
@@ -95,6 +232,10 @@ async function startScanner(root) {
   _summaryCache  = { version: -1, data: null }
   _packagesCache = { version: -1, data: null }
   _legacyCache   = { version: -1, data: null }
+  // Symbol-mode graph belongs to the previous project — drop it. The
+  // next /symbol/* request will rebuild against the new file set.
+  symbolGraph = null
+  _symbolBuilding = null
   migrateLegacyHistoryDir(root)
   addRecent(root)
   scanner = new Scanner(root)
@@ -1425,7 +1566,7 @@ const _LIB_ENDPOINTS = new Set([
   'schema', 'url', 'secrets',
 ])
 
-function handleControlRequest(req, res) {
+async function handleControlRequest(req, res) {
   // DNS-rebinding defense: reject Host headers that aren't loopback.
   const hostHeader = (req.headers.host || '').split(':')[0].toLowerCase()
   if (hostHeader !== '127.0.0.1' && hostHeader !== 'localhost' && hostHeader !== '[::1]') {
@@ -1490,6 +1631,74 @@ function handleControlRequest(req, res) {
     }
 
     if (!scanner) return writeJson(res, 503, { error: 'no folder loaded' })
+
+    // ─── Symbol mode (codegraph-equivalent layer) ────────────────
+    // First call builds the symbol graph against the current file set;
+    // subsequent calls hit the in-memory cache. POST /symbol/scan forces
+    // a rebuild even if one exists.
+    if (seg0 === 'symbol') {
+      const sub = rest[0] || ''   // 'summary' | 'find' | 'callers' | …
+      // Ensure the symbol graph is built before serving any query.
+      const forceRebuild = (req.method === 'POST' && sub === 'scan')
+      if (forceRebuild || !symbolGraph) {
+        if (!_symbolBuilding) {
+          _symbolBuilding = (async () => {
+            const g = new SymbolGraph()
+            const entries = [...scanner.files.values()]
+              .filter((f) => f.absPath && f.ext)
+              .map((f) => ({ id: f.id, absPath: f.absPath, ext: f.ext }))
+            await g.build(entries)
+            symbolGraph = g
+            _symbolBuilding = null
+            return g
+          })()
+        }
+        await _symbolBuilding
+      }
+      const g = symbolGraph
+
+      if (req.method === 'GET' && (sub === '' || sub === 'summary')) {
+        return writeJson(res, 200, withMeta(g.stats()))
+      }
+      if (req.method === 'GET' && sub === 'find') {
+        const q = url.searchParams.get('q') || ''
+        const limit = Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10))
+        const matches = g.findByName(q, limit)
+        return writeJson(res, 200, withMeta({ query: q, matches }))
+      }
+      if (req.method === 'GET' && sub === 'node' && rest[1]) {
+        const id = decodeURIComponent(rest.slice(1).join('/'))
+        const node = g.nodes.get(id)
+        if (!node) return writeJson(res, 404, { error: 'symbol not found', id })
+        // Pull source between startLine and endLine
+        let source = ''
+        try {
+          const filePath = path.join(currentRoot, node.file)
+          const lines = fs.readFileSync(filePath, 'utf8').split('\n')
+          source = lines.slice(node.startLine - 1, node.endLine).join('\n')
+          if (source.length > 4000) source = source.slice(0, 4000) + '\n…'
+        } catch {}
+        return writeJson(res, 200, withMeta({ ...node, source }))
+      }
+      if (req.method === 'GET' && sub === 'callers' && rest[1]) {
+        const id = decodeURIComponent(rest.slice(1).join('/'))
+        return writeJson(res, 200, withMeta({ id, callers: g.callersOf(id) }))
+      }
+      if (req.method === 'GET' && sub === 'callees' && rest[1]) {
+        const id = decodeURIComponent(rest.slice(1).join('/'))
+        return writeJson(res, 200, withMeta({ id, callees: g.calleesOf(id) }))
+      }
+      if (req.method === 'GET' && sub === 'explore') {
+        const q = url.searchParams.get('q') || ''
+        const budget = parseInt(url.searchParams.get('budget') || '8000', 10)
+        const payload = buildExploreResponse(g, q, budget)
+        return writeJson(res, 200, withMeta(payload))
+      }
+      if (req.method === 'POST' && sub === 'scan') {
+        return writeJson(res, 200, withMeta(g.stats()))
+      }
+      return writeJson(res, 404, { error: 'unknown symbol endpoint', path: url.pathname })
+    }
 
     if (req.method === 'GET' && seg0 === 'summary') {
       const s = buildSummaryCached()
