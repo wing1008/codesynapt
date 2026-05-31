@@ -14,6 +14,27 @@ const path = require('path')
 //               extractReferences(content, fileId, index) → SymbolEdge[] }
 const PARSERS = Object.create(null)
 
+// Heuristic: a file at one of these path segments isn't usually called
+// from production code. Affects resolveCall — when a name has matches
+// in both production and auxiliary paths, production wins. Doesn't
+// hide aux symbols, just deprioritises them as call targets.
+const AUX_PATH_SEGMENTS = new Set([
+  'scripts', 'script', 'tools', 'tool',
+  'tests', 'test', '__tests__', 'spec', 'specs',
+  'examples', 'example', 'samples', 'sample', 'demo', 'demos',
+  'build', 'dist', 'out', 'bin',
+  'docs', 'doc',
+  'fixtures', 'fixture',
+  'benchmarks', 'benchmark', 'bench',
+])
+function isAuxPath(fileId) {
+  if (!fileId) return false
+  // Check the first path segment + any segment whose name matches.
+  // `tests/foo.ts`, `packages/x/scripts/y.ts`, `build/x.js` all match.
+  const parts = fileId.split('/')
+  return parts.some((p) => AUX_PATH_SEGMENTS.has(p))
+}
+
 function registerParser(extOrExts, parser) {
   const exts = Array.isArray(extOrExts) ? extOrExts : [extOrExts]
   for (const e of exts) PARSERS[e] = parser
@@ -85,16 +106,33 @@ class SymbolGraph {
     }
     const set = this.byName.get(name.toLowerCase())
     if (!set || !set.size) return null
-    let sameFile = null, imported = null, any = null
+    let sameFile = null, imported = null
+    // Two-bucket fallback: prefer a production-path candidate
+    // over an auxiliary-path one (scripts/, test/, build/, examples/
+    // etc.) when nothing imported matches. Stops the case where
+    // production code's call to `fetch(...)` lands on a helper named
+    // `fetch` defined in scripts/.
+    let prodAny = null, auxAny = null
+    const callerIsAux = isAuxPath(fromFileId)
     const importsOf = this.fileImports.get(fromFileId)
     for (const id of set) {
       const node = this.nodes.get(id)
       if (!node) continue
       if (node.file === fromFileId) { sameFile = node; break }
       if (!imported && importsOf && importsOf.has(node.file)) imported = node
-      if (!any) any = node
+      if (isAuxPath(node.file)) {
+        if (!auxAny) auxAny = node
+      } else {
+        if (!prodAny) prodAny = node
+      }
     }
-    return sameFile || imported || (allowAny ? any : null)
+    if (sameFile) return sameFile
+    if (imported) return imported
+    if (!allowAny) return null
+    // Prefer production over auxiliary unless the caller itself is
+    // already aux (in which case linking back into scripts/ is fine).
+    if (callerIsAux) return prodAny || auxAny
+    return prodAny || auxAny
   }
 
   addNode(node) {
