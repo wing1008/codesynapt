@@ -124,12 +124,19 @@ async function parserFor(grammar) {
 function mkId(file, name, line) { return `${file}#${name}@${line}` }
 
 function nameOf(node) {
-  // Try standard field first, then look for an identifier child.
+  // Try standard field first (Go, JS, Java have it). Kotlin & Swift
+  // function_declaration doesn't expose a `name` field — the function
+  // identifier lands as a direct `simple_identifier` child instead,
+  // so we walk children for any identifier-shaped node as a fallback.
   const named = node.childForFieldName?.('name')
   if (named) return named.text
   for (let i = 0; i < node.childCount; i++) {
     const c = node.child(i)
-    if (c.type === 'identifier' || c.type === 'type_identifier' || c.type === 'field_identifier') return c.text
+    if (c.type === 'identifier'
+     || c.type === 'simple_identifier'
+     || c.type === 'type_identifier'
+     || c.type === 'field_identifier'
+     || c.type === 'property_identifier') return c.text
   }
   return null
 }

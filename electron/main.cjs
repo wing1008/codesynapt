@@ -131,9 +131,17 @@ function buildExploreResponse(g, query, budget = 8000) {
     if (node.kind === 'class' || node.kind === 'function' || node.kind === 'method') score += 1
     // Deprioritise test files — `RealInterceptorChain.request` matters
     // more than `TestEngineHandleContextNoRouteWithGroupMiddleware`.
-    // Cuts score in half; doesn't remove (sometimes tests are the
-    // best example of what the user asked about).
-    if (isTestPath(node.file)) score = Math.floor(score / 2)
+    // Heavy demotion (×0.2) so even very long test names with multiple
+    // keyword hits don't outrank the real implementation, but tests
+    // can still surface when nothing else matches at all.
+    if (isTestPath(node.file)) score = Math.floor(score * 0.2)
+    // Also demote symbol names that look like a test wrapper (Test* /
+    // *_test / *Spec / spec_*). These slip through when the *file*
+    // itself doesn't match the test path pattern.
+    const nameLower = (node.name || '').toLowerCase()
+    if (/^test[A-Z_]/.test(node.name || '') || /(_test$|spec$|Spec$)/.test(node.name || '')) {
+      score = Math.floor(score * 0.4)
+    }
     if (score > 0) scored.push({ node, score })
   }
   scored.sort((a, b) => b.score - a.score)
