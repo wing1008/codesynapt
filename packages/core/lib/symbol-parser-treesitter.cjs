@@ -88,7 +88,13 @@ const NODE_TYPES = {
   go: {
     fn:     ['function_declaration'],
     method: ['method_declaration'],
-    cls:    ['type_declaration'],     // contains struct/interface specs
+    // Use `type_spec` (the actual name+kind carrier), not its outer
+    // `type_declaration` wrapper. nameOf() can't extract a name from
+    // the wrapper (its only named child is the type_spec), so before
+    // this change every Go file produced zero struct/interface symbols
+    // and gin showed `byKind: { function: 1311 }` — no methods, no
+    // structs.
+    cls:    ['type_spec'],
     call:   ['call_expression'],
   },
   rust: {
@@ -267,7 +273,7 @@ function walk(node, ctx) {
         id: mkId(ctx.fileId, name, node.startPosition.row + 1),
         name,
         qualifiedName: name,
-        kind: classKind(t),
+        kind: classKind(t, node),
         file: ctx.fileId,
         startLine: node.startPosition.row + 1,
         endLine: node.endPosition.row + 1,
@@ -309,9 +315,21 @@ function walk(node, ctx) {
   else if (cfg.fn?.includes(t) || cfg.method?.includes(t)) {
     const name = nameOf(node)
     if (name) {
+      // Go methods carry their receiver type in a `receiver` field
+      // rather than being lexically nested inside the type — without
+      // this, `func (e *Engine) handleHTTPRequest()` shows up as a
+      // bare function with no link back to Engine.
+      let methodOwner = null
+      if (ctx.lang === 'go' && cfg.method?.includes(t)) {
+        methodOwner = extractGoReceiver(node)
+      }
       const cls = ctx.classStack[ctx.classStack.length - 1]
-      const isMethod = !!cls && (cfg.method?.includes(t) || ctx.lang === 'python' || ctx.lang === 'kotlin' || ctx.lang === 'swift' || ctx.lang === 'rust')
-      const qn = isMethod ? `${cls.name}.${name}` : name
+      const lexicallyMethod = !!cls && (cfg.method?.includes(t)
+        || ctx.lang === 'python' || ctx.lang === 'kotlin'
+        || ctx.lang === 'swift'  || ctx.lang === 'rust')
+      const isMethod = !!methodOwner || lexicallyMethod
+      const qn = methodOwner ? `${methodOwner}.${name}`
+                 : (lexicallyMethod ? `${cls.name}.${name}` : name)
       const sym = {
         id: mkId(ctx.fileId, qn, node.startPosition.row + 1),
         name,
@@ -456,14 +474,42 @@ function extractInheritance(node, lang) {
   return out
 }
 
-function classKind(nodeType) {
+// Walk a Go method_declaration's `receiver` field to find the type
+// the method hangs off of. Receivers look like `(e *Engine)` or
+// `(c Context)`; the type can be wrapped in a `pointer_type`.
+function extractGoReceiver(node) {
+  const recv = node.childForFieldName?.('receiver')
+  if (!recv) return null
+  function findType(n) {
+    if (!n) return null
+    if (n.type === 'type_identifier') return n.text
+    for (let i = 0; i < n.namedChildCount; i++) {
+      const r = findType(n.namedChild(i))
+      if (r) return r
+    }
+    return null
+  }
+  return findType(recv)
+}
+
+function classKind(nodeType, node = null) {
   if (nodeType.includes('interface')) return 'interface'
   if (nodeType.includes('trait'))     return 'interface'
   if (nodeType.includes('protocol'))  return 'interface'
   if (nodeType.includes('struct'))    return 'struct'
   if (nodeType.includes('enum'))      return 'enum'
   if (nodeType.includes('record'))    return 'class'
-  if (nodeType.includes('type_declaration')) return 'struct'  // Go — refined below
+  // Go `type_spec` wraps the actual struct_type / interface_type /
+  // map_type / etc — descend one level to recover the real kind.
+  // Without this, every `type Foo struct {…}` shows up as kind:'class'.
+  if (nodeType === 'type_spec' && node) {
+    for (let i = 0; i < node.childCount; i++) {
+      const ct = node.child(i).type
+      if (ct === 'struct_type')    return 'struct'
+      if (ct === 'interface_type') return 'interface'
+    }
+    return 'class'
+  }
   return 'class'
 }
 

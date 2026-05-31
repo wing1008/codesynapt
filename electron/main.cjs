@@ -145,7 +145,13 @@ const EXPLORE_STOPWORDS = new Set([
 // their source bodies up to the token budget.
 function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
   const q = (query || '').toLowerCase()
-  const rawTokens = q.split(/[^a-z0-9_]+/i).filter(Boolean)
+  // Unicode tokenizer — keeps Korean / Japanese / Chinese / Cyrillic /
+  // accented Latin etc. as keywords instead of treating them as
+  // splitters. Without this, a Korean query like "서버 라우팅" tokenized
+  // to ["", ""] → "no usable keywords" even though the codebase might
+  // contain matching Korean-named symbols (or matching transliterated
+  // English ones when the query mixes scripts).
+  const rawTokens = q.split(/[^\p{L}\p{N}_]+/u).filter(Boolean)
   const keywords = rawTokens.filter((t) => t.length > 1 && !EXPLORE_STOPWORDS.has(t))
   if (!keywords.length) return { query, entryPoints: [], snippets: [], note: 'no usable keywords' }
 
@@ -166,13 +172,37 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     'iter', 'into', 'new', 'create', 'make', 'build', 'parse',
     'fmt', 'eq', 'hash', 'len', 'size', 'count',
   ])
-  for (const node of g.nodes.values()) {
+  // Per-node lowercase cache — every explore call paid 5 toLowerCase
+  // calls per symbol (name/qn/doc/sig/path), which on Django (43k
+  // symbols) meant ~215k string allocations every query. Cache on
+  // the node so subsequent queries reuse it.
+  // Candidate prefilter — only score symbols whose name/qn or file
+  // path contains at least one keyword as a substring. Same set as
+  // the old "score > 0" filter, but resolved through the byName /
+  // byFile indexes so we never iterate the full node map on a hot
+  // query. On Django this is the difference between 43k symbol
+  // scans and ~50–500 candidate scans per query.
+  const candidates = new Set()
+  for (const k of keywords) {
+    for (const [n, ids] of g.byName) {
+      if (n.includes(k)) for (const id of ids) candidates.add(id)
+    }
+    for (const [f, ids] of g.byFile) {
+      if (f.toLowerCase().includes(k)) for (const id of ids) candidates.add(id)
+    }
+  }
+  for (const id of candidates) {
+    const node = g.nodes.get(id)
+    if (!node) continue
     let score = 0
-    const name = (node.name || '').toLowerCase()
-    const qn   = (node.qualifiedName || '').toLowerCase()
-    const doc  = (node.doc || '').toLowerCase()
-    const sig  = (node.signature || '').toLowerCase()
-    const filePath = (node.file || '').toLowerCase()
+    if (!node._lcName) {
+      node._lcName = (node.name || '').toLowerCase()
+      node._lcQn   = (node.qualifiedName || '').toLowerCase()
+      node._lcDoc  = (node.doc || '').toLowerCase()
+      node._lcSig  = (node.signature || '').toLowerCase()
+      node._lcPath = (node.file || '').toLowerCase()
+    }
+    const name = node._lcName, qn = node._lcQn, doc = node._lcDoc, sig = node._lcSig, filePath = node._lcPath
     // Track whether the path or the qualified name carried a hit —
     // those are much stronger signals than a bare method-name match,
     // because they imply the symbol lives in the area the query is
@@ -182,8 +212,8 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
       if (name === k)              score += 50
       else if (name.includes(k))   score += 18
       if (qn !== name && qn.includes(k)) { score += 12; qnHit = true }
-      if (sig.includes(k))         score += 4
-      if (doc.includes(k))         score += 3
+      if (sig && sig.includes(k))  score += 4
+      if (doc && doc.includes(k))  score += 3
       // File path / directory match — the symbol lives in code
       // that's named after the topic. Very strong signal in
       // monorepos (Next.js's packages/next/src/server/* matches a
@@ -194,6 +224,12 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
         pathHit = true
       }
     }
+    // No keyword matched anything — skip before the exported / kind
+    // bonuses can push the score above zero and slip an unrelated
+    // symbol into the results. Otherwise a query in a script the
+    // codebase doesn't use (e.g. Korean against an all-English repo)
+    // returns the first N exported classes, which is misleading.
+    if (score === 0) continue
     // Generic method names by themselves are weak signals. If the
     // ONLY thing matching is a generic name with no path/qn corroboration,
     // damp hard so a Rust iterator's `next()` can't outrank a real
