@@ -1713,6 +1713,26 @@ async function handleControlRequest(req, res) {
               }
             }
             await g.build(entries, fileImports)
+            // ─── Route → handler edges ───────────────────────────
+            // Walk every file's `routes` list (extracted by file
+            // mode) and link the route to the named handler symbol.
+            // codegraph doesn't do this — its index is method/class
+            // only, with no notion of HTTP path. Ours does.
+            for (const f of scanner.files.values()) {
+              if (!f.routes?.length) continue
+              for (const route of f.routes) {
+                if (!route.handler) continue
+                const handlerNode = g.resolveCall(f.id, route.handler, { allowAny: true })
+                if (!handlerNode) continue
+                g.addEdge({
+                  source: 'route:' + (route.method || 'ANY') + ' ' + route.path,
+                  target: handlerNode.id,
+                  kind: 'route',
+                  line: 0,
+                  meta: { method: route.method, path: route.path, definedIn: f.id },
+                })
+              }
+            }
             symbolGraph = g
             _symbolBuilding = null
             return g

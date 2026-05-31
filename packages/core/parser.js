@@ -615,9 +615,12 @@ function extractJSRoutes(content) {
   }
 
   // Method handlers — capture the receiver name too so we can resolve
-  // its mount prefix from `mounts`.
+  // its mount prefix from `mounts`. The trailing capture grabs whatever
+  // follows the path string up to the closing `)` so we can pluck a
+  // named handler identifier (`getUserHandler` in
+  // `app.get('/u', getUserHandler)`).
   const methodRe = new RegExp(
-    `\\b(\\w+)\\.(${HTTP_METHODS.join('|')})\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`,
+    `\\b(\\w+)\\.(${HTTP_METHODS.join('|')})\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]\\s*,([^)]*)\\)`,
     'g'
   )
   // Only treat the call as a route if the receiver looks like a
@@ -644,7 +647,17 @@ function extractJSRoutes(content) {
     const full = prefix && localPath.startsWith('/')
       ? prefix + (localPath === '/' ? '' : localPath)
       : localPath
-    routes.push({ method, path: full })
+    // Pull a named handler identifier from the remaining args, if any.
+    // Catches `app.get('/u', getUser)` and `app.get('/u', auth, getUser)`
+    // but skips inline arrows / function expressions which can't be
+    // matched to a symbol anyway.
+    const handlerStr = (m[4] || '').trim()
+    let handler = null
+    const handlerMatch = handlerStr.match(/([A-Za-z_$][\w$]*)\s*$/)
+    if (handlerMatch && !/(=>|function|\{)/.test(handlerStr)) {
+      handler = handlerMatch[1]
+    }
+    routes.push({ method, path: full, handler })
   }
   // Fastify object form: fastify.route({ method: 'GET', url: '/users' })
   const fastifyObjRe = /\.route\s*\(\s*\{[^}]*?method\s*:\s*['"`](\w+)['"`][^}]*?url\s*:\s*['"`]([^'"`]+)['"`]/g
