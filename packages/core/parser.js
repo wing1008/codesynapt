@@ -107,6 +107,16 @@ export function parseFile(absPath, content, ext) {
     r.dynamicPatterns = detectDynamicPatterns(content, ext)
     r.envUsage = extractEnvUsage(content, ext)
     r.dbModels = extractDbModels(content, ext)
+    // Cross-language / FFI edges — append to the regular imports list
+    // so the existing edge-building pipeline picks them up.
+    let ffi = []
+    if (['js','jsx','mjs','cjs','ts','tsx'].includes(ext)) ffi = extractJsFfi(content)
+    else if (ext === 'py' || ext === 'pyw') ffi = extractPyFfi(content)
+    else if (ext === 'java' || ext === 'kt') ffi = extractJavaFfi(content)
+    else if (ext === 'rs') ffi = extractRustFfi(content)
+    if (ffi.length) {
+      r.imports = (r.imports || []).concat(ffi.filter((e) => e.kind === 'ffi'))
+    }
     r.confidence = confidenceFor(r.dynamicPatterns, content, ext)
     return r
   } catch {
@@ -761,6 +771,66 @@ function extractSQLAlchemyModels(content) {
   return models
 }
 
+// Cross-language / FFI imports — point at a non-source artefact
+// that another file in the repo provides (WASM / .node addon /
+// shared library). Returns extra `imports` entries with
+// kind: 'ffi' so the regular resolver can link them when the
+// target file is indexed.
+function extractJsFfi(content) {
+  const out = []
+  // WebAssembly:  fetch('x.wasm') / readFileSync('x.wasm')
+  //               WebAssembly.compile(await fetch('x.wasm').then(r=>r.arrayBuffer()))
+  const wasmRe = /['"`]([^'"`]+\.wasm)['"`]/g
+  let m
+  while ((m = wasmRe.exec(content))) out.push({ spec: m[1], kind: 'ffi' })
+  // Native node addons:   require('./build/Release/foo.node')
+  const nodeRe = /['"`]([^'"`]+\.node)['"`]/g
+  while ((m = nodeRe.exec(content))) out.push({ spec: m[1], kind: 'ffi' })
+  // node-bindings:        require('bindings')('foo')
+  const bindingsRe = /require\s*\(\s*['"`]bindings['"`]\s*\)\s*\(\s*['"`]([^'"`]+)['"`]/g
+  while ((m = bindingsRe.exec(content))) out.push({ spec: m[1] + '.node', kind: 'ffi' })
+  return out
+}
+
+function extractPyFfi(content) {
+  const out = []
+  // ctypes:  ctypes.CDLL('./libfoo.so') / CDLL('foo.dylib')
+  const dllRe = /(?:ctypes\.)?CDLL\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+  let m
+  while ((m = dllRe.exec(content))) out.push({ spec: m[1], kind: 'ffi' })
+  // cffi:    ffi.dlopen('foo.so')
+  const cffiRe = /\.dlopen\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+  while ((m = cffiRe.exec(content))) out.push({ spec: m[1], kind: 'ffi' })
+  // CPython convention: `import _foo` / `from _foo import ...`
+  // (single leading underscore => compiled extension)
+  const extRe = /^(?:from\s+_(\w+)\s+import|import\s+_(\w+))/gm
+  while ((m = extRe.exec(content))) {
+    const mod = m[1] || m[2]
+    if (mod) out.push({ spec: '_' + mod, kind: 'ffi' })
+  }
+  return out
+}
+
+// Java JNI:  System.loadLibrary("foo") → foo.so / foo.dll target
+function extractJavaFfi(content) {
+  const out = []
+  const re = /System\.loadLibrary\s*\(\s*"([^"]+)"\s*\)/g
+  let m
+  while ((m = re.exec(content))) out.push({ spec: m[1], kind: 'ffi' })
+  return out
+}
+
+// Rust:  extern "C" { fn foo(...); } blocks signal FFI boundary.
+// We just count the block existence as a coarse marker.
+function extractRustFfi(content) {
+  const out = []
+  const re = /extern\s+"C"\s*\{/g
+  let count = 0
+  while (re.exec(content)) count++
+  if (count > 0) out.push({ spec: 'extern-c', kind: 'ffi-marker', count })
+  return out
+}
+
 function extractMongooseModels(content) {
   if (!/\bmongoose\b/.test(content)) return []
   const models = []
@@ -1382,6 +1452,11 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
 }
 
 function tryResolve(basePath, rootAbs, validIds) {
+  // If basePath itself is an indexed file (e.g. `foo.wasm` / `foo.node`),
+  // match directly. Without this, FFI imports like `require('./addon.node')`
+  // would never resolve because tryResolve only appends extensions.
+  const directId = idOf(rootAbs, basePath)
+  if (validIds.has(directId)) return directId
   // Direct + extensions
   for (const ext of RESOLVE_EXTS) {
     const cand = basePath + ext
