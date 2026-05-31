@@ -1713,6 +1713,64 @@ async function handleControlRequest(req, res) {
               }
             }
             await g.build(entries, fileImports)
+            // ─── Test ↔ source pairing ───────────────────────────
+            // Detect common test-file naming conventions and emit
+            // `tests` edges from test symbols to their target source
+            // symbol (same name, or whose name is a substring).
+            const findSourcePair = (fileId) => {
+              let m
+              // foo.test.ts → foo.ts   /   foo.spec.tsx → foo.tsx
+              if ((m = fileId.match(/^(.*)\.(test|spec)\.(\w+)$/))) {
+                return m[1] + '.' + m[3]
+              }
+              // src/foo/__tests__/Bar.test.ts → src/foo/Bar.ts
+              if ((m = fileId.match(/^(.*?)\/__tests__\/(.+?)\.(test|spec)\.(\w+)$/))) {
+                return m[1] + '/' + m[2] + '.' + m[4]
+              }
+              // tests/path/Bar.test.ts → src/path/Bar.ts  (best-effort)
+              if ((m = fileId.match(/^tests?\/(.+?)\.(test|spec)\.(\w+)$/))) {
+                const candidate = 'src/' + m[1] + '.' + m[3]
+                return candidate
+              }
+              // Python: tests/test_foo.py → foo.py / src/foo.py
+              if ((m = fileId.match(/^(.*?\/)?tests?\/test_(.+)\.py$/))) {
+                return (m[1] || '') + m[2] + '.py'
+              }
+              if ((m = fileId.match(/^(.*\/)?test_(.+)\.py$/))) {
+                return (m[1] || '') + m[2] + '.py'
+              }
+              // Go: foo_test.go → foo.go
+              if ((m = fileId.match(/^(.+)_test\.go$/))) return m[1] + '.go'
+              // Rust: tests/foo.rs → src/foo.rs
+              if ((m = fileId.match(/^tests\/(.+)\.rs$/))) return 'src/' + m[1] + '.rs'
+              return null
+            }
+            for (const f of scanner.files.values()) {
+              const srcFileId = findSourcePair(f.id)
+              if (!srcFileId || !scanner.files.has(srcFileId)) continue
+              const testSyms = g.byFile.get(f.id)
+              const srcSyms = g.byFile.get(srcFileId)
+              if (!testSyms || !srcSyms) continue
+              for (const testId of testSyms) {
+                const testSym = g.nodes.get(testId)
+                if (!testSym) continue
+                const tn = testSym.name.toLowerCase()
+                for (const srcId of srcSyms) {
+                  const srcSym = g.nodes.get(srcId)
+                  if (!srcSym) continue
+                  const sn = srcSym.name.toLowerCase()
+                  // Exact match wins; otherwise substring with a length
+                  // floor to avoid `t` / `it` matching everything.
+                  if (tn === sn || (sn.length >= 4 && tn.includes(sn))) {
+                    g.addEdge({
+                      source: testId, target: srcId, kind: 'tests',
+                      line: testSym.startLine,
+                    })
+                    break    // one source-symbol target per test symbol is enough
+                  }
+                }
+              }
+            }
             // ─── Route → handler edges ───────────────────────────
             // Walk every file's `routes` list (extracted by file
             // mode) and link the route to the named handler symbol.
