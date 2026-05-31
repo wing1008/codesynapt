@@ -1674,10 +1674,43 @@ async function handleControlRequest(req, res) {
             // actually imports (Phase 2-B cross-file resolver).
             // Asset edges (HTML→jQuery etc) aren't real imports.
             const fileImports = new Map()
+            const reexports = new Map()
             for (const e of scanner.edges) {
-              if (e.k === 'asset' || e.kind === 'asset') continue
+              const kind = e.k || e.kind
+              if (kind === 'asset') continue
               if (!fileImports.has(e.s)) fileImports.set(e.s, new Set())
               fileImports.get(e.s).add(e.t)
+              if (kind === 'reexport') {
+                if (!reexports.has(e.s)) reexports.set(e.s, new Set())
+                reexports.get(e.s).add(e.t)
+              }
+            }
+            // Re-export chain: `import { X } from './barrel'` where
+            // barrel does `export * from './foo'` should resolve X
+            // against foo too. BFS-expand each file's imports through
+            // the re-export graph so chains of any depth are reachable.
+            const reachCache = new Map()
+            function reExportReach(start) {
+              if (reachCache.has(start)) return reachCache.get(start)
+              const out = new Set()
+              const stack = [start]
+              const visited = new Set()
+              while (stack.length) {
+                const cur = stack.pop()
+                if (visited.has(cur)) continue
+                visited.add(cur)
+                out.add(cur)
+                const next = reexports.get(cur)
+                if (next) for (const n of next) stack.push(n)
+              }
+              reachCache.set(start, out)
+              return out
+            }
+            for (const [src, set] of fileImports) {
+              for (const target of [...set]) {
+                const reach = reExportReach(target)
+                for (const r of reach) set.add(r)
+              }
             }
             await g.build(entries, fileImports)
             symbolGraph = g
