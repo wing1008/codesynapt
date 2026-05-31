@@ -341,7 +341,11 @@ function extractReferences(content, fileId, index) {
     FunctionDeclaration: {
       enter(path) {
         const n = path.node
-        if (!n.id?.name || !n.loc) return enclosing.push(null)
+        // babel/traverse rejects any non-undefined return from a
+        // visitor enter/exit — `return x.push(...)` (number) and
+        // `return x.pop()` (element) both throw "Unexpected return
+        // value". Use bare `return` instead.
+        if (!n.id?.name || !n.loc) { enclosing.push(null); return }
         pushEnclosing(n.id.name, n.loc.start.line)
         pushTypes(); harvestTypesFrom(n)
       },
@@ -391,7 +395,7 @@ function extractReferences(content, fileId, index) {
     ClassMethod: {
       enter(path) {
         const n = path.node
-        if (!n.key || !n.loc) return enclosing.push(null)
+        if (!n.key || !n.loc) { enclosing.push(null); return }
         const name = n.key.name || n.key.value || '(method)'
         const qualified = currentClass ? `${currentClass}.${name}` : name
         pushEnclosing(qualified, n.loc.start.line)
@@ -402,15 +406,15 @@ function extractReferences(content, fileId, index) {
     ArrowFunctionExpression: {
       enter(path) {
         const parent = path.parentPath?.node
-        if (parent?.type !== 'VariableDeclarator') return enclosing.push(null)
+        if (parent?.type !== 'VariableDeclarator') { enclosing.push(null); return }
         const name = parent.id?.name
-        if (!name || !path.node.loc) return enclosing.push(null)
+        if (!name || !path.node.loc) { enclosing.push(null); return }
         pushEnclosing(name, path.node.loc.start.line)
         pushTypes(); harvestTypesFrom(path.node)
       },
       exit(path) {
         const parent = path.parentPath?.node
-        if (parent?.type !== 'VariableDeclarator') return enclosing.pop()
+        if (parent?.type !== 'VariableDeclarator') { enclosing.pop(); return }
         const name = parent.id?.name
         if (name && path.node.loc) { enclosing.pop(); popTypes() }
         else enclosing.pop()

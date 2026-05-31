@@ -39,6 +39,16 @@ function loadProgramFor(rootAbs, allFileIds) {
   if (cached) return cached
   const t = loadTS()
   if (!t) return null
+  // Memory cap. createProgram loads the whole TS source set + AST +
+  // TypeChecker bindings; observed RSS on Next.js (20k files) was
+  // ~3.7 GB. Above the cap we refuse and let the caller fall back
+  // to babel. Override with CS_TSC_MAX_FILES.
+  const MAX_FILES = parseInt(process.env.CS_TSC_MAX_FILES || '30000', 10)
+  const idArr = [...allFileIds]
+  if (idArr.length > MAX_FILES) {
+    console.warn(`[symbol-tsc] ${idArr.length} files > CS_TSC_MAX_FILES=${MAX_FILES}; refusing to build TS Program. Set CS_TSC_MAX_FILES higher to override.`)
+    return null
+  }
   // Find tsconfig.json (or jsconfig.json) — use compiler options if
   // present, otherwise reasonable defaults.
   let compilerOptions = {

@@ -1895,11 +1895,23 @@ async function handleControlRequest(req, res) {
             // tsc mode: build the TS Program once over every JS/TS
             // file in the project before the per-file parser loop
             // starts. Cached by rootAbs; cleared on project swap.
+            // If loadProgramFor refuses (file count above the memory
+            // cap, or typescript not installed), we re-register the
+            // babel parser so .ts/.tsx files still get symbols.
             if (SYMBOL_PARSER_MODE === 'tsc' && _tscParserModule?.isAvailable?.()) {
               try {
-                _tscParserModule.loadProgramFor(currentRoot, entries.map((e) => e.id))
+                const prog = _tscParserModule.loadProgramFor(currentRoot, entries.map((e) => e.id))
+                if (!prog) {
+                  console.warn('[symbol] tsc Program refused — falling back to babel for ts/tsx/js/jsx')
+                  for (const ext of ['ts','tsx','js','jsx','mjs','cjs']) {
+                    registerParser([ext], jsSymbolParser)
+                  }
+                }
               } catch (e) {
                 console.error('[symbol] tsc Program init failed:', e.message)
+                for (const ext of ['ts','tsx','js','jsx','mjs','cjs']) {
+                  registerParser([ext], jsSymbolParser)
+                }
               }
             }
             // Feed file-mode imports to the symbol graph so call
