@@ -203,19 +203,10 @@ function extractReferences(content, fileId, index) {
   const enclosing = makeEnclosingStack()
   let currentClass = null
 
-  // Helper: find the best matching SymbolNode for a name.
-  // Prefer symbols in the same file, then anything else with that name.
+  // Use the SymbolGraph's import-aware resolver: same file first,
+  // then any file the caller actually imports, then anything.
   function resolveByName(name) {
-    const set = index.byName.get(name.toLowerCase())
-    if (!set || !set.size) return null
-    let best = null
-    for (const id of set) {
-      const node = index.nodes.get(id)
-      if (!node) continue
-      if (node.file === fileId) return node    // same-file wins immediately
-      if (!best) best = node
-    }
-    return best
+    return index.resolveCall ? index.resolveCall(fileId, name) : null
   }
 
   function pushEnclosing(name, startLine) {

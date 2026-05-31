@@ -128,6 +128,8 @@ function nameOf(node) {
   // function_declaration doesn't expose a `name` field — the function
   // identifier lands as a direct `simple_identifier` child instead,
   // so we walk children for any identifier-shaped node as a fallback.
+  // For Swift `extension X { … }` the type lands inside `user_type`
+  // (a one-level wrapper around `type_identifier`); we peek through.
   const named = node.childForFieldName?.('name')
   if (named) return named.text
   for (let i = 0; i < node.childCount; i++) {
@@ -137,6 +139,13 @@ function nameOf(node) {
      || c.type === 'type_identifier'
      || c.type === 'field_identifier'
      || c.type === 'property_identifier') return c.text
+    if (c.type === 'user_type') {
+      // user_type → type_identifier (Swift extension's target type).
+      for (let j = 0; j < c.childCount; j++) {
+        const g = c.child(j)
+        if (g.type === 'type_identifier' || g.type === 'simple_identifier') return g.text
+      }
+    }
   }
   return null
 }
@@ -332,17 +341,12 @@ const KEYWORDS = {
 }
 
 function makeResolver(fileId, index) {
+  // Delegate to the SymbolGraph's import-aware resolver so cross-file
+  // calls land on the file the caller actually imports, not whichever
+  // file was hashed first.
   return function resolve(name) {
-    const set = index.byName.get(name.toLowerCase())
-    if (!set || !set.size) return null
-    let any = null
-    for (const id of set) {
-      const node = index.nodes.get(id)
-      if (!node) continue
-      if (node.file === fileId) return node
-      if (!any) any = node
-    }
-    return any
+    return index.resolveCall ? index.resolveCall(fileId, name)
+      : (index.byName.get(name.toLowerCase()) ? null : null)
   }
 }
 

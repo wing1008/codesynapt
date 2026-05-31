@@ -171,17 +171,7 @@ function extractReferences(content, fileId, index) {
   }
 
   function resolve(name) {
-    const set = index.byName.get(name.toLowerCase())
-    if (!set || !set.size) return null
-    for (const id of set) {
-      const node = index.nodes.get(id)
-      if (node?.file === fileId) return node
-    }
-    for (const id of set) {
-      const node = index.nodes.get(id)
-      if (node) return node
-    }
-    return null
+    return index.resolveCall ? index.resolveCall(fileId, name) : null
   }
 
   const lines = content.split('\n')

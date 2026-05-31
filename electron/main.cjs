@@ -146,9 +146,19 @@ function buildExploreResponse(g, query, budget = 8000) {
   }
   scored.sort((a, b) => b.score - a.score)
 
-  // Pick top entry points (high-score nodes) and pull source for each
-  // until we hit the budget. Approximate tokens = chars / 4.
-  const entryPoints = scored.slice(0, 8).map((s) => s.node)
+  // Diversify entry points across files — without this a single file
+  // with many same-named methods (Validation.swift's `validate` etc.)
+  // can take all 8 slots and crowd out other answers.
+  const PER_FILE_CAP = 3
+  const fileCounts = new Map()
+  const entryPoints = []
+  for (const { node } of scored) {
+    if (entryPoints.length >= 8) break
+    const c = fileCounts.get(node.file) || 0
+    if (c >= PER_FILE_CAP) continue
+    fileCounts.set(node.file, c + 1)
+    entryPoints.push(node)
+  }
   const snippets = []
   let used = 0
   const MAX_LINES_PER_SNIPPET = 40
@@ -1655,7 +1665,17 @@ async function handleControlRequest(req, res) {
             const entries = [...scanner.files.values()]
               .filter((f) => f.absPath && f.ext)
               .map((f) => ({ id: f.id, absPath: f.absPath, ext: f.ext }))
-            await g.build(entries)
+            // Feed file-mode imports to the symbol graph so call
+            // resolution can prefer targets in files the caller
+            // actually imports (Phase 2-B cross-file resolver).
+            // Asset edges (HTML→jQuery etc) aren't real imports.
+            const fileImports = new Map()
+            for (const e of scanner.edges) {
+              if (e.k === 'asset' || e.kind === 'asset') continue
+              if (!fileImports.has(e.s)) fileImports.set(e.s, new Set())
+              fileImports.get(e.s).add(e.t)
+            }
+            await g.build(entries, fileImports)
             symbolGraph = g
             _symbolBuilding = null
             return g

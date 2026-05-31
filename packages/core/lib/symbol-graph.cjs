@@ -33,6 +33,10 @@ class SymbolGraph {
     // Adjacency for fast callers/callees lookup.
     this.outAdj = new Map()     // symbolId → Set<targetId>
     this.inAdj  = new Map()     // symbolId → Set<sourceId>
+    // File-mode imports — fed in from the host (scanner.edges). Lets
+    // call resolution disambiguate same-name symbols across files
+    // by preferring targets in files the caller actually imports.
+    this.fileImports = new Map() // fileId → Set<importedFileId>
     this.builtAt  = 0
     this.fileCount = 0
     this.scanMs = 0
@@ -45,9 +49,31 @@ class SymbolGraph {
     this.byName.clear()
     this.outAdj.clear()
     this.inAdj.clear()
+    this.fileImports.clear()
     this.builtAt = 0
     this.fileCount = 0
     this.scanMs = 0
+  }
+
+  // Best symbol match for `name` called from `fromFileId`. Preference:
+  //   1) same file
+  //   2) a file directly imported by `fromFileId`
+  //   3) any file
+  // Used by language parsers via index.resolveCall(...). Falling back
+  // to byName lookup is the existing behaviour.
+  resolveCall(fromFileId, name) {
+    const set = this.byName.get((name || '').toLowerCase())
+    if (!set || !set.size) return null
+    let sameFile = null, imported = null, any = null
+    const importsOf = this.fileImports.get(fromFileId)
+    for (const id of set) {
+      const node = this.nodes.get(id)
+      if (!node) continue
+      if (node.file === fromFileId) { sameFile = node; break }
+      if (!imported && importsOf && importsOf.has(node.file)) imported = node
+      if (!any) any = node
+    }
+    return sameFile || imported || any
   }
 
   addNode(node) {
@@ -98,9 +124,14 @@ class SymbolGraph {
   // ─── Scanning ──────────────────────────────────────────────────
   // `fileEntries` is an iterable of { id, absPath, ext } — typically
   // derived from the file-mode Scanner's `files` map.
-  async build(fileEntries) {
+  // `fileImports` (optional) is a Map<fileId, Set<importedFileId>>
+  // built from the file-mode edge list; lets resolveCall prefer
+  // imported targets.
+  async build(fileEntries, fileImports = null) {
     const start = Date.now()
     this.clear()
+    // Set imports *after* clear so the host-provided map survives.
+    if (fileImports) this.fileImports = fileImports
     // Pass 1 — symbols. We need every symbol indexed before we can
     // resolve references in pass 2.
     let fileCount = 0

@@ -13,19 +13,10 @@
 
 function mkId(file, name, line) { return `${file}#${name}@${line}` }
 
-// Generic name-based resolver: prefers same-file hits, then anything.
+// Import-aware resolver: same file → caller's imports → anything.
 function makeResolver(fileId, index) {
   return function resolve(name) {
-    const set = index.byName.get(name.toLowerCase())
-    if (!set || !set.size) return null
-    let any = null
-    for (const id of set) {
-      const node = index.nodes.get(id)
-      if (!node) continue
-      if (node.file === fileId) return node
-      if (!any) any = node
-    }
-    return any
+    return index.resolveCall ? index.resolveCall(fileId, name) : null
   }
 }
 
