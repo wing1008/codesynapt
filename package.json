@@ -76,6 +76,7 @@
     "@babel/traverse": "^7.24.0",
     "chokidar": "^3.6.0",
     "tree-sitter-wasms": "^0.1.13",
+    "typescript": "^6.0.3",
     "web-tree-sitter": "^0.20.8"
   },
   "optionalDependencies": {

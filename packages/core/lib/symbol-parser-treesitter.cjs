@@ -103,12 +103,21 @@ const NODE_TYPES = {
     call:   ['method_invocation', 'object_creation_expression'],
   },
   kotlin: {
-    fn:     ['function_declaration'],
-    cls:    ['class_declaration', 'object_declaration'],
-    call:   ['call_expression'],
+    // Includes secondary constructors, property accessors (getter/setter
+    // bodies), and anonymous-initializer bodies — all of which contain
+    // call sites we were missing before.
+    fn:     ['function_declaration', 'secondary_constructor',
+             'getter', 'setter', 'anonymous_initializer'],
+    cls:    ['class_declaration', 'object_declaration', 'interface_declaration'],
+    call:   ['call_expression', 'infix_expression'],
   },
   swift: {
-    fn:     ['function_declaration', 'init_declaration', 'deinit_declaration'],
+    // tree-sitter-swift already maps `extension X { ... }` to a
+    // `class_declaration` node (with a `user_type` wrapper for the
+    // target type), so we don't enroll extension_declaration
+    // separately — it would double-count and break enclosing scopes.
+    fn:     ['function_declaration', 'init_declaration', 'deinit_declaration',
+             'subscript_declaration', 'computed_property'],
     cls:    ['class_declaration', 'protocol_declaration'],
     call:   ['call_expression'],
   },

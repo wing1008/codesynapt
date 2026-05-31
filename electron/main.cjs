@@ -55,6 +55,13 @@ const miscSymbolParsers = require('../packages/core/lib/symbol-parser-misc.cjs')
 // the WASM grammars aren't shipped (e.g. a stripped portable build).
 let _tsParserModule = null
 try { _tsParserModule = require('../packages/core/lib/symbol-parser-treesitter.cjs') } catch {}
+// Stage 4 — TypeScript compiler API integration. Opt-in via
+// CS_SYMBOL_PARSER=tsc, because building the TS Program loads every
+// file in the repo and is slower than babel for medium projects.
+// Worth it for accuracy on heavy-TS codebases where overloaded method
+// names (`save()` on many classes) need real type-checker resolution.
+let _tscParserModule = null
+try { _tscParserModule = require('../packages/core/lib/symbol-parser-tsc.cjs') } catch {}
 const SYMBOL_PARSER_MODE = process.env.CS_SYMBOL_PARSER || 'treesitter'
 
 function registerSymbolParsers() {
@@ -80,6 +87,15 @@ function registerSymbolParsers() {
     }
   } catch (e) {
     console.error('[symbol] tree-sitter init failed, falling back to regex:', e.message)
+  }
+  // Stage 4 override — TypeScript compiler API for .ts/.tsx/.js/.jsx
+  // when the user opts in. Provides true type-checker-resolved call
+  // edges (no more random matches across same-named methods).
+  if (SYMBOL_PARSER_MODE === 'tsc' && _tscParserModule?.isAvailable?.()) {
+    const tscP = _tscParserModule.makeParser()
+    for (const ext of ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs']) {
+      registerParser([ext], tscP)
+    }
   }
 }
 registerSymbolParsers()
@@ -259,6 +275,9 @@ async function startScanner(root) {
   // next /symbol/* request will rebuild against the new file set.
   symbolGraph = null
   _symbolBuilding = null
+  // tsc Program cache must also be cleared so we don't keep the old
+  // project's SourceFiles around.
+  try { _tscParserModule?.clearAllPrograms?.() } catch {}
   migrateLegacyHistoryDir(root)
   addRecent(root)
   scanner = new Scanner(root)
@@ -1704,6 +1723,16 @@ async function handleControlRequest(req, res) {
             const entries = [...scanner.files.values()]
               .filter((f) => f.absPath && f.ext)
               .map((f) => ({ id: f.id, absPath: f.absPath, ext: f.ext }))
+            // tsc mode: build the TS Program once over every JS/TS
+            // file in the project before the per-file parser loop
+            // starts. Cached by rootAbs; cleared on project swap.
+            if (SYMBOL_PARSER_MODE === 'tsc' && _tscParserModule?.isAvailable?.()) {
+              try {
+                _tscParserModule.loadProgramFor(currentRoot, entries.map((e) => e.id))
+              } catch (e) {
+                console.error('[symbol] tsc Program init failed:', e.message)
+              }
+            }
             // Feed file-mode imports to the symbol graph so call
             // resolution can prefer targets in files the caller
             // actually imports (Phase 2-B cross-file resolver).
