@@ -70,6 +70,10 @@ function registerSymbolParsers() {
   // without a shipped wasm.
   try {
     for (const ext of _tsParserModule.availableExtensions()) {
+      // TypeScript / TSX have no dedicated grammar in our bundled
+      // tree-sitter-wasms — the JS grammar is missing `interface`,
+      // type aliases, generics, etc. Keep babel for those.
+      if (ext === 'ts' || ext === 'tsx') continue
       const tsP = _tsParserModule.makeParser(ext)
       if (tsP) registerParser([ext], tsP)
     }

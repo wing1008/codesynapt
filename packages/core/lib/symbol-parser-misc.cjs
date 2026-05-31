@@ -13,10 +13,12 @@
 
 function mkId(file, name, line) { return `${file}#${name}@${line}` }
 
-// Import-aware resolver: same file → caller's imports → anything.
+// Regex parsers only emit `call` edges (no expression-level ref
+// pass), so the any-file fallback is on by default — name + `(`
+// is already a strong signal.
 function makeResolver(fileId, index) {
   return function resolve(name) {
-    return index.resolveCall ? index.resolveCall(fileId, name) : null
+    return index.resolveCall ? index.resolveCall(fileId, name, { allowAny: true }) : null
   }
 }
 

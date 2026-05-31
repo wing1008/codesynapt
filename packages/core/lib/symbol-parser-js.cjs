@@ -15,6 +15,27 @@
 const parser = require('@babel/parser')
 const traverse = require('@babel/traverse').default
 
+// Built-ins / globals to skip when emitting identifier-reference
+// edges. Otherwise every `console.log`, `Math.max`, `Array.from` etc.
+// would generate a spurious edge to a same-named user symbol.
+const JS_BUILTINS = new Set([
+  'console','window','document','globalThis','process','require','module',
+  'exports','__dirname','__filename','Buffer','Math','Object','Array',
+  'String','Number','Boolean','Date','RegExp','Error','TypeError',
+  'RangeError','SyntaxError','Promise','Symbol','Map','Set','WeakMap',
+  'WeakSet','JSON','Reflect','Proxy','Function','undefined','null','true',
+  'false','NaN','Infinity','this','self','super','arguments','typeof',
+  'instanceof','void','delete','new','in','of','yield','await','async',
+  'function','class','const','let','var','if','else','for','while','do',
+  'switch','case','break','continue','return','throw','try','catch',
+  'finally','default','export','import','from','as','static','public',
+  'private','protected','readonly','abstract','enum','interface','type',
+  'namespace','module','declare','React','setTimeout','setInterval',
+  'clearTimeout','clearInterval','fetch','URL','URLSearchParams',
+  'parseInt','parseFloat','isNaN','isFinite','encodeURI','decodeURI',
+  'encodeURIComponent','decodeURIComponent',
+])
+
 const JS_PLUGINS = [
   'jsx', 'typescript', 'classProperties', 'classPrivateProperties',
   'classPrivateMethods', 'decorators-legacy', 'topLevelAwait',
@@ -203,10 +224,16 @@ function extractReferences(content, fileId, index) {
   const enclosing = makeEnclosingStack()
   let currentClass = null
 
-  // Use the SymbolGraph's import-aware resolver: same file first,
-  // then any file the caller actually imports, then anything.
-  function resolveByName(name) {
-    return index.resolveCall ? index.resolveCall(fileId, name) : null
+  // Two modes mirroring the tree-sitter parser. Calls allow the
+  // any-file fallback (`foo()` is a strong signal); plain references
+  // stay strict (same-file or imported file only) so noise edges
+  // don't proliferate when a local variable shares a name with
+  // some unrelated user symbol.
+  function resolveCall(name) {
+    return index.resolveCall ? index.resolveCall(fileId, name, { allowAny: true })  : null
+  }
+  function resolveRef(name) {
+    return index.resolveCall ? index.resolveCall(fileId, name, { allowAny: false }) : null
   }
 
   function pushEnclosing(name, startLine) {
@@ -278,7 +305,7 @@ function extractReferences(content, fileId, index) {
         name = callee.property.name
       }
       if (!name) return
-      const target = resolveByName(name)
+      const target = resolveCall(name)
       if (!target || target.id === src) return
       edges.push({
         source: src,
@@ -286,6 +313,77 @@ function extractReferences(content, fileId, index) {
         kind: 'call',
         line: path.node.loc?.start.line || 0,
       })
+    },
+    // Expression-level references — non-call identifier usage. Lets us
+    // see "Foo is used here" even when it's not being invoked
+    // (passed as argument, assigned, type-annotated, etc.). codegraph
+    // counts every identifier as a node; we instead emit a `ref` edge
+    // to the matched symbol, which keeps the graph file-cheap.
+    Identifier(path) {
+      const src = enclosing.top()
+      if (!src) return
+      const name = path.node.name
+      if (!name || JS_BUILTINS.has(name)) return
+      // Skip identifiers that are the *declaration* itself (parameter
+      // names, the var/let/const id, the function/class name) — only
+      // count usages.
+      const parent = path.parent
+      if (!parent) return
+      if (parent.type === 'VariableDeclarator' && parent.id === path.node) return
+      if (parent.type === 'FunctionDeclaration' && parent.id === path.node) return
+      if (parent.type === 'ClassDeclaration' && parent.id === path.node) return
+      if (parent.type === 'Identifier') return  // shouldn't happen but guard
+      if ((parent.type === 'CallExpression' || parent.type === 'NewExpression')
+          && parent.callee === path.node) return  // already counted as call
+      if (parent.type === 'MemberExpression' && parent.property === path.node && !parent.computed) return
+      if (parent.type === 'ObjectProperty' && parent.key === path.node && !parent.computed) return
+      if (parent.type === 'ImportSpecifier' || parent.type === 'ImportDefaultSpecifier') return
+      if (parent.type === 'FunctionExpression' && parent.id === path.node) return
+      if (parent.type === 'ArrowFunctionExpression') return  // params handled below
+      if (parent.type === 'AssignmentPattern' || parent.type === 'RestElement') return
+      // Skip parameters of the enclosing function.
+      const fnParent = path.findParent((p) => p.isFunction?.() || p.isClassMethod?.())
+      if (fnParent && fnParent.node.params?.some?.((p) => p === path.parent || p === path.node)) return
+      const target = resolveRef(name)
+      if (!target || target.id === src) return
+      edges.push({ source: src, target: target.id, kind: 'ref', line: path.node.loc?.start.line || 0 })
+    },
+    // Member access (`obj.method`) where `method` matches a known
+    // symbol — we treat it as a reference even without an invocation
+    // (e.g. `const x = obj.method` or `passing obj.method as cb`).
+    MemberExpression(path) {
+      const src = enclosing.top()
+      if (!src) return
+      if (path.parent?.type === 'CallExpression' && path.parent.callee === path.node) return
+      const prop = path.node.property
+      if (!prop || prop.type !== 'Identifier') return
+      const target = resolveRef(prop.name)
+      if (!target || target.id === src) return
+      edges.push({ source: src, target: target.id, kind: 'ref', line: path.node.loc?.start.line || 0 })
+    },
+    // JSX `<Component … />` — the element name is a symbol reference.
+    JSXIdentifier(path) {
+      const src = enclosing.top()
+      if (!src) return
+      const name = path.node.name
+      // Tag names that start lowercase are HTML primitives, not React
+      // components. React component naming convention catches the rest.
+      if (!name || !/^[A-Z]/.test(name)) return
+      const target = resolveRef(name)
+      if (!target || target.id === src) return
+      edges.push({ source: src, target: target.id, kind: 'jsx-ref', line: path.node.loc?.start.line || 0 })
+    },
+    // TypeScript type annotations / generic params — `x: Foo`,
+    // `Array<Foo>`, `function f(): Foo`, etc.
+    TSTypeReference(path) {
+      const src = enclosing.top()
+      if (!src) return
+      const name = path.node.typeName?.name
+              || path.node.typeName?.right?.name      // qualified Name
+      if (!name) return
+      const target = resolveRef(name)
+      if (!target || target.id === src) return
+      edges.push({ source: src, target: target.id, kind: 'type-ref', line: path.node.loc?.start.line || 0 })
     },
   })
   // De-dup (same source→target multiple times is noise)

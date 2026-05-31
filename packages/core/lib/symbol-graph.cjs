@@ -58,10 +58,13 @@ class SymbolGraph {
   // Best symbol match for `name` called from `fromFileId`. Preference:
   //   1) same file
   //   2) a file directly imported by `fromFileId`
-  //   3) any file
-  // Used by language parsers via index.resolveCall(...). Falling back
-  // to byName lookup is the existing behaviour.
-  resolveCall(fromFileId, name) {
+  // We deliberately *do not* fall back to "any file with that name"
+  // — that would link a local `request` variable in utils.ts to an
+  // unrelated `request()` function in some other file just because
+  // they share a name. AI agents downstream would get noise edges
+  // and follow false trails. Conservative beats clever here.
+  // If the host wants the loose match, set `allowAny: true`.
+  resolveCall(fromFileId, name, { allowAny = false } = {}) {
     const set = this.byName.get((name || '').toLowerCase())
     if (!set || !set.size) return null
     let sameFile = null, imported = null, any = null
@@ -73,7 +76,7 @@ class SymbolGraph {
       if (!imported && importsOf && importsOf.has(node.file)) imported = node
       if (!any) any = node
     }
-    return sameFile || imported || any
+    return sameFile || imported || (allowAny ? any : null)
   }
 
   addNode(node) {

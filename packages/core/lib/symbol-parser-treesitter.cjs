@@ -239,15 +239,58 @@ function walk(node, ctx) {
     if (src) {
       const calleeName = extractCalleeName(node)
       if (calleeName && !ctx.kwSet?.has(calleeName)) {
-        const target = ctx.resolve(calleeName)
+        // Use the loose any-file fallback for calls (`foo()` is a
+        // strong signal); references below stay strict.
+        const target = ctx.resolve(calleeName, { forCall: true })
         if (target && target.id !== src) {
-          const key = src + '|' + target.id
+          const key = src + '|' + target.id + '|call'
           if (!ctx.seen.has(key)) {
             ctx.seen.add(key)
             ctx.edges.push({
               source: src, target: target.id, kind: 'call',
               line: node.startPosition.row + 1,
             })
+          }
+        }
+      }
+    }
+  }
+  // Plain identifier references (Phase 2-extra). Type identifiers
+  // get a separate `type-ref` kind so explore can prefer `call`/`ref`
+  // when picking entry points and type annotations don't dominate
+  // the edge count.
+  if (ctx.passTwo
+      && (t === 'identifier' || t === 'simple_identifier' || t === 'type_identifier' || t === 'field_identifier')) {
+    const src = ctx.fnStack[ctx.fnStack.length - 1]
+    if (src) {
+      const name = node.text
+      if (name && !ctx.kwSet?.has(name) && name.length > 1) {
+        // Skip if parent is a declaration node that owns this identifier
+        const parent = node.parent
+        const isDeclaration =
+          parent && (
+            cfg.fn?.includes(parent.type) ||
+            cfg.method?.includes(parent.type) ||
+            cfg.cls?.includes(parent.type) ||
+            parent.type === 'parameter' ||
+            parent.type === 'function_value_parameters' ||
+            parent.type === 'value_definition' ||
+            parent.type === 'simple_value_definition'
+          )
+        // Skip if parent is a call_expression and we're the callee
+        const isCallee = parent && cfg.call?.includes(parent.type)
+        if (!isDeclaration && !isCallee) {
+          const target = ctx.resolve(name)
+          if (target && target.id !== src) {
+            const edgeKind = t === 'type_identifier' ? 'type-ref' : 'ref'
+            const key = src + '|' + target.id + '|' + edgeKind
+            if (!ctx.seen.has(key)) {
+              ctx.seen.add(key)
+              ctx.edges.push({
+                source: src, target: target.id, kind: edgeKind,
+                line: node.startPosition.row + 1,
+              })
+            }
           }
         }
       }
@@ -341,12 +384,18 @@ const KEYWORDS = {
 }
 
 function makeResolver(fileId, index) {
-  // Delegate to the SymbolGraph's import-aware resolver so cross-file
-  // calls land on the file the caller actually imports, not whichever
-  // file was hashed first.
-  return function resolve(name) {
-    return index.resolveCall ? index.resolveCall(fileId, name)
-      : (index.byName.get(name.toLowerCase()) ? null : null)
+  // Two modes. `forCall=true` permits the loose "any same-named
+  // symbol" fallback — the `foo()` syntax is a strong-enough hint
+  // that the name is a real call target, and skipping the fallback
+  // misses too many cross-file calls. `forCall=false` (default,
+  // for plain identifier references) stays strict — same file or
+  // a file the caller actually imports — so local variables that
+  // happen to share a name with some unrelated function elsewhere
+  // don't produce a noise edge.
+  return function resolve(name, { forCall = false } = {}) {
+    return index.resolveCall
+      ? index.resolveCall(fileId, name, { allowAny: forCall })
+      : null
   }
 }
 

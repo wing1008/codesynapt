@@ -170,8 +170,10 @@ function extractReferences(content, fileId, index) {
     return best?.id || null
   }
 
+  // Python regex parser only emits `call` edges (no expression-level
+  // ref pass yet), so it always wants the loose any-file fallback.
   function resolve(name) {
-    return index.resolveCall ? index.resolveCall(fileId, name) : null
+    return index.resolveCall ? index.resolveCall(fileId, name, { allowAny: true }) : null
   }
 
   const lines = content.split('\n')
