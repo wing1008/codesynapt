@@ -1841,7 +1841,15 @@ async function handleControlRequest(req, res) {
       })
     }
 
-    if (!scanner) return writeJson(res, 503, { error: 'no folder loaded' })
+    if (!scanner) {
+      // POST /load boots the scanner from scratch — let it through
+      // the 503 gate. Headless instances (CS_HEADLESS=1) never call
+      // startScanner via did-finish-load, so /load is the only path
+      // to get a scanner running.
+      if (!(req.method === 'POST' && seg0 === 'load')) {
+        return writeJson(res, 503, { error: 'no folder loaded' })
+      }
+    }
 
     // ─── Symbol mode (codegraph-equivalent layer) ────────────────
     // First call builds the symbol graph against the current file set;
@@ -2626,13 +2634,22 @@ function pruneOldLogs() {
   }
 }
 
+// CS_HEADLESS=1 boots the control API + scanner without opening a
+// BrowserWindow. Useful for: bench harnesses, CI runs, or a second
+// instance on a non-default CS_PORT measuring alongside a live UI
+// without spawning a second visible window.
+const HEADLESS = process.env.CS_HEADLESS === '1'
+
 // ─── Single-instance lock ───────────────────────────────────────
 // Critical for clean version upgrades: when the NSIS installer launches
 // the new version (runAfterFinish), if an old build is somehow still
 // running, route the second-instance event to focus/restore instead of
 // spawning a duplicate process. Also prevents two desktop windows
 // fighting over port 7707.
-const gotSingleInstanceLock = app.requestSingleInstanceLock()
+// Headless mode skips the lock — bench harnesses and CI runs need to
+// boot a second instance on a non-default CS_PORT alongside a live
+// desktop without one killing the other.
+const gotSingleInstanceLock = HEADLESS ? true : app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else {
@@ -2653,13 +2670,22 @@ if (!gotSingleInstanceLock) {
 
 // ─── App lifecycle ──────────────────────────────────────────────
 app.whenReady().then(() => {
-  rebuildMenu()
-  createWindow()
+  if (!HEADLESS) {
+    rebuildMenu()
+    createWindow()
+  } else {
+    // Electron has no GUI-less mode — without at least one
+    // BrowserWindow the app exits as soon as whenReady() resolves.
+    // A 1×1 hidden window keeps the event loop alive and never
+    // surfaces on screen, which is what we want for bench harnesses
+    // and CI runs that only need the control API.
+    new BrowserWindow({ show: false, width: 1, height: 1 })
+  }
   startControlServer()
   pruneOldLogs()   // one-shot on boot; daily users get fresh pruning
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (!HEADLESS && BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 
   // Auto-updater (GitHub Releases). Disabled by env var for users who
@@ -2688,6 +2714,10 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  // Headless mode never opens a window, so this would fire as soon
+  // as the event loop ticks and quit before the control API became
+  // useful. Stay alive — caller terminates with SIGTERM.
+  if (HEADLESS) return
   stopScanner()
   stopControlServer()
   if (process.platform !== 'darwin') app.quit()
