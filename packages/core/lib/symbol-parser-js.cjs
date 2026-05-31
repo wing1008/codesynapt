@@ -258,14 +258,55 @@ function extractReferences(content, fileId, index) {
     enclosing.push(mkId(fileId, name, startLine))
   }
 
+  // Per-function variable → type maps. Pushed/popped with enclosing
+  // so a `const user = new User()` only affects calls inside that
+  // function. Best-effort: `new X()` and TS `let x: X = ...`.
+  const typeStack = []
+  function pushTypes() { typeStack.push(new Map()) }
+  function popTypes()  { typeStack.pop() }
+  function topTypes()  { return typeStack[typeStack.length - 1] || null }
+  function lookupVarType(name) {
+    for (let i = typeStack.length - 1; i >= 0; i--) {
+      const t = typeStack[i].get(name)
+      if (t) return t
+    }
+    return null
+  }
+  function harvestTypesFrom(fnNode) {
+    // Scan the function body for shallow `const x = new X()` and
+    // TS `let x: X = ...` patterns. Cheap: only direct VariableDeclarator
+    // children of the body, no nested traversal here.
+    const types = topTypes()
+    if (!types) return
+    const body = fnNode.body?.body
+    if (!Array.isArray(body)) return
+    for (const stmt of body) {
+      if (stmt.type !== 'VariableDeclaration') continue
+      for (const d of stmt.declarations || []) {
+        if (d.id?.type !== 'Identifier') continue
+        const varName = d.id.name
+        // TS annotation: `let user: User`
+        const ann = d.id.typeAnnotation?.typeAnnotation
+        const annName = extractTypeName(ann)
+        if (annName) { types.set(varName, annName); continue }
+        // `new User()` / `new User(args)` initializer
+        if (d.init?.type === 'NewExpression') {
+          const cls = extractTypeName(d.init.callee)
+          if (cls) types.set(varName, cls)
+        }
+      }
+    }
+  }
+
   traverse(ast, {
     FunctionDeclaration: {
       enter(path) {
         const n = path.node
         if (!n.id?.name || !n.loc) return enclosing.push(null)
         pushEnclosing(n.id.name, n.loc.start.line)
+        pushTypes(); harvestTypesFrom(n)
       },
-      exit() { enclosing.pop() },
+      exit() { enclosing.pop(); popTypes() },
     },
     ClassDeclaration: {
       enter(path) {
@@ -315,8 +356,9 @@ function extractReferences(content, fileId, index) {
         const name = n.key.name || n.key.value || '(method)'
         const qualified = currentClass ? `${currentClass}.${name}` : name
         pushEnclosing(qualified, n.loc.start.line)
+        pushTypes(); harvestTypesFrom(n)
       },
-      exit() { enclosing.pop() },
+      exit() { enclosing.pop(); popTypes() },
     },
     ArrowFunctionExpression: {
       enter(path) {
@@ -325,12 +367,13 @@ function extractReferences(content, fileId, index) {
         const name = parent.id?.name
         if (!name || !path.node.loc) return enclosing.push(null)
         pushEnclosing(name, path.node.loc.start.line)
+        pushTypes(); harvestTypesFrom(path.node)
       },
       exit(path) {
         const parent = path.parentPath?.node
         if (parent?.type !== 'VariableDeclarator') return enclosing.pop()
         const name = parent.id?.name
-        if (name && path.node.loc) enclosing.pop()
+        if (name && path.node.loc) { enclosing.pop(); popTypes() }
         else enclosing.pop()
       },
     },
@@ -339,12 +382,28 @@ function extractReferences(content, fileId, index) {
       if (!src) return
       const callee = path.node.callee
       let name = null
+      let receiverClass = null
       if (callee.type === 'Identifier') name = callee.name
       else if (callee.type === 'MemberExpression' && callee.property?.type === 'Identifier') {
         name = callee.property.name
+        // Type-aware: receiver is `user` → look up `user`'s declared
+        // type → resolve `User.method` qualified name first.
+        const obj = callee.object
+        if (obj?.type === 'Identifier') {
+          const t = lookupVarType(obj.name)
+          if (t) receiverClass = t
+        } else if (obj?.type === 'ThisExpression' && currentClass) {
+          receiverClass = currentClass
+        }
       }
       if (!name) return
-      const target = resolveCall(name)
+      // Try the type-qualified lookup first; fall back to the loose
+      // call resolver if nothing matches.
+      let target = null
+      if (receiverClass) {
+        target = resolveCall(`${receiverClass}.${name}`)
+      }
+      if (!target) target = resolveCall(name)
       if (!target || target.id === src) return
       edges.push({
         source: src,

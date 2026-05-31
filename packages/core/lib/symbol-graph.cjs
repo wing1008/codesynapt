@@ -65,7 +65,25 @@ class SymbolGraph {
   // and follow false trails. Conservative beats clever here.
   // If the host wants the loose match, set `allowAny: true`.
   resolveCall(fromFileId, name, { allowAny = false } = {}) {
-    const set = this.byName.get((name || '').toLowerCase())
+    if (!name) return null
+    // Type-aware lookup: `User.method` matches a symbol whose
+    // qualifiedName === 'User.method' exactly. Higher priority than
+    // name-only matches because it narrows from "any method named X"
+    // to "X defined on this class".
+    if (name.includes('.')) {
+      const tail = name.split('.').pop()
+      const set = this.byName.get(tail.toLowerCase())
+      if (set) {
+        for (const id of set) {
+          const node = this.nodes.get(id)
+          if (node?.qualifiedName === name) return node
+        }
+      }
+      // No qualifiedName match — fall back to the bare method name
+      // through the regular path below.
+      name = tail
+    }
+    const set = this.byName.get(name.toLowerCase())
     if (!set || !set.size) return null
     let sameFile = null, imported = null, any = null
     const importsOf = this.fileImports.get(fromFileId)
