@@ -225,6 +225,13 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     const seenClasses = new Set()
     const classes = []
     for (const node of entryPoints) {
+      // Only class-like nodes participate in the structural view —
+      // listing methods/functions as a "class" with no members was
+      // confusing in real-world results (e.g. `makeParser` showed
+      // up as a class). Skip plain functions/methods/types here.
+      if (node.kind !== 'class' && node.kind !== 'interface'
+       && node.kind !== 'struct' && node.kind !== 'enum'
+       && node.kind !== 'model') continue
       const className = node.qualifiedName.split('.')[0]
       if (seenClasses.has(className)) continue
       seenClasses.add(className)
