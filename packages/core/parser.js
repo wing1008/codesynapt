@@ -1289,6 +1289,14 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
     return tryResolve(path.join(rootAbs, spec), rootAbs, validIds)
   }
 
+  // Before giving up on a bare specifier, try TypeScript path mapping
+  // (`@excalidraw/common` → `./packages/common/src/index.ts`) for any
+  // ext that uses tsconfig — JS/TS, plus jsconfig for plain JS.
+  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(fromExt)) {
+    const r = resolveTsconfigPath(spec, rootAbs, validIds)
+    if (r) return r
+  }
+
   // Bare specifier → either an external package or an unresolvable alias.
   return null
 }
@@ -1326,6 +1334,79 @@ function resolvePythonRelative(fromAbsPath, spec, rootAbs, validIds) {
 
 function idOf(rootAbs, absPath) {
   return path.relative(rootAbs, absPath).split(path.sep).join('/')
+}
+
+// ─── tsconfig.json paths cache ──────────────────────────────────
+// Reads `compilerOptions.paths` (and `baseUrl`) from the project's
+// root tsconfig.json once per rootAbs. Lets us resolve TypeScript
+// path mapping like `@excalidraw/common` → `./packages/common/src/index.ts`.
+//
+// JSON-with-comments tolerant: strips // line comments and /* block */
+// comments before JSON.parse so real-world tsconfig files don't fail.
+const _tsconfigCache = new Map()  // rootAbs → { baseUrl, paths: [{ pattern, targets }] }
+function loadTsconfigPaths(rootAbs) {
+  if (_tsconfigCache.has(rootAbs)) return _tsconfigCache.get(rootAbs)
+  let cfg = { baseUrl: '.', paths: [] }
+  try {
+    // Read root tsconfig.json first; fall back to jsconfig.json.
+    const candidates = [path.join(rootAbs, 'tsconfig.json'), path.join(rootAbs, 'jsconfig.json')]
+    let raw = null
+    for (const c of candidates) {
+      if (fs.existsSync(c)) { raw = fs.readFileSync(c, 'utf8'); break }
+    }
+    if (raw) {
+      const stripped = raw
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+        .replace(/,(\s*[}\]])/g, '$1')      // trailing commas
+      const parsed = JSON.parse(stripped)
+      const co = parsed?.compilerOptions || {}
+      cfg.baseUrl = co.baseUrl || '.'
+      if (co.paths) {
+        for (const [pattern, targets] of Object.entries(co.paths)) {
+          cfg.paths.push({ pattern, targets: Array.isArray(targets) ? targets : [targets] })
+        }
+      }
+    }
+  } catch {}
+  _tsconfigCache.set(rootAbs, cfg)
+  return cfg
+}
+
+// Resolve an import spec via tsconfig path mapping. Returns the
+// matched file id, or null if no path mapping applies / no file
+// matches the resolved target.
+function resolveTsconfigPath(spec, rootAbs, validIds) {
+  const cfg = loadTsconfigPaths(rootAbs)
+  if (!cfg.paths.length) return null
+  const baseDir = path.resolve(rootAbs, cfg.baseUrl)
+  for (const { pattern, targets } of cfg.paths) {
+    // Patterns may end with `/*` for prefix mapping; otherwise exact match.
+    if (pattern.endsWith('/*')) {
+      const prefix = pattern.slice(0, -2)   // '@excalidraw/common'
+      if (spec === prefix || spec.startsWith(prefix + '/')) {
+        const rest = spec === prefix ? '' : spec.slice(prefix.length + 1)
+        for (const tgt of targets) {
+          const tgtRel = tgt.endsWith('/*') ? tgt.slice(0, -2) : tgt
+          const cand = rest
+            ? path.join(baseDir, tgtRel, rest)
+            : path.join(baseDir, tgtRel)
+          const r = tryResolve(cand, rootAbs, validIds)
+          if (r) return r
+        }
+      }
+    } else if (spec === pattern) {
+      for (const tgt of targets) {
+        const cand = path.join(baseDir, tgt)
+        const r = tryResolve(cand, rootAbs, validIds)
+        if (r) return r
+        // Some targets are direct file paths without extension fallback
+        const direct = idOf(rootAbs, cand)
+        if (validIds.has(direct)) return direct
+      }
+    }
+  }
+  return null
 }
 
 // ─── Go module prefix cache ─────────────────────────────────────
