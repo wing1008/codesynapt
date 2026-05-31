@@ -6725,8 +6725,16 @@ async function buildSymbolGraph() {
   cell.classList.add('loading', 'sb-clickable')
   try {
     // GET /symbol/summary triggers a lazy build server-side; the
-    // response also gives us the symbol count + edge count.
-    const r = await fetch('http://127.0.0.1:7707/symbol/summary')
+    // response also gives us the symbol count + edge count. The
+    // control server tries ports 7707..7716 to find a free one, so
+    // we ask the main process for the actual port via IPC instead
+    // of hard-coding 7707 — otherwise this fetch breaks whenever
+    // a second instance bumped the port.
+    let port = 7707
+    try {
+      if (window.codesynapt?.controlPort) port = await window.codesynapt.controlPort()
+    } catch {}
+    const r = await fetch(`http://127.0.0.1:${port}/symbol/summary`)
     const j = await r.json()
     symbolModeState.count = j.symbolCount ?? null
     symbolModeState.edges = j.edgeCount ?? null
