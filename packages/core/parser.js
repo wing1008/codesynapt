@@ -187,6 +187,29 @@ function detectDynamicPatterns(content, ext) {
   return found  // empty array = no dynamic patterns
 }
 
+// Best-effort static string extraction for a Babel node. Catches:
+//   - 'foo'                          StringLiteral
+//   - `./foo`                        TemplateLiteral with no expressions
+//   - VAR  where  const VAR = 'foo'  one-deep scope lookup (const binding only)
+// Returns the resolved string or null.
+function staticStringValue(node, scope) {
+  if (!node) return null
+  if (node.type === 'StringLiteral') return node.value
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
+    return node.quasis.map((q) => q.value.cooked).join('')
+  }
+  if (node.type === 'Identifier' && scope) {
+    const binding = scope.getBinding?.(node.name)
+    if (!binding || binding.kind !== 'const') return null
+    const init = binding.path?.node?.init
+    if (init?.type === 'StringLiteral') return init.value
+    if (init?.type === 'TemplateLiteral' && init.expressions.length === 0) {
+      return init.quasis.map((q) => q.value.cooked).join('')
+    }
+  }
+  return null
+}
+
 // ─── JS / TS via Babel ────────────────────────────────────────
 function parseJS(content) {
   const imports = []
@@ -223,14 +246,23 @@ function parseJS(content) {
       CallExpression(p) {
         const c = p.node.callee
         const args = p.node.arguments
-        // require('...')
-        if (c.type === 'Identifier' && c.name === 'require'
-            && args[0]?.type === 'StringLiteral') {
-          imports.push({ spec: args[0].value, kind: 'import' })
+        // require('...')  or  require(`./foo`)  or  require(CONST)
+        if (c.type === 'Identifier' && c.name === 'require') {
+          const spec = staticStringValue(args[0], p.scope)
+          if (spec) imports.push({ spec, kind: 'import' })
         }
-        // import('...')
-        if (c.type === 'Import' && args[0]?.type === 'StringLiteral') {
-          imports.push({ spec: args[0].value, kind: 'dynamic' })
+        // import('...') — JS dynamic import
+        if (c.type === 'Import') {
+          const spec = staticStringValue(args[0], p.scope)
+          if (spec) imports.push({ spec, kind: 'dynamic' })
+        }
+        // jest.mock('./x') / vi.mock('./x') / proxyquire('./x', ...)
+        if (c.type === 'MemberExpression'
+            && c.property?.type === 'Identifier'
+            && c.property.name === 'mock'
+            && (c.object?.name === 'jest' || c.object?.name === 'vi')) {
+          const spec = staticStringValue(args[0], p.scope)
+          if (spec) imports.push({ spec, kind: 'mock' })
         }
       },
     })
@@ -284,6 +316,10 @@ function parsePython(content) {
         if (clean) imports.push({ spec: clean, kind: 'import' })
       }
     }
+    // importlib.import_module('foo') / __import__('foo') — string-arg
+    // dynamic imports that are still statically resolvable.
+    const dyn = line.match(/\b(?:importlib\.import_module|__import__)\(\s*['"]([^'"]+)['"]/)
+    if (dyn) imports.push({ spec: dyn[1], kind: 'dynamic' })
   }
   return { imports }
 }
