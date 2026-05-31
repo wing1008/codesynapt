@@ -1713,6 +1713,33 @@ async function handleControlRequest(req, res) {
               }
             }
             await g.build(entries, fileImports)
+            // ─── DB schema models → symbol nodes ─────────────────
+            // file-mode already extracts Prisma / Drizzle / Mongoose /
+            // TypeORM / SQLAlchemy model declarations. We register
+            // each model name as a `model` symbol so the normal
+            // resolver picks up `prisma.user.findMany()`,
+            // `db.User.create(...)`, etc., and surfaces them in
+            // `cs_symbol_explore` answers.
+            for (const f of scanner.files.values()) {
+              if (!f.dbModels?.length) continue
+              for (const model of f.dbModels) {
+                const id = `${f.id}#${model.name}@0`
+                if (g.nodes.has(id)) continue
+                g.addNode({
+                  id,
+                  name: model.name,
+                  qualifiedName: model.name,
+                  kind: 'model',
+                  file: f.id,
+                  startLine: 1,
+                  endLine: 1,
+                  signature: `${model.kind} ${model.name}`
+                    + (model.tableName ? ` (table=${model.tableName})` : ''),
+                  doc: (model.fields || []).map((fld) => fld.name).join(', '),
+                  exported: true,
+                })
+              }
+            }
             // ─── Test ↔ source pairing ───────────────────────────
             // Detect common test-file naming conventions and emit
             // `tests` edges from test symbols to their target source

@@ -761,10 +761,41 @@ function extractSQLAlchemyModels(content) {
   return models
 }
 
+function extractMongooseModels(content) {
+  if (!/\bmongoose\b/.test(content)) return []
+  const models = []
+  // `const User = mongoose.model('User', userSchema)`
+  //  or `mongoose.model('User', new Schema({...}))`
+  const re = /(?:(?:const|let|var)\s+(\w+)\s*=\s*)?mongoose\.model\s*\(\s*['"`](\w+)['"`]/g
+  let m
+  while ((m = re.exec(content))) {
+    models.push({ kind: 'mongoose', name: m[2], varName: m[1] || m[2], fields: [] })
+  }
+  return models
+}
+
+// TypeORM `@Entity()` + `class Foo { @Column() bar: string }` — best-effort
+function extractTypeOrmEntities(content) {
+  if (!/@Entity\s*\(/.test(content)) return []
+  const out = []
+  const re = /@Entity\s*\(\s*(?:['"`](\w+)['"`])?\s*\)\s*(?:export\s+)?class\s+(\w+)/g
+  let m
+  while ((m = re.exec(content))) {
+    out.push({ kind: 'typeorm', name: m[2], tableName: m[1] || null, fields: [] })
+  }
+  return out
+}
+
 function extractDbModels(content, ext) {
   if (!content) return []
   if (ext === 'prisma') return parsePrismaSchema(content)
-  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(ext)) return extractDrizzleTables(content)
+  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(ext)) {
+    return [
+      ...extractDrizzleTables(content),
+      ...extractMongooseModels(content),
+      ...extractTypeOrmEntities(content),
+    ]
+  }
   if (ext === 'py' || ext === 'pyw') return extractSQLAlchemyModels(content)
   return []
 }
