@@ -104,6 +104,24 @@ let _symbolBuilding = null        // in-flight build promise (avoid double work)
 
 // Path looks like a test file? Used by explore() ranking to push real
 // implementation symbols above test fixtures with similar names.
+// Heavier explore-only auxiliary-path filter than `isTestPath` —
+// covers vendored bundles inside src/ (`compiled/`, `vendor/`),
+// example apps, and tooling code. Match is "any segment is one of
+// these". Distinct from isAuxPath in symbol-graph (that one drives
+// resolver buckets); here it drives explore ranking.
+const EXPLORE_AUX_SEGMENTS = new Set([
+  'compiled', 'vendored', 'vendor', '_compiled',
+  'examples', 'example', 'samples', 'sample', 'demo', 'demos',
+  'scripts', 'script', 'tools', 'tool',
+  'build', 'dist', 'out', 'bin',
+  'fixtures', 'fixture',
+])
+function isAuxExplorePath(filePath) {
+  if (!filePath) return false
+  const parts = filePath.toLowerCase().replace(/\\/g, '/').split('/')
+  return parts.some((p) => EXPLORE_AUX_SEGMENTS.has(p))
+}
+
 function isTestPath(filePath) {
   if (!filePath) return false
   const p = filePath.toLowerCase().replace(/\\/g, '/')
@@ -134,35 +152,68 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
   // Score every symbol. Heavier weight on exact name hits and
   // qualifiedName hits over loose doc matches.
   const scored = []
+  // Generic method names that match too eagerly on common questions.
+  // Their score from a single keyword hit gets damped because the
+  // signal is too weak — `Iter.next()` in a Rust crate shouldn't
+  // outrank `NextServer.getServerRequestHandler` for an "SSR"
+  // question just because `next` is in both the query and the name.
+  const GENERIC_METHOD_NAMES = new Set([
+    'next', 'prev', 'get', 'set', 'has', 'is', 'add', 'remove',
+    'put', 'pop', 'push', 'shift', 'clear', 'clone', 'copy',
+    'to', 'from', 'of', 'with', 'and', 'or', 'do', 'run',
+    'init', 'start', 'stop', 'close', 'open', 'read', 'write',
+    'send', 'recv', 'handle', 'process', 'check', 'test', 'try',
+    'iter', 'into', 'new', 'create', 'make', 'build', 'parse',
+    'fmt', 'eq', 'hash', 'len', 'size', 'count',
+  ])
   for (const node of g.nodes.values()) {
     let score = 0
     const name = (node.name || '').toLowerCase()
     const qn   = (node.qualifiedName || '').toLowerCase()
     const doc  = (node.doc || '').toLowerCase()
     const sig  = (node.signature || '').toLowerCase()
+    const filePath = (node.file || '').toLowerCase()
+    // Track whether the path or the qualified name carried a hit —
+    // those are much stronger signals than a bare method-name match,
+    // because they imply the symbol lives in the area the query is
+    // about, not just shares a word with it.
+    let pathHit = false, qnHit = false
     for (const k of keywords) {
       if (name === k)              score += 50
       else if (name.includes(k))   score += 18
-      if (qn !== name && qn.includes(k)) score += 12
+      if (qn !== name && qn.includes(k)) { score += 12; qnHit = true }
       if (sig.includes(k))         score += 4
       if (doc.includes(k))         score += 3
+      // File path / directory match — the symbol lives in code
+      // that's named after the topic. Very strong signal in
+      // monorepos (Next.js's packages/next/src/server/* matches a
+      // server question; turbopack/crates/* doesn't).
+      if (filePath.includes('/' + k) || filePath.includes(k + '/')
+       || filePath.includes(k + '.')) {
+        score += 25
+        pathHit = true
+      }
+    }
+    // Generic method names by themselves are weak signals. If the
+    // ONLY thing matching is a generic name with no path/qn corroboration,
+    // damp hard so a Rust iterator's `next()` can't outrank a real
+    // server handler.
+    if (GENERIC_METHOD_NAMES.has(name) && !pathHit && !qnHit) {
+      score = Math.floor(score * 0.15)
     }
     // Prefer exported and class/function over const/type clutter.
     if (node.exported) score += 2
     if (node.kind === 'class' || node.kind === 'function' || node.kind === 'method') score += 1
-    // Deprioritise test files — `RealInterceptorChain.request` matters
-    // more than `TestEngineHandleContextNoRouteWithGroupMiddleware`.
-    // Heavy demotion (×0.2) so even very long test names with multiple
-    // keyword hits don't outrank the real implementation, but tests
-    // can still surface when nothing else matches at all.
+    // Deprioritise test files (×0.2).
     if (isTestPath(node.file)) score = Math.floor(score * 0.2)
-    // Also demote symbol names that look like a test wrapper (Test* /
-    // *_test / *Spec / spec_*). These slip through when the *file*
-    // itself doesn't match the test path pattern.
-    const nameLower = (node.name || '').toLowerCase()
+    // Test-wrapper-named symbols.
     if (/^test[A-Z_]/.test(node.name || '') || /(_test$|spec$|Spec$)/.test(node.name || '')) {
       score = Math.floor(score * 0.4)
     }
+    // Vendored / compiled / examples / scripts paths: cosmetic source
+    // code that almost never represents the real answer to a query.
+    // Heavy damp so a real implementation always beats a vendored copy.
+    if (isAuxExplorePath(node.file)) score = Math.floor(score * 0.25)
     if (score > 0) scored.push({ node, score })
   }
   scored.sort((a, b) => b.score - a.score)

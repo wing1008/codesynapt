@@ -26,6 +26,11 @@ const AUX_PATH_SEGMENTS = new Set([
   'docs', 'doc',
   'fixtures', 'fixture',
   'benchmarks', 'benchmark', 'bench',
+  // Vendored / prebuilt bundles that ship inside source dirs
+  // (Next.js's packages/next/src/compiled/* is the canonical case).
+  // file-mode ignores top-level node_modules, but vendored copies
+  // inside src/ slip through; deprioritise them as call targets.
+  'compiled', 'vendored', 'vendor',
 ])
 function isAuxPath(fileId) {
   if (!fileId) return false
