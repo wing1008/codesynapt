@@ -1,0 +1,400 @@
+// Tree-sitter symbol parsers — exact AST instead of regex.
+// Reaches parity with codegraph for the supported languages.
+//
+// One generic walker; per-language config tells it which AST node types
+// represent functions / classes / methods / calls, and what field gives
+// the symbol name. Resolver is the same name-based lookup the other
+// parsers use (file-mode imports get folded in later by Stage 3.5).
+//
+// Loaded lazily on first /symbol/scan after a project loads; per-
+// language Parser instances are cached across scans.
+
+'use strict'
+
+const fs = require('fs')
+const path = require('path')
+
+let _Parser = null              // web-tree-sitter Parser class (after init)
+let _initPromise = null
+
+async function getParser() {
+  if (_Parser) return _Parser
+  if (!_initPromise) {
+    _initPromise = (async () => {
+      const Parser = require('web-tree-sitter')
+      await Parser.init()
+      _Parser = Parser
+      return Parser
+    })()
+  }
+  return _initPromise
+}
+
+const WASM_DIR = path.join(__dirname, '..', '..', '..', 'node_modules', 'tree-sitter-wasms', 'out')
+function wasmPath(name) { return path.join(WASM_DIR, `tree-sitter-${name}.wasm`) }
+
+// Per-language config. Keys are CodeSynapt file extensions; value is
+// the grammar wasm name + the AST node types we care about.
+const LANG_CONFIG = {
+  js:    { grammar: 'javascript' },
+  jsx:   { grammar: 'javascript' },
+  mjs:   { grammar: 'javascript' },
+  cjs:   { grammar: 'javascript' },
+  // TypeScript wasms aren't in tree-sitter-wasms@0.1.13; fall back to
+  // the JS grammar (works for type annotations as stripped syntax).
+  ts:    { grammar: 'javascript' },
+  tsx:   { grammar: 'javascript' },
+  py:    { grammar: 'python' },
+  go:    { grammar: 'go' },
+  rs:    { grammar: 'rust' },
+  java:  { grammar: 'java' },
+  kt:    { grammar: 'kotlin' },
+  swift: { grammar: 'swift' },
+}
+
+// Node types per grammar.
+const NODE_TYPES = {
+  javascript: {
+    fn:     ['function_declaration', 'function', 'arrow_function', 'generator_function_declaration'],
+    method: ['method_definition'],
+    cls:    ['class_declaration'],
+    call:   ['call_expression', 'new_expression'],
+  },
+  python: {
+    fn:     ['function_definition'],
+    cls:    ['class_definition'],
+    call:   ['call'],
+  },
+  go: {
+    fn:     ['function_declaration'],
+    method: ['method_declaration'],
+    cls:    ['type_declaration'],     // contains struct/interface specs
+    call:   ['call_expression'],
+  },
+  rust: {
+    fn:     ['function_item'],
+    cls:    ['struct_item', 'enum_item', 'trait_item'],
+    impl:   ['impl_item'],
+    call:   ['call_expression', 'macro_invocation'],
+  },
+  java: {
+    fn:     ['method_declaration', 'constructor_declaration'],
+    cls:    ['class_declaration', 'interface_declaration', 'record_declaration', 'enum_declaration'],
+    call:   ['method_invocation', 'object_creation_expression'],
+  },
+  kotlin: {
+    fn:     ['function_declaration'],
+    cls:    ['class_declaration', 'object_declaration'],
+    call:   ['call_expression'],
+  },
+  swift: {
+    // tree-sitter-swift uses `class_declaration` for both `class X {}`
+    // and `struct X {}` (distinguished by an inner `struct` keyword
+    // child); `protocol_declaration` is separate. `function_declaration`
+    // covers both top-level funcs and methods.
+    fn:     ['function_declaration', 'init_declaration', 'deinit_declaration'],
+    cls:    ['class_declaration', 'protocol_declaration'],
+    call:   ['call_expression'],
+  },
+}
+
+// Cache: grammar name → loaded Parser.Language (web-tree-sitter)
+const _langCache = new Map()
+async function loadLang(grammar) {
+  if (_langCache.has(grammar)) return _langCache.get(grammar)
+  const Parser = await getParser()
+  const buf = fs.readFileSync(wasmPath(grammar))
+  const Lang = await Parser.Language.load(buf)
+  _langCache.set(grammar, Lang)
+  return Lang
+}
+
+// Cache: grammar name → Parser instance (Parser instances are stateful
+// but cheap to reuse since we always call setLanguage anyway).
+const _parserCache = new Map()
+async function parserFor(grammar) {
+  if (_parserCache.has(grammar)) return _parserCache.get(grammar)
+  const Parser = await getParser()
+  const p = new Parser()
+  p.setLanguage(await loadLang(grammar))
+  _parserCache.set(grammar, p)
+  return p
+}
+
+function mkId(file, name, line) { return `${file}#${name}@${line}` }
+
+function nameOf(node) {
+  // Try standard field first, then look for an identifier child.
+  const named = node.childForFieldName?.('name')
+  if (named) return named.text
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i)
+    if (c.type === 'identifier' || c.type === 'type_identifier' || c.type === 'field_identifier') return c.text
+  }
+  return null
+}
+
+function signatureOf(node, content, maxLen = 200) {
+  if (!node) return ''
+  const start = node.startIndex ?? 0
+  let end = content.indexOf('{', start)
+  if (end < 0 || end - start > maxLen) end = start + maxLen
+  return content.slice(start, end).trim().replace(/\s+/g, ' ')
+}
+
+function docOf(node, content) {
+  // Walk backwards through siblings; collect line comments / block
+  // comments directly above `node`.
+  let prev = node.previousSibling
+  const blocks = []
+  while (prev && (prev.type === 'comment' || prev.type === 'line_comment' || prev.type === 'block_comment')) {
+    blocks.unshift(prev.text)
+    prev = prev.previousSibling
+  }
+  if (!blocks.length) return ''
+  return blocks.join(' ').replace(/^\s*[/*#]+/gm, '').replace(/\s+/g, ' ').trim().slice(0, 400)
+}
+
+// Generic walker. Tracks the enclosing class/impl for method
+// qualification and the enclosing function for call attribution.
+function walk(node, ctx) {
+  if (!node) return
+  const t = node.type
+  const cfg = ctx.types
+  let pushedFn = false, pushedCls = false, pushedImpl = false
+
+  // Class-like declarations
+  if (cfg.cls?.includes(t)) {
+    const name = nameOf(node)
+    if (name) {
+      const sym = {
+        id: mkId(ctx.fileId, name, node.startPosition.row + 1),
+        name,
+        qualifiedName: name,
+        kind: classKind(t),
+        file: ctx.fileId,
+        startLine: node.startPosition.row + 1,
+        endLine: node.endPosition.row + 1,
+        signature: signatureOf(node, ctx.content),
+        doc: docOf(node, ctx.content),
+        exported: isExported(node, ctx.content),
+      }
+      ctx.symbols.push(sym)
+      ctx.classStack.push({ name, sym })
+      pushedCls = true
+    }
+  }
+  // Rust impl blocks — track the target type so methods get qualified
+  else if (cfg.impl?.includes(t)) {
+    const targetType = node.childForFieldName?.('type')?.text
+                    || node.children.find((c) => c.type === 'type_identifier')?.text
+    if (targetType) {
+      ctx.classStack.push({ name: targetType, sym: null })
+      pushedImpl = true
+    }
+  }
+  // Function/method declarations
+  else if (cfg.fn?.includes(t) || cfg.method?.includes(t)) {
+    const name = nameOf(node)
+    if (name) {
+      const cls = ctx.classStack[ctx.classStack.length - 1]
+      const isMethod = !!cls && (cfg.method?.includes(t) || ctx.lang === 'python' || ctx.lang === 'kotlin' || ctx.lang === 'swift' || ctx.lang === 'rust')
+      const qn = isMethod ? `${cls.name}.${name}` : name
+      const sym = {
+        id: mkId(ctx.fileId, qn, node.startPosition.row + 1),
+        name,
+        qualifiedName: qn,
+        kind: isMethod ? 'method' : 'function',
+        file: ctx.fileId,
+        startLine: node.startPosition.row + 1,
+        endLine: node.endPosition.row + 1,
+        signature: signatureOf(node, ctx.content),
+        doc: docOf(node, ctx.content),
+        exported: isExported(node, ctx.content),
+      }
+      ctx.symbols.push(sym)
+      ctx.fnStack.push(sym.id)
+      pushedFn = true
+    }
+  }
+  // Call expressions (pass 2 only — checked via ctx.passTwo flag)
+  if (ctx.passTwo && cfg.call?.includes(t)) {
+    const src = ctx.fnStack[ctx.fnStack.length - 1]
+    if (src) {
+      const calleeName = extractCalleeName(node)
+      if (calleeName && !ctx.kwSet?.has(calleeName)) {
+        const target = ctx.resolve(calleeName)
+        if (target && target.id !== src) {
+          const key = src + '|' + target.id
+          if (!ctx.seen.has(key)) {
+            ctx.seen.add(key)
+            ctx.edges.push({
+              source: src, target: target.id, kind: 'call',
+              line: node.startPosition.row + 1,
+            })
+          }
+        }
+      }
+    }
+  }
+
+  // Recurse
+  for (let i = 0; i < node.childCount; i++) walk(node.child(i), ctx)
+
+  if (pushedFn) ctx.fnStack.pop()
+  if (pushedCls || pushedImpl) ctx.classStack.pop()
+}
+
+function classKind(nodeType) {
+  if (nodeType.includes('interface')) return 'interface'
+  if (nodeType.includes('trait'))     return 'interface'
+  if (nodeType.includes('protocol'))  return 'interface'
+  if (nodeType.includes('struct'))    return 'struct'
+  if (nodeType.includes('enum'))      return 'enum'
+  if (nodeType.includes('record'))    return 'class'
+  if (nodeType.includes('type_declaration')) return 'struct'  // Go — refined below
+  return 'class'
+}
+
+function isExported(node, content) {
+  // Heuristic: any leading 'pub', 'public', 'export' keyword in the
+  // first ~120 chars of the node's text. Good enough across languages.
+  const head = content.slice(node.startIndex, Math.min(node.startIndex + 120, node.endIndex))
+  if (/\b(pub|public|export|open)\b/.test(head)) return true
+  // Go: PascalCase identifiers are exported.
+  const m = head.match(/\b([A-Za-z_][A-Za-z0-9_]*)\b/)
+  if (m && /^[A-Z]/.test(m[1])) return true
+  return false
+}
+
+// Identifier-shaped node names across grammars.
+const IDENT_TYPES = new Set([
+  'identifier', 'simple_identifier', 'field_identifier', 'type_identifier',
+  'property_identifier', 'shorthand_property_identifier',
+])
+const NAV_TYPES = new Set([
+  'member_expression', 'selector_expression', 'field_expression',
+  'navigation_expression', 'method_invocation',
+])
+
+function lastIdentText(node) {
+  // Walk to the rightmost identifier-ish node — `foo.bar.baz` → "baz".
+  if (!node) return null
+  if (IDENT_TYPES.has(node.type)) return node.text
+  for (let i = node.namedChildCount - 1; i >= 0; i--) {
+    const t = lastIdentText(node.namedChild(i))
+    if (t) return t
+  }
+  return null
+}
+
+function extractCalleeName(callNode) {
+  // 1) Try named fields first — Java has `name`, JS has `function`,
+  //    Python/Ruby have `function`. These are the cleanest path when
+  //    the grammar provides them.
+  const fn = callNode.childForFieldName?.('function')
+          || callNode.childForFieldName?.('name')
+  if (fn) {
+    if (IDENT_TYPES.has(fn.type)) return fn.text
+    if (NAV_TYPES.has(fn.type)) return lastIdentText(fn)
+  }
+  // 2) Java method_invocation: object.name(args) — `name` is a direct
+  //    field even when `function` isn't set.
+  const j = callNode.childForFieldName?.('name')
+  if (j && IDENT_TYPES.has(j.type)) return j.text
+  // 3) Fallback — Swift/Kotlin call_expression has no field but its
+  //    first named child is the callee (simple_identifier or
+  //    navigation_expression). Walk all named children once.
+  for (let i = 0; i < callNode.namedChildCount; i++) {
+    const c = callNode.namedChild(i)
+    if (IDENT_TYPES.has(c.type)) return c.text
+    if (NAV_TYPES.has(c.type)) return lastIdentText(c)
+  }
+  return null
+}
+
+// Keywords to skip when matching call expressions.
+const KEYWORDS = {
+  javascript: new Set(['if','else','for','while','return','new','typeof','instanceof','await','async','function','class','const','let','var','true','false','null','undefined','console','require','import','export']),
+  python:     new Set(['if','elif','else','while','for','return','def','class','import','from','None','True','False','self','print','len','range','int','str','float','bool','list','dict','set','tuple','isinstance','type','super','open','sorted','enumerate','zip','map','filter','any','all','sum','min','max','abs','round','getattr','setattr','hasattr','format','repr','hash','id','object','property','staticmethod','classmethod']),
+  go:         new Set(['if','else','for','range','return','break','continue','switch','case','func','type','var','const','package','import','interface','struct','map','chan','make','new','len','cap','append','copy','delete','panic','recover','close','true','false','nil','print','println']),
+  rust:       new Set(['fn','let','mut','if','else','while','for','loop','match','return','break','continue','use','mod','pub','crate','self','super','impl','trait','struct','enum','type','as','where','async','await','dyn','ref','move','Some','None','Ok','Err','true','false','unsafe','extern','static','const','Box','Vec','String','format!','println!','print!','vec!']),
+  java:       new Set(['if','else','while','for','do','switch','case','break','continue','return','new','this','super','try','catch','finally','throw','throws','class','interface','enum','extends','implements','public','private','protected','static','final','abstract','synchronized','void','int','long','short','byte','char','boolean','float','double','String','true','false','null','import','package','var']),
+  kotlin:     new Set(['if','else','for','while','do','when','return','break','continue','fun','val','var','class','object','interface','enum','sealed','data','companion','public','private','internal','protected','open','final','abstract','override','suspend','inline','crossinline','noinline','this','super','it','true','false','null']),
+  swift:      new Set(['if','else','for','in','while','repeat','do','switch','case','break','continue','return','throw','throws','try','catch','rethrows','defer','guard','where','as','is','let','var','func','class','struct','enum','protocol','extension','import','self','super','init','deinit','static','final','public','private','internal','open','fileprivate','true','false','nil','some','any','Self','Optional','print','String','Int','Bool','Double','Float','Array','Dictionary']),
+}
+
+function makeResolver(fileId, index) {
+  return function resolve(name) {
+    const set = index.byName.get(name.toLowerCase())
+    if (!set || !set.size) return null
+    let any = null
+    for (const id of set) {
+      const node = index.nodes.get(id)
+      if (!node) continue
+      if (node.file === fileId) return node
+      if (!any) any = node
+    }
+    return any
+  }
+}
+
+// Public per-extension wrapper used by symbol-graph's parser registry.
+function makeParser(ext) {
+  const cfg = LANG_CONFIG[ext]
+  if (!cfg) return null
+  const lang = cfg.grammar
+  const types = NODE_TYPES[lang]
+  const kwSet = KEYWORDS[lang]
+
+  return {
+    async extractSymbolsAsync(content, fileId) {
+      try {
+        const parser = await parserFor(lang)
+        const tree = parser.parse(content)
+        const ctx = {
+          fileId, content, types, lang,
+          symbols: [], classStack: [], fnStack: [],
+          passTwo: false,
+        }
+        walk(tree.rootNode, ctx)
+        tree.delete?.()
+        return ctx.symbols
+      } catch (e) { return [] }
+    },
+    async extractReferencesAsync(content, fileId, index) {
+      try {
+        const parser = await parserFor(lang)
+        const tree = parser.parse(content)
+        const ctx = {
+          fileId, content, types, lang,
+          symbols: [], classStack: [], fnStack: [],
+          edges: [], seen: new Set(),
+          kwSet,
+          resolve: makeResolver(fileId, index),
+          passTwo: true,
+        }
+        walk(tree.rootNode, ctx)
+        tree.delete?.()
+        return ctx.edges
+      } catch (e) { return [] }
+    },
+    // Sync stubs — registry expects sync extractSymbols/extractReferences
+    // but SymbolGraph.build() can also await them since it's already async.
+    extractSymbols(content, fileId) { return this.extractSymbolsAsync(content, fileId) },
+    extractReferences(content, fileId, index) { return this.extractReferencesAsync(content, fileId, index) },
+  }
+}
+
+// Probe which grammars actually ship in tree-sitter-wasms (some are
+// optional). Returns the list of extensions whose wasm exists.
+function availableExtensions() {
+  const out = []
+  for (const ext of Object.keys(LANG_CONFIG)) {
+    const grammar = LANG_CONFIG[ext].grammar
+    if (fs.existsSync(wasmPath(grammar))) out.push(ext)
+  }
+  return out
+}
+
+module.exports = { makeParser, availableExtensions, LANG_CONFIG }

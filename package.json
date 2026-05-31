@@ -8,8 +8,14 @@
     "url": "https://github.com/wing1008"
   },
   "funding": [
-    { "type": "github", "url": "https://github.com/sponsors/wing1008" },
-    { "type": "individual", "url": "https://buymeacoffee.com/wing1008" }
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/wing1008"
+    },
+    {
+      "type": "individual",
+      "url": "https://buymeacoffee.com/wing1008"
+    }
   ],
   "homepage": "https://github.com/wing1008/codesynapt#readme",
   "repository": {
@@ -68,7 +74,9 @@
   "dependencies": {
     "@babel/parser": "^7.24.0",
     "@babel/traverse": "^7.24.0",
-    "chokidar": "^3.6.0"
+    "chokidar": "^3.6.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.20.8"
   },
   "optionalDependencies": {
     "three": "^0.160.0",
