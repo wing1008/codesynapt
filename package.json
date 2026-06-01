@@ -72,8 +72,8 @@
     "dist:linux": "electron-builder --linux"
   },
   "dependencies": {
-    "@babel/parser": "^7.24.0",
-    "@babel/traverse": "^7.24.0",
+    "@babel/parser": "^7.29.7",
+    "@babel/traverse": "^7.29.7",
     "chokidar": "^3.6.0",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^6.0.3",
