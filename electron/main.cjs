@@ -247,7 +247,7 @@ function isPublicEntry(node) {
 // One-shot "answer" — codegraph's `context` analog. Selects symbols
 // whose name/qualified name/doc match the query keywords, then pulls
 // their source bodies up to the token budget.
-function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
+async function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
   const q = (query || '').toLowerCase()
   // Unicode tokenizer — keeps Korean / Japanese / Chinese / Cyrillic /
   // accented Latin etc. as keywords instead of treating them as
@@ -391,13 +391,49 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
   }
   scored.sort((a, b) => b.score - a.score)
 
+  // Hybrid semantic rerank — when the symbol-graph has finished
+  // embedding (background pass kicked off after build), boost each
+  // top-30 candidate by its cosine similarity to the raw query.
+  // Limited to the top-30 keyword candidates so we keep the per-
+  // query cost predictable (one query embed + 30 dot products =
+  // ~10 ms even on Django). Semantic-only hits outside the keyword
+  // set don't enter this path — that's a v2 (full-corpus) job.
+  //
+  // Weighting: 0.6 × keyword score + 0.4 × (similarity × 100).
+  // Similarity is in [-1, 1] but practically [0, 0.7]; ×100 puts it
+  // in the same numeric range as keyword scores (typically 18–50),
+  // so a strong semantic match can re-order ties but a wildly
+  // unrelated match can't crush a perfect-name hit.
+  if (g._embedded && query) {
+    try {
+      const embedding = require('../packages/core/lib/embedding.cjs')
+      const qVec = await embedding.embed(query)
+      if (qVec) {
+        const TOP = Math.min(30, scored.length)
+        for (let i = 0; i < TOP; i++) {
+          const item = scored[i]
+          const nVec = item.node._embedding
+          if (!nVec) continue
+          const sim = embedding.cosineSim(qVec, nVec)
+          item.score = item.score * 0.6 + sim * 100 * 0.4
+          item.semSim = sim
+        }
+        const top30 = scored.slice(0, TOP).sort((a, b) => b.score - a.score)
+        scored.splice(0, TOP, ...top30)
+      }
+    } catch (e) {
+      // Embedding pass failures shouldn't break keyword-only explore.
+    }
+  }
+
   // Diversify entry points across files — without this a single file
   // with many same-named methods (Validation.swift's `validate` etc.)
   // can take all 8 slots and crowd out other answers.
   const PER_FILE_CAP = 3
   const fileCounts = new Map()
   const entryPoints = []
-  for (const { node } of scored) {
+  for (const item of scored) {
+    const { node } = item
     if (entryPoints.length >= 8) break
     const c = fileCounts.get(node.file) || 0
     if (c >= PER_FILE_CAP) continue
@@ -435,7 +471,7 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     // result is a weak dead-code signal not a verdict. We expose it
     // and let the AI / UI decide how strongly to weight it.
     const reachable = g._reachable ? g._reachable.has(id) : null
-    entryPoints.push({ ...node, classification, inDegree: inD, outDegree: ouD, ageDays: mtime ? Math.floor(ageMs / 86400_000) : null, reachable })
+    entryPoints.push({ ...node, classification, inDegree: inD, outDegree: ouD, ageDays: mtime ? Math.floor(ageMs / 86400_000) : null, reachable, semSim: item.semSim ?? null })
   }
   const snippets = []
   let used = 0
@@ -479,6 +515,7 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
       query, mode, keywords,
       entryPoints, relatedSymbols, snippets,
       counts: { totalCandidates: scored.length, entryPoints: entryPoints.length, snippets: snippets.length, classification: classCounts },
+      embeddingReady: !!g._embedded,
     }
   }
 
@@ -599,6 +636,196 @@ function buildExploreResponse(g, query, budget = 8000, mode = 'default') {
     counts: { totalCandidates: scored.length, entryPoints: entryPoints.length, snippets: snippets.length },
     note: `unknown mode "${mode}" — supported: default / structural / behavioral / dataflow`,
   }
+}
+
+// ─── mode 3 (classify) — ranking-free response ─────────────────
+// Returns symbols grouped by lifecycle classification, no score
+// sort. AI/user picks the group it cares about (active for "what
+// runs in production", deprecated/legacy/orphan for "what's safe
+// to delete"). Same candidate selection as the ranked mode 2 —
+// keyword expansion + optional semantic — but the only ordering
+// inside each group is in-degree DESC (graph signal, not a
+// computed score).
+//
+// Why a separate mode 3 instead of just sorting mode 2's output?
+// Mode 2 collapses everything into a single ranked list, so a
+// deprecated symbol with a perfect keyword match can still beat
+// the live implementation just by score arithmetic. Mode 3 makes
+// the grouping the contract — `groups.active[0]` is always the
+// live answer even if a deprecated dup has the same name.
+async function buildClassifyResponse(g, query, budget = 8000) {
+  const q = (query || '').toLowerCase()
+  const rawTokens = q.split(/[^\p{L}\p{N}_]+/u).filter(Boolean)
+  const expanded = new Set(rawTokens)
+  for (const t of rawTokens) {
+    for (const p of splitCamelCase(t)) if (p.length > 1) expanded.add(p)
+    const s = stem(t)
+    if (s !== t && s.length > 2) expanded.add(s)
+  }
+  const keywords = [...expanded].filter((t) => t.length > 1 && !EXPLORE_STOPWORDS.has(t))
+  if (!keywords.length) {
+    return { query, mode: 'classify', keywords: [], groups: {}, counts: {}, snippets: [], note: 'no usable keywords' }
+  }
+
+  // Candidate selection — same byName / byFile index walk mode 2
+  // does. No scoring; we just collect every symbol whose name or
+  // file path contains at least one keyword as a substring.
+  const candidates = new Set()
+  for (const k of keywords) {
+    for (const [n, ids] of g.byName) {
+      if (n.includes(k)) for (const id of ids) candidates.add(id)
+    }
+    for (const [f, ids] of g.byFile) {
+      if (f.toLowerCase().includes(k)) for (const id of ids) candidates.add(id)
+    }
+  }
+
+  // Optional semantic candidate enrichment — when embeddings are
+  // ready, pull the top 30 symbols by cosine similarity to the
+  // raw query and union them in. Lets a query like "auth" find
+  // `login` / `signIn` even when the keyword set never hits.
+  let semHits = new Map()    // id → similarity
+  if (g._embedded && query) {
+    try {
+      const embedding = require('../packages/core/lib/embedding.cjs')
+      const qVec = await embedding.embed(query)
+      if (qVec) {
+        const sims = []
+        for (const node of g.nodes.values()) {
+          if (!node._embedding) continue
+          const sim = embedding.cosineSim(qVec, node._embedding)
+          if (sim > 0.3) sims.push({ id: node.id, sim })
+        }
+        sims.sort((a, b) => b.sim - a.sim)
+        for (const { id, sim } of sims.slice(0, 30)) {
+          candidates.add(id)
+          semHits.set(id, sim)
+        }
+      }
+    } catch {}
+  }
+
+  // Classify every candidate. Two cross-cutting groups (exact_match
+  // and semantic) take precedence over the lifecycle classification
+  // and are *exclusive* — a symbol that lives in exact_match is
+  // intentionally NOT also listed in active/orphan/etc, so the AI
+  // doesn't have to dedupe. The lifecycle bucket is preserved as a
+  // field on each entry so the consumer still sees "this exact-match
+  // is actually deprecated".
+  const groups = {
+    exact_match: [], semantic: [],
+    active: [], entry: [], deprecated: [], legacy: [],
+    test: [], aux: [], orphan: [], normal: [],
+  }
+  const keywordSet = new Set(keywords)
+  for (const id of candidates) {
+    const node = g.nodes.get(id)
+    if (!node) continue
+    const inD = g.inAdj.get(id)?.size || 0
+    const ouD = g.outAdj.get(id)?.size || 0
+    const mtime = node.mtimeMs || 0
+    const ageMs = mtime ? (Date.now() - mtime) : 0
+    const ONE_YEAR = 365 * 86400_000
+
+    let cls
+    if (isDeprecatedSymbol(node)) cls = 'deprecated'
+    else if (isTestPath(node.file)
+     || /^test[A-Z_]/.test(node.name || '')
+     || /(_test$|spec$|Spec$)/.test(node.name || '')) cls = 'test'
+    else if (isAuxExplorePath(node.file)) cls = 'aux'
+    else if (isPublicEntry(node))         cls = 'entry'
+    else if (inD === 0 && ouD === 0)      cls = 'orphan'
+    else if (ageMs > ONE_YEAR && inD < 2) cls = 'legacy'
+    else if (inD >= 3)                    cls = 'active'
+    else                                  cls = 'normal'
+
+    const reachable = g._reachable ? g._reachable.has(id) : null
+    const semOnly = !rawHasSubstring(node, keywords)
+    const nameLower = (node.name || '').toLowerCase()
+    const isExactName = keywordSet.has(nameLower)
+
+    const entry = {
+      qualifiedName: node.qualifiedName || node.name,
+      name: node.name, kind: node.kind,
+      file: node.file, startLine: node.startLine, endLine: node.endLine,
+      inDegree: inD, outDegree: ouD,
+      ageDays: mtime ? Math.floor(ageMs / 86400_000) : null,
+      reachable,
+      semSim: semHits.get(id) ?? null,
+      classification: cls,    // lifecycle preserved even when bucketed elsewhere
+      semanticOnly: semOnly,
+    }
+    // Routing order: exact_match wins over everything (user typed
+    // the exact name — surface that even if the symbol is orphan).
+    // Then semantic (keyword 0 hit, only the embedding pulled it
+    // in). Then lifecycle classification.
+    if (isExactName)      groups.exact_match.push(entry)
+    else if (semOnly)     groups.semantic.push(entry)
+    else                  groups[cls].push(entry)
+  }
+
+  // Sort each group: in-degree DESC, then semSim DESC (so semantic
+  // candidates surface inside their group when present). Cap per
+  // group to keep responses manageable.
+  const PER_GROUP_CAP = 8
+  for (const g_name of Object.keys(groups)) {
+    groups[g_name].sort((a, b) => (b.inDegree - a.inDegree) || ((b.semSim || 0) - (a.semSim || 0)))
+    groups[g_name] = groups[g_name].slice(0, PER_GROUP_CAP)
+  }
+
+  // Snippets — source bodies for the top members of the most
+  // informative groups. `active` first (real implementation),
+  // then `entry`, then `normal`. Skips test/aux/orphan/deprecated
+  // unless those are the only groups with hits — saves token
+  // budget for code AI actually needs to read.
+  const snippets = []
+  const MAX_LINES_PER_SNIPPET = 40
+  let used = 0
+  const SNIPPET_ORDER = ['exact_match', 'active', 'entry', 'normal', 'semantic', 'legacy', 'deprecated', 'test', 'orphan', 'aux']
+  outer: for (const groupName of SNIPPET_ORDER) {
+    const members = groups[groupName]
+    if (!members.length) continue
+    const perGroupBudget = groupName === 'exact_match' ? 5
+                         : (groupName === 'active' || groupName === 'entry') ? 3
+                         : 1
+    for (const m of members.slice(0, perGroupBudget)) {
+      if (used >= budget) break outer
+      try {
+        const filePath = path.join(currentRoot, m.file)
+        const lines = fs.readFileSync(filePath, 'utf8').split('\n')
+        const end = Math.min(m.endLine, m.startLine + MAX_LINES_PER_SNIPPET - 1)
+        const source = lines.slice(m.startLine - 1, end).join('\n')
+        const cost = Math.ceil(source.length / 4)
+        if (used + cost > budget && snippets.length > 0) break outer
+        snippets.push({
+          group: groupName, file: m.file, line: m.startLine,
+          name: m.name, kind: m.kind, source,
+        })
+        used += cost
+      } catch {}
+    }
+  }
+
+  const counts = {}
+  for (const [k, v] of Object.entries(groups)) if (v.length) counts[k] = v.length
+
+  return {
+    query, mode: 'classify', keywords,
+    groups, counts, snippets,
+    embeddingReady: !!g._embedded,
+  }
+}
+
+// Whether any keyword raw-substring matches the symbol — used to
+// flag entries that came in via semantic similarity only.
+function rawHasSubstring(node, keywords) {
+  const name = (node.name || '').toLowerCase()
+  const qn   = (node.qualifiedName || '').toLowerCase()
+  const file = (node.file || '').toLowerCase()
+  for (const k of keywords) {
+    if (name.includes(k) || qn.includes(k) || file.includes(k)) return true
+  }
+  return false
 }
 
 // Legacy audit module — lazy-loaded ESM. Cached by snapshotVersion.
@@ -2306,6 +2533,25 @@ async function handleControlRequest(req, res) {
             try { g.computeReachability(isPublicEntry) } catch (e) {
               console.warn('[symbol] reachability pass failed:', e.message)
             }
+            // Semantic embedding pass — fired without await. The
+            // build returns immediately; embeddings populate in the
+            // background. /symbol/explore checks `g._embedded`
+            // before reranking, so early queries still get fast
+            // keyword-only answers, and later queries get the
+            // semantic upgrade once the index finishes (~1 ms per
+            // symbol on MiniLM-L6, so ~10 s on a 10k-symbol repo
+            // and ~45 s on django's 43k).
+            //
+            // Opt-out via CS_EMBEDDING=0 for users on memory-tight
+            // boxes (the index adds ~200 MB to RSS).
+            if (process.env.CS_EMBEDDING !== '0') {
+              const embedding = require('../packages/core/lib/embedding.cjs')
+              g.embedAllSymbols(embedding.embedBatch).then((ok) => {
+                if (ok) console.log(`[symbol] embeddings ready: ${g.nodes.size} symbols in ${g.embedMs}ms`)
+              }).catch((e) => {
+                console.warn('[symbol] embedding pass failed:', e.message)
+              })
+            }
             symbolGraph = g
             _symbolBuilding = null
             return g
@@ -2353,7 +2599,9 @@ async function handleControlRequest(req, res) {
         // behaviour (entry symbols + bodies). Other modes return a
         // smaller, focused payload tuned for the question type.
         const mode = (url.searchParams.get('mode') || 'default').toLowerCase()
-        const payload = buildExploreResponse(g, q, budget, mode)
+        const payload = mode === 'classify'
+          ? await buildClassifyResponse(g, q, budget)
+          : await buildExploreResponse(g, q, budget, mode)
         return writeJson(res, 200, withMeta(payload))
       }
       if (req.method === 'POST' && sub === 'scan') {

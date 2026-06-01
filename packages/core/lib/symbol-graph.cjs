@@ -159,6 +159,56 @@ class SymbolGraph {
     this.inAdj.get(edge.target).add(edge.source)
   }
 
+  // Index every symbol as a 384-d MiniLM embedding so /symbol/explore
+  // can rerank by semantic similarity (auth ↔ login synonyms etc).
+  // Runs in batches of 32 to keep peak memory bounded; the caller
+  // typically fires this off without awaiting so the build finishes
+  // quickly and the embeddings populate in the background.
+  //
+  // Each symbol gets a `_embedding` Float64-style Array assigned in
+  // place. Falls back silently if `embedBatchFn` returns null (e.g.
+  // the @xenova/transformers dep isn't installed).
+  async embedAllSymbols(embedBatchFn, { chunkSize = 32 } = {}) {
+    if (this._embedded || this._embedding) return  // idempotent
+    this._embedding = true
+    const ids = []
+    const texts = []
+    for (const n of this.nodes.values()) {
+      ids.push(n.id)
+      // Keep text short — MiniLM is a 128-token model, longer input
+      // gets truncated. name + qn + kind + first 100 chars of doc is
+      // enough signal to distinguish auth-shaped from db-shaped.
+      const doc = (n.doc || '').slice(0, 100)
+      texts.push(`${n.name || ''} ${n.qualifiedName || ''} ${n.kind || ''} ${doc}`.trim())
+    }
+    const start = Date.now()
+    let done = 0
+    for (let i = 0; i < texts.length; i += chunkSize) {
+      const batch = texts.slice(i, i + chunkSize)
+      const vecs = await embedBatchFn(batch)
+      if (!vecs) {              // embed failed — give up cleanly
+        this._embedding = false
+        return false
+      }
+      for (let j = 0; j < vecs.length; j++) {
+        const node = this.nodes.get(ids[i + j])
+        if (node) node._embedding = vecs[j]
+      }
+      done += vecs.length
+      // Yield to the event loop between batches so concurrent HTTP
+      // requests (the desktop UI, the bench harness, MCP tools)
+      // aren't starved while a multi-second indexing pass runs.
+      // ONNX inference inside embedBatchFn pegs the main thread, so
+      // a `setImmediate` after each batch is the difference between
+      // "queries time out" and "queries respond within 50 ms".
+      await new Promise((r) => setImmediate(r))
+    }
+    this._embedded = true
+    this._embedding = false
+    this.embedMs = Date.now() - start
+    return true
+  }
+
   // BFS along outAdj from every symbol the host considers a public
   // entry (main, route handler, exported CLI bin, etc). Symbols not
   // reachable from any entry are likely dead code. The host passes
@@ -263,17 +313,22 @@ class SymbolGraph {
       let _lines = null
       const lines = () => _lines ??= content.split('\n')
       const DEPRECATED_RE = /@?deprecated\b|todo\s*[:_-]?\s*remove|fixme\s*[:_-]?\s*remove/i
+      // Stricter pattern — used ONLY against the file header so
+      // common code-body words like "wip"/"work in progress" don't
+      // false-positive entire files. The body-level probe sticks to
+      // the precise @deprecated / TODO remove patterns above.
+      const HEAD_DEPRECATED_RE = /@?deprecated\b|do\s+not\s+use\b|work\s+in\s+progress\b|\bwip[\s:]/i
       const fileHasDeprecated = DEPRECATED_RE.test(content)
       // File-level deprecated marker — if the first 5 lines flag the
       // whole file as deprecated (common pattern: file header with
       // `// @deprecated — moved to …`), tag every symbol the file
       // exports. Avoids the case where the file header is far above
-      // any declaration's 5-line probe window.
+      // any declaration's 5-line probe window. Header check uses
+      // HEAD_DEPRECATED_RE so a body-only deprecated marker can't
+      // promote a single-symbol file to "everything deprecated".
       let fileLevelDeprecated = false
-      if (fileHasDeprecated) {
-        const head = lines().slice(0, 5).join('\n')
-        fileLevelDeprecated = DEPRECATED_RE.test(head)
-      }
+      const head = lines().slice(0, 5).join('\n')
+      if (HEAD_DEPRECATED_RE.test(head)) fileLevelDeprecated = true
       for (const s of symbols) {
         if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
         // Stamp every symbol with the file's mtime — explore uses it
