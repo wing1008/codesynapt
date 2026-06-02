@@ -1605,10 +1605,23 @@ function closeTraceWriteStream() {
   }
 }
 
-function emitTrace(tool, id) {
+// Trust metadata for an AI session-trace event: was the queried/touched file
+// statically confident, or does it use dynamic/reflective/DI patterns the graph
+// can't fully resolve? Logging this per query lets a reviewer judge whether the
+// AI was working from complete data or known-incomplete data.
+function traceMetaFor(id) {
+  const f = scanner && scanner.files && scanner.files.get(id)
+  if (!f) return null
+  const dyn = (f.dynamicPatterns || [])
+  return { conf: f.confidence || 'high', dyn: dyn.length ? dyn : undefined }
+}
+
+function emitTrace(tool, id, meta) {
   if (!id) return
   const ts = Date.now()
-  const ev = { tool, id, ts }
+  // Auto-attach per-file trust meta (confidence / dynamic patterns) unless the
+  // caller passed its own richer meta (e.g. blast impact stats).
+  const ev = { tool, id, ts, ...(meta || traceMetaFor(id) || {}) }
   // In-memory (cap with sliding window)
   traceLog.push(ev)
   if (traceLog.length > TRACE_MEM_CAP) traceLog.splice(0, traceLog.length - TRACE_MEM_CAP)
@@ -2382,11 +2395,17 @@ async function handleControlRequest(req, res) {
     }
     if (req.method === 'GET' && seg0 === 'blast' && rest.length > 0) {
       const id = idFromRest()
-      emitTrace('blast', id)
       const depth = Math.max(1, Math.min(10, parseInt(url.searchParams.get('depth') || '3', 10)))
       const dir = url.searchParams.get('dir') === 'deps' ? 'deps' : 'users'
       const r = computeBlastRadius(id, depth, dir)
-      if (!r) return writeJson(res, 404, { error: 'not found' })
+      if (!r) { emitTrace('blast', id); return writeJson(res, 404, { error: 'not found' }) }
+      // Log impact-level trust meta: how many impacted files use dynamic patterns
+      // (→ the true blast may be larger than the count shown).
+      const dynHits = r.files.filter((f) => (scanner.files.get(f.id)?.dynamicPatterns || []).length).length
+      emitTrace('blast', id, { n: r.totalFiles, dyn: dynHits || undefined })
+      // Send all impacted node ids to renderer for visual highlight
+      mainWindow?.webContents.send('control:blast', { seed: id, ids: r.files.map((f) => f.id) })
+      return writeJson(res, 200, r)
       // Send all impacted node ids to renderer for visual highlight
       mainWindow?.webContents.send('control:blast', { seed: id, ids: r.files.map((f) => f.id) })
       return writeJson(res, 200, r)
