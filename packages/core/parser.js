@@ -197,6 +197,26 @@ function detectDynamicPatterns(content, ext) {
     if (/\bexec\s*\(/.test(content)) found.push('exec')
     if (/\bgetattr\s*\(/.test(content)) found.push('getattr')
   }
+  // Cross-language dependency-injection + reflection blind spots: the dependency
+  // is real at runtime but its target isn't a static import/use, so the graph
+  // can't see it. High-signal patterns only (not every polymorphic call).
+  if (ext === 'java' || ext === 'kt') {
+    if (/@(?:Autowired|Inject|Resource|Bean|Component|Service|Repository|Provides)\b/.test(content)) found.push('DI annotation')
+    if (/\bClass\.forName\s*\(|\.getDeclaredMethod\s*\(|\.getMethod\s*\(|\.newInstance\s*\(/.test(content)) found.push('reflection')
+  }
+  if (ext === 'cs') {
+    if (/\bservices\.(?:AddScoped|AddTransient|AddSingleton)\b|\[Inject\]/.test(content)) found.push('DI registration')
+    if (/\bType\.GetType\s*\(|\bActivator\.CreateInstance\s*\(|\bAssembly\.Load\b|\.GetMethod\s*\(/.test(content)) found.push('reflection')
+  }
+  if (ext === 'go') {
+    if (/\breflect\.(?:ValueOf|TypeOf)\b|\.MethodByName\s*\(|\bplugin\.Open\s*\(/.test(content)) found.push('reflection/plugin')
+  }
+  if (ext === 'php') {
+    if (/\bcall_user_func|\bReflectionClass\b|\bclass_exists\s*\(|\$\$|\b(?:app|resolve)\s*\(/.test(content)) found.push('dynamic/DI call')
+  }
+  if (ext === 'rb') {
+    if (/\.(?:send|public_send)\s*\(|\bconst_get\b|\bmethod_missing\b|\bdefine_method\b/.test(content)) found.push('metaprogramming')
+  }
   return found  // empty array = no dynamic patterns
 }
 

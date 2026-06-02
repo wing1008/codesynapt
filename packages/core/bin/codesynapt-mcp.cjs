@@ -184,7 +184,8 @@ const TOOLS = [
       '  · safety — 🟢/🟡/🔴 verdict + reasons + one-line advice (the usual first call). (id, deep=true returns full impacted list)\n' +
       '  · bundle — pack closest neighbours within token budget — call when safety=🟡/🔴 to load the right context (id, budget=8000, depth=3)\n' +
       '  · radius — transitive dependents/dependencies via BFS, with token estimate (deeper analysis when needed) (id, depth=3, dir=users|deps)\n' +
-      'RULE: 🔴 RISKY → STOP, surface to user, do not auto-edit. 🟡 CAUTION → call bundle first.',
+      'RULE: 🔴 RISKY → STOP, surface to user, do not auto-edit. 🟡 CAUTION → call bundle first.\n' +
+      'CAVEAT: if the response has a `caveat` field, the impact set contains files using dynamic/reflective/DI deps that static analysis CANNOT resolve — the real blast may be LARGER. Do NOT treat the count as complete; inspect caveat.dynamicFiles directly.',
     inputSchema: {
       type: 'object',
       properties: {

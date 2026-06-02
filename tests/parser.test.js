@@ -306,6 +306,17 @@ describe('parseFile — confidence (P2·3)', () => {
     const r = parseFile('x.py', `exec('print(1)')`, 'py')
     expect(r.confidence).toBe('low')
   })
+
+  it('flags DI / reflection / metaprogramming blind spots (2026-06-02)', () => {
+    expect(parseFile('A.java', `@Autowired private Svc s;`, 'java').dynamicPatterns).toContain('DI annotation')
+    expect(parseFile('A.java', `Class.forName("x").newInstance();`, 'java').dynamicPatterns).toContain('reflection')
+    expect(parseFile('P.cs', `services.AddScoped<IFoo, Foo>();`, 'cs').dynamicPatterns).toContain('DI registration')
+    expect(parseFile('g.go', `reflect.ValueOf(x).MethodByName("Run").Call(nil)`, 'go').dynamicPatterns).toContain('reflection/plugin')
+    expect(parseFile('s.php', `$obj = app(Foo::class);`, 'php').dynamicPatterns).toContain('dynamic/DI call')
+    expect(parseFile('r.rb', `obj.send(:run)`, 'rb').dynamicPatterns).toContain('metaprogramming')
+    // a plain file has no blind-spot markers (no false flags)
+    expect(parseFile('q.rb', `require_relative 'x'\nFoo.new.run`, 'rb').dynamicPatterns).toEqual([])
+  })
 })
 
 describe('resolveImport', () => {

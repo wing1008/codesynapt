@@ -356,11 +356,28 @@ function createControlServer(opts) {
       else if (f.ext) categories.source++
       else categories.other++
     }
+    // Blind-spot marker: files in the impact set (incl. seed) that use dynamic /
+    // reflective / DI patterns the static graph can't resolve. Their true edges
+    // may be missing, so the real blast could be LARGER — tell the agent exactly
+    // where to look instead of letting it trust the count blindly.
+    const dynamicFiles = []
+    for (const f of files) {
+      const sf = scanner.files.get(f.id)
+      if (sf && (sf.dynamicPatterns || []).length) dynamicFiles.push({ id: f.id, patterns: sf.dynamicPatterns })
+    }
+    const caveat = dynamicFiles.length ? {
+      incomplete: true,
+      reason: 'dynamic/reflective/DI dependencies are not statically resolvable',
+      dynamicFiles: dynamicFiles.slice(0, 50),
+      note: `${dynamicFiles.length} file(s) in this impact set use dynamic patterns — the true blast may be larger. Inspect these directly before relying on the count.`,
+    } : undefined
+
     return {
       seed: id, direction, depth,
       totalFiles: files.length, totalSize, totalLoc, tokenEstimate, categories,
       files: files.sort((a, b) => b.size - a.size).slice(0, 200),
       byDepth,
+      caveat,
     }
   }
 
@@ -381,6 +398,7 @@ function createControlServer(opts) {
         truncated: Math.max(0, d.ids.length - perHop),
       })),
       compact: true,
+      caveat: r.caveat,   // carry the blind-spot marker into the compact view
       note: r.totalFiles > perHop
         ? `compact view: ${r.totalFiles} files total, showing top ${perHop}/hop. Re-query with full=1 for complete lists.`
         : undefined,
