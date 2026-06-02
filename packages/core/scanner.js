@@ -1,0 +1,568 @@
+import fs from 'fs'
+import path from 'path'
+import chokidar from 'chokidar'
+import { EventEmitter } from 'events'
+import { parseFile, resolveImport, resolveImportAll, normalizeUrlPath, routePathToRegex,
+         extractNextApiRoutes, extractNuxtServerRoutes, extractSvelteKitServerRoutes } from './parser.js'
+import { detectMonorepo, packageForFile } from './monorepo.js'
+
+const IGNORE_DIRS = new Set([
+  'node_modules', '.git', '.svn', '.hg',
+  'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.vercel', '.svelte-kit',
+  '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
+  'venv', '.venv', 'env', 'site-packages', '.tox',
+  'target', '.cache', '.parcel-cache',
+  '.idea', '.vscode', '.DS_Store',
+  'coverage', '.nyc_output',
+  '.filegraph3d',
+  // Editor/note vaults: Obsidian, etc. — third-party plugin/theme code
+  // would otherwise dominate hub/orphan/url stats.
+  '.obsidian', '.logseq', '.foam',
+  // Mobile / native deps
+  'Pods', 'DerivedData', '.gradle',
+  // Misc
+  'vendor',  // Go / PHP / Ruby vendored deps
+])
+
+// Prefix-based ignore for variant names (e.g. `.venv-foo`, `venv-bar`).
+// Set lookup above is exact-match only, so `.venv-facefusion` wouldn't
+// match `.venv`. This catches the long tail.
+const IGNORE_DIR_PREFIXES = ['.venv', 'venv-', '.env-py']
+
+function isIgnoredDir(name) {
+  if (IGNORE_DIRS.has(name)) return true
+  for (const p of IGNORE_DIR_PREFIXES) if (name.startsWith(p)) return true
+  return false
+}
+
+// Parse a .gitignore file into a list of {pattern, negate} entries.
+// Implements a subset that covers the vast majority of real-world
+// .gitignore files: blank lines, comments, leading slash anchoring,
+// trailing slash for directories, `**` glob, `!` negation, `*`/`?`.
+function parseGitignore(text) {
+  const lines = text.split(/\r?\n/)
+  const rules = []
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    let pattern = line
+    let negate = false
+    if (pattern.startsWith('!')) { negate = true; pattern = pattern.slice(1) }
+    const anchored = pattern.startsWith('/')
+    if (anchored) pattern = pattern.slice(1)
+    const dirOnly = pattern.endsWith('/')
+    if (dirOnly) pattern = pattern.slice(0, -1)
+    // Build regex. Anchored uses ^ so it must start at the root.
+    // Non-anchored allows any directory prefix.
+    let re = anchored ? '^' : '(^|/)'
+    for (let i = 0; i < pattern.length; i++) {
+      const c = pattern[i]
+      if (c === '*') {
+        if (pattern[i + 1] === '*') { re += '.*'; i++ }
+        else re += '[^/]*'
+      } else if (c === '?') re += '[^/]'
+      else if ('.+^$()|{}\\'.includes(c)) re += '\\' + c
+      else re += c
+    }
+    // For dirOnly: must be followed by '/' (so it matches directory
+    // itself or any path inside it). For files: end-of-path or '/'.
+    re += dirOnly ? '(/|$)' : '($|/)'
+    try { rules.push({ regex: new RegExp(re), negate, dirOnly, raw: line }) }
+    catch { /* invalid pattern — skip */ }
+  }
+  return rules
+}
+
+function loadGitignoreRules(root) {
+  // Read only the root .gitignore. Per-subdirectory .gitignore is
+  // rare in practice and full support adds significant complexity.
+  const file = path.join(root, '.gitignore')
+  try {
+    if (fs.existsSync(file)) {
+      return parseGitignore(fs.readFileSync(file, 'utf8'))
+    }
+  } catch { /* ignore read errors */ }
+  return []
+}
+
+// Project-local CodeSynapt-specific ignore. Same syntax as .gitignore.
+// Use when you want to keep a folder in git but hide it from the
+// graph (e.g. vendored third-party code you don't edit).
+// Reads .codesynaptignore first, falls back to legacy .fg3dignore.
+function loadFg3dIgnoreRules(root) {
+  for (const name of ['.codesynaptignore', '.fg3dignore']) {
+    const file = path.join(root, name)
+    try {
+      if (fs.existsSync(file)) {
+        return parseGitignore(fs.readFileSync(file, 'utf8'))
+      }
+    } catch { /* ignore */ }
+  }
+  return []
+}
+
+function matchedByRules(relPath, isDir, rules) {
+  let ignored = false
+  for (const rule of rules) {
+    // Standard match
+    if (rule.regex.test(relPath)) {
+      if (!rule.dirOnly || isDir) {
+        ignored = !rule.negate
+        continue
+      }
+    }
+    // dirOnly rules should also match files inside the matching dir.
+    // Check every prefix (path up to each slash) against the dir rule.
+    if (rule.dirOnly && !isDir) {
+      const parts = relPath.split('/')
+      for (let i = 0; i < parts.length - 1; i++) {
+        const prefix = parts.slice(0, i + 1).join('/')
+        if (rule.regex.test(prefix + '/')) {
+          ignored = !rule.negate
+          break
+        }
+      }
+    }
+  }
+  return ignored
+}
+
+// Parse a .env file and return the list of keys declared inside.
+// Keys must start with an uppercase letter (POSIX convention) to match
+// our extractEnvUsage filter on the consumption side.
+function parseEnvFileKeys(absPath) {
+  let content
+  try { content = fs.readFileSync(absPath, 'utf8') } catch { return [] }
+  const keys = []
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const m = line.match(/^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=/)
+    if (m) keys.push(m[1])
+  }
+  return keys
+}
+
+const TRACKED_EXT = new Set([
+  // JS / TS family
+  'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+  // Python
+  'py', 'pyw', 'pyi',
+  // Jupyter — JSON wrapper around Python (usually) code cells
+  'ipynb',
+  // Lisp / Scheme / Clojure / Emacs
+  'lsp', 'dcl', 'lisp', 'el', 'clj', 'scm', 'cljc',
+  // Styles
+  'css', 'scss', 'sass', 'less', 'styl',
+  // Markup / Component
+  'html', 'htm', 'vue', 'svelte', 'astro',
+  // Config / Data
+  'json', 'yaml', 'yml', 'toml',
+  // Docs
+  'md', 'mdx', 'rst',
+  // JVM family
+  'java', 'kt',
+  // .NET family
+  'cs',
+  // Apple family
+  'swift',
+  // Dart / Flutter
+  'dart',
+  // Systems
+  'rs', 'go', 'rb', 'php',
+  'c', 'cc', 'cpp', 'h', 'hpp',
+  // Shell / scripting
+  'sh', 'bash', 'zsh', 'ps1', 'psm1',
+  // Data
+  'sql', 'xml',
+  // DB schema (Prisma)
+  'prisma',
+  // NOTE: dwg/dxf removed — binary CAD files have no import concept,
+  // scanning them just creates orphan noise.
+])
+
+export class Scanner extends EventEmitter {
+  constructor(root) {
+    super()
+    this.root = root
+    this.files = new Map() // id -> { id, ext, loc, size, imports, absPath, pkg }
+    this.edges = []
+    this.pkgEdges = []  // package-to-package edges aggregated from file edges
+    this.watcher = null
+    this._pendingSnapshot = null
+    // True once the chokidar 'ready' has fired and the initial walk is done.
+    // Used by /search to refuse work while the event loop is still saturated
+    // by add events — returning 503 instead of hanging.
+    this.initialScanComplete = false
+    this.gitignoreRules = loadGitignoreRules(root)
+    this.fg3dIgnoreRules = loadFg3dIgnoreRules(root)
+    this.envFiles = []  // [{ id, keys: [...] }] — populated on first ready
+    // Detect workspace structure once at construction. Cheap (one
+    // directory walk capped at depth 6). Result feeds package-level
+    // grouping in the UI and the /packages API for AI agents.
+    try { this.monorepo = detectMonorepo(root) }
+    catch (e) { this.monorepo = { kind: 'none', packages: [], rootIsPackage: false } }
+  }
+
+  toId(absPath) {
+    return path.relative(this.root, absPath).split(path.sep).join('/')
+  }
+
+  // ── Third-party folder auto-detection ────────────────────────
+  // Heuristic: a sub-folder is "vendored" / "third-party" if it shows
+  // any of these signals (combined for confidence):
+  //   - .git/ subdirectory (nested repo / submodule)              +0.5
+  //   - LICENSE/LICENCE/COPYING file at folder root               +0.2
+  //   - own package.json / pyproject.toml / Cargo.toml /
+  //     go.mod / Gemfile / pom.xml + the parent has its own       +0.3
+  //   - conventional name: vendor / vendors / third_party /       +0.2
+  //     third-party / external / deps / submodules / tools
+  //
+  // We only report folders, never auto-ignore — the user can copy
+  // suggested entries into `.codesynaptignore`. Reported via `vendorCandidates`
+  // on the snapshot.
+  scanVendorCandidates() {
+    this.vendorCandidates = []
+    const CONVENTIONAL_NAMES = new Set([
+      'vendor', 'vendors', 'third_party', 'third-party',
+      'external', 'externals', 'deps', 'submodules',
+    ])
+    const ROOT_HAS_MANIFEST = (() => {
+      for (const name of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'Gemfile', 'pom.xml']) {
+        if (fs.existsSync(path.join(this.root, name))) return true
+      }
+      return false
+    })()
+    // Folders we'd normally ignore in scanning but want to walk INTO
+    // when looking for vendor candidates (the whole point of this scan).
+    const VENDOR_OK = new Set(['vendor', 'vendors', 'third_party', 'third-party',
+                                'external', 'externals', 'deps', 'submodules', 'tools'])
+    const seen = new Set()
+    const walk = (dir, depth, relParts) => {
+      if (depth > 3) return    // shallow only — vendored libs usually at depth 1-2
+      let entries
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (!e.isDirectory()) continue
+        // Skip hard-ignores (node_modules, .git, .venv*, etc.) but keep
+        // conventional vendor names — those are what we're looking for.
+        if (!VENDOR_OK.has(e.name) && (IGNORE_DIRS.has(e.name) || isIgnoredDir(e.name))) continue
+        const full = path.join(dir, e.name)
+        const rel  = [...relParts, e.name].join('/')
+        if (seen.has(rel)) continue
+        seen.add(rel)
+
+        let confidence = 0
+        const reasons = []
+        try {
+          if (fs.existsSync(path.join(full, '.git'))) {
+            confidence += 0.5; reasons.push('nested .git (submodule or sub-repo)')
+          }
+          for (const lic of ['LICENSE', 'LICENCE', 'COPYING', 'LICENSE.md', 'LICENSE.txt']) {
+            if (fs.existsSync(path.join(full, lic))) { confidence += 0.2; reasons.push(`has ${lic}`); break }
+          }
+          if (ROOT_HAS_MANIFEST) {
+            for (const mf of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'Gemfile', 'pom.xml']) {
+              if (fs.existsSync(path.join(full, mf))) {
+                confidence += 0.3; reasons.push(`own ${mf} (sub-project)`); break
+              }
+            }
+          }
+          if (CONVENTIONAL_NAMES.has(e.name.toLowerCase())) {
+            confidence += 0.2; reasons.push('conventional vendor folder name')
+          }
+        } catch {}
+
+        if (confidence >= 0.3) {
+          this.vendorCandidates.push({
+            path: rel,
+            confidence: Math.min(1, +confidence.toFixed(2)),
+            reasons,
+          })
+        } else {
+          // Only recurse into non-obvious folders. Don't dive into
+          // anything already flagged (its children would inherit).
+          walk(full, depth + 1, [...relParts, e.name])
+        }
+      }
+    }
+    walk(this.root, 0, [])
+    this.vendorCandidates.sort((a, b) => b.confidence - a.confidence)
+  }
+
+  // ── .env file index ───────────────────────────────────────────
+  // We don't add .env files to the graph (they're config, not code),
+  // but we DO scan them to know which env vars are declared. The
+  // server then cross-references against extractEnvUsage in source.
+  scanEnvFiles() {
+    this.envFiles = []
+    const names = ['.env', '.env.local', '.env.production', '.env.development',
+                   '.env.test', '.env.example', '.env.sample']
+    const walk = (dir, depth) => {
+      if (depth > 4) return
+      let entries
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (isIgnoredDir(e.name)) continue
+        const full = path.join(dir, e.name)
+        if (e.isDirectory()) walk(full, depth + 1)
+        else if (e.isFile() && names.includes(e.name)) {
+          const keys = parseEnvFileKeys(full)
+          this.envFiles.push({ id: this.toId(full), keys })
+        }
+      }
+    }
+    walk(this.root, 0)
+  }
+
+  shouldTrack(absPath) {
+    const ext = path.extname(absPath).slice(1).toLowerCase()
+    return TRACKED_EXT.has(ext)
+  }
+
+  start() {
+    const root = this.root
+    const rules = this.gitignoreRules
+    const fg3dRules = this.fg3dIgnoreRules
+    this.watcher = chokidar.watch(root, {
+      ignored: (p, stats) => {
+        const rel = path.relative(root, p)
+        if (!rel) return false
+        const segments = rel.split(path.sep)
+        if (segments.some(isIgnoredDir)) return true
+        // .gitignore matching uses '/'-joined relative path
+        const relPosix = segments.join('/')
+        const isDir = stats?.isDirectory() ?? false
+        if (matchedByRules(relPosix, isDir, rules)) return true
+        if (fg3dRules.length && matchedByRules(relPosix, isDir, fg3dRules)) return true
+        return false
+      },
+      ignoreInitial: false,
+      persistent: true,
+      awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 80 },
+    })
+
+    let initial = true
+    let scanCount = 0
+    let lastProgressEmit = 0
+    this.watcher
+      .on('add', (p) => {
+        this.handleAdd(p, initial)
+        if (initial) {
+          scanCount++
+          // Throttle progress emission to ~10/sec; final ready emit
+          // gives the accurate total.
+          const now = Date.now()
+          if (now - lastProgressEmit > 100) {
+            lastProgressEmit = now
+            this.emit('scan-progress', { count: scanCount, done: false })
+          }
+        }
+      })
+      .on('change', (p) => this.handleChange(p))
+      .on('unlink', (p) => this.handleRemove(p))
+      .on('ready', () => {
+        initial = false
+        this.initialScanComplete = true
+        this.emit('scan-progress', { count: scanCount, done: true })
+        this.scanEnvFiles()
+        this.scanVendorCandidates()
+        this.rebuildEdges()
+        this.emitSnapshot()
+        this.emit('stats', { initialScanComplete: true, fileCount: this.files.size })
+      })
+      .on('error', (e) => console.error('watcher error:', e.message))
+  }
+
+  stop() {
+    if (this.watcher) this.watcher.close()
+  }
+
+  snapshot() {
+    return {
+      files: [...this.files.values()].map((f) => ({
+        id: f.id, ext: f.ext, loc: f.loc, size: f.size,
+        importCount: f.imports.length,
+        pkg: f.pkg || null,
+        hasDynamicResolution: (f.dynamicPatterns || []).length > 0,
+        dynamicPatterns:      f.dynamicPatterns || [],
+        confidence:           f.confidence || 'high',
+      })),
+      edges: this.edges,
+      monorepo: this.monorepo,
+      pkgEdges: this.pkgEdges,
+    }
+  }
+
+  emitSnapshot() {
+    // Debounce snapshots during burst changes
+    if (this._pendingSnapshot) clearTimeout(this._pendingSnapshot)
+    this._pendingSnapshot = setTimeout(() => {
+      this._pendingSnapshot = null
+      this._lastSnapshotAt = Date.now()
+      this.snapshotVersion = (this.snapshotVersion || 0) + 1
+      this.emit('snapshot', this.snapshot())
+    }, 60)
+  }
+
+  async handleAdd(absPath, initial) {
+    if (!this.shouldTrack(absPath)) return
+    const file = this.parseOne(absPath)
+    if (!file) return
+    this.files.set(file.id, file)
+    if (!initial) {
+      this.emit('file-added', { id: file.id, absPath })
+      this.rebuildEdges()
+      this.emitSnapshot()
+    }
+  }
+
+  async handleChange(absPath) {
+    if (!this.shouldTrack(absPath)) return
+    const file = this.parseOne(absPath)
+    if (!file) return
+    this.files.set(file.id, file)
+    this.emit('file-changed', { id: file.id, absPath })
+    this.rebuildEdges()
+    this.emitSnapshot()
+  }
+
+  handleRemove(absPath) {
+    const id = this.toId(absPath)
+    if (this.files.delete(id)) {
+      this.emit('file-removed', { id, absPath })
+      this.rebuildEdges()
+      this.emitSnapshot()
+    }
+  }
+
+  parseOne(absPath) {
+    let stat
+    try { stat = fs.statSync(absPath) } catch { return null }
+    const id = this.toId(absPath)
+    const ext = path.extname(absPath).slice(1).toLowerCase()
+    let content = ''
+    try { content = fs.readFileSync(absPath, 'utf8') } catch {}
+    const loc = content ? content.split('\n').length : 0
+    const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage, dbModels, confidence } = parseFile(absPath, content, ext)
+    // Augment with file-system server routes (Next.js / Nuxt 3 /
+    // SvelteKit). Conservative: append-only.
+    let finalRoutes = routes || []
+    if (['ts','tsx','js','jsx','mjs','cjs','mts','cts'].includes(ext)) {
+      const fsRoutes = [
+        ...extractNextApiRoutes(id, content),
+        ...extractNuxtServerRoutes(id, content),
+        ...extractSvelteKitServerRoutes(id, content),
+      ]
+      if (fsRoutes.length > 0) finalRoutes = [...finalRoutes, ...fsRoutes]
+    }
+    // Tag the file with its owning package (null if outside all
+    // packages or no monorepo). Used by UI for package-level grouping
+    // and by API endpoints for package-level slicing.
+    const pkg = this.monorepo?.packages?.length
+      ? packageForFile(id, this.monorepo.packages)
+      : null
+    return {
+      id, ext, loc, size: stat.size, imports, absPath,
+      routes:           finalRoutes,
+      apiCalls:         apiCalls         || [],
+      externalUrls:     externalUrls     || [],
+      dynamicPatterns:  dynamicPatterns  || [],
+      envUsage:         envUsage         || [],
+      dbModels:         dbModels         || [],
+      confidence:       confidence       || 'high',
+      pkg,
+      lastSeenAt:       Date.now(),
+    }
+  }
+
+  rebuildEdges() {
+    const edges = []
+    const seen = new Set()
+    const idSet = new Set(this.files.keys())
+
+    // 1) Static import edges (file→file dependency)
+    for (const file of this.files.values()) {
+      for (const imp of file.imports) {
+        // resolveImportAll fans out module/namespace imports (Go/C#/Swift) to
+        // every file in the unit; for file-precise languages it returns the
+        // single target, so behaviour there is unchanged.
+        for (const target of resolveImportAll(file.absPath, imp.spec, this.root, idSet, file.ext)) {
+          if (target && target !== file.id) {
+            const key = `${file.id}→${target}:${imp.kind}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            edges.push({ s: file.id, t: target, k: imp.kind })
+          }
+        }
+      }
+    }
+
+    // 2) Full-stack edges (client API call → server route handler)
+    //
+    // Build a route index across all files, then for each apiCall try
+    // to match. A single client URL may match multiple registered
+    // routes (e.g. /users/123 matches both /users/:id GET and POST) —
+    // we emit edges to each matching handler so the user sees all the
+    // server-side files involved. Matching keys on (method, path) so
+    // an axios.post matches the POST handler, not the GET one.
+    const routeIndex = []  // { fileId, method, regex, raw }
+    for (const file of this.files.values()) {
+      for (const r of file.routes) {
+        try {
+          routeIndex.push({
+            fileId: file.id,
+            method: r.method,
+            regex: routePathToRegex(r.path),
+            raw: r.path,
+          })
+        } catch { /* invalid regex — skip */ }
+      }
+    }
+
+    if (routeIndex.length > 0) {
+      for (const file of this.files.values()) {
+        for (const call of file.apiCalls) {
+          const p = normalizeUrlPath(call.url)
+          if (!p) continue
+          for (const route of routeIndex) {
+            // Method match: HEAD/OPTIONS handled by ALL; otherwise exact.
+            // Also: client GET (the default) matches a route's ALL.
+            if (route.method !== 'ALL' && route.method !== call.method) continue
+            if (!route.regex.test(p)) continue
+            if (route.fileId === file.id) continue   // self-call, skip
+            const key = `${file.id}→${route.fileId}:api`
+            if (seen.has(key)) continue
+            seen.add(key)
+            edges.push({ s: file.id, t: route.fileId, k: 'api' })
+          }
+        }
+      }
+    }
+
+    this.edges = edges
+    this.rebuildPackageEdges()
+  }
+
+  // Aggregate file-level edges into package-level edges. A single edge
+  // between two packages can correspond to many file edges — we keep
+  // a count so the UI can size them by weight.
+  rebuildPackageEdges() {
+    if (!this.monorepo?.packages?.length) { this.pkgEdges = []; return }
+    const counts = new Map()  // key: "src→dst" → { s, t, count, kinds: Set }
+    for (const e of this.edges) {
+      const sf = this.files.get(e.s)
+      const tf = this.files.get(e.t)
+      if (!sf || !tf) continue
+      const sp = sf.pkg, tp = tf.pkg
+      if (!sp || !tp || sp === tp) continue
+      const key = sp + '→' + tp
+      const c = counts.get(key)
+      if (c) { c.count++; c.kinds.add(e.k) }
+      else counts.set(key, { s: sp, t: tp, count: 1, kinds: new Set([e.k]) })
+    }
+    this.pkgEdges = [...counts.values()].map((e) => ({
+      s: e.s, t: e.t, count: e.count, kinds: [...e.kinds],
+    })).sort((a, b) => b.count - a.count)
+  }
+}

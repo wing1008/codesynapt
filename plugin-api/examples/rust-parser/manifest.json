@@ -1,0 +1,12 @@
+{
+  "id": "rust-parser",
+  "name": "Rust Parser",
+  "version": "1.0.0",
+  "author": "filegraph3d",
+  "description": "Parse Rust `use` statements and mod declarations to build the dependency graph",
+  "type": "parser",
+  "main": "main.js",
+  "minAppVersion": "0.10.0",
+  "license": "MIT",
+  "permissions": ["parse"]
+}

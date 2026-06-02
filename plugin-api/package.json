@@ -1,0 +1,20 @@
+{
+  "name": "@filegraph3d/plugin-api",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript types and helpers for filegraph3d plugins",
+  "types": "types.d.ts",
+  "files": [
+    "types.d.ts",
+    "README.md",
+    "LICENSE",
+    "examples/"
+  ],
+  "license": "MIT",
+  "keywords": ["filegraph3d", "plugin", "api", "code-visualization"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_USER/filegraph3d.git",
+    "directory": "plugin-api"
+  }
+}

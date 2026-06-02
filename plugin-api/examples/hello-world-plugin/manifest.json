@@ -1,0 +1,12 @@
+{
+  "id": "hello-world",
+  "name": "Hello World",
+  "version": "1.0.0",
+  "author": "filegraph3d",
+  "description": "Minimal plugin scaffold — shows a toast on every selection",
+  "type": "action",
+  "main": "main.js",
+  "minAppVersion": "0.10.0",
+  "license": "MIT",
+  "permissions": []
+}

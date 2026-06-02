@@ -1,0 +1,216 @@
+{
+  "name": "codesynapt",
+  "version": "0.0.0",
+  "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
+  "license": "AGPL-3.0-or-later",
+  "author": {
+    "name": "wing1008",
+    "url": "https://github.com/wing1008"
+  },
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/wing1008"
+    },
+    {
+      "type": "individual",
+      "url": "https://buymeacoffee.com/wing1008"
+    }
+  ],
+  "homepage": "https://github.com/wing1008/codesynapt#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wing1008/codesynapt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wing1008/codesynapt/issues"
+  },
+  "keywords": [
+    "code-visualization",
+    "dependency-graph",
+    "mcp",
+    "ai-coding-agent",
+    "blast-radius",
+    "3d",
+    "electron",
+    "three.js",
+    "developer-tools"
+  ],
+  "type": "module",
+  "main": "electron/main.cjs",
+  "bin": {
+    "codesynapt-server": "./server.js",
+    "codesynapt": "./packages/core/bin/codesynapt.cjs",
+    "cs": "./packages/core/bin/codesynapt.cjs",
+    "codesynapt-mcp": "./packages/core/bin/codesynapt-mcp.cjs"
+  },
+  "files": [
+    "packages/core/",
+    "electron/",
+    "public/",
+    "scripts/",
+    "plugin-api/",
+    "server.js",
+    "LICENSE",
+    "LICENSES.md",
+    "CHANGELOG.md",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/copy-vendor.js",
+    "start": "electron .",
+    "electron": "electron .",
+    "server": "node server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:smoke": "node test.js",
+    "bench": "node scripts/perf-test.js",
+    "license-check": "node scripts/license-check.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "node scripts/download-bundled-node.cjs && electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "chokidar": "^3.6.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "typescript": "^6.0.3",
+    "web-tree-sitter": "^0.20.8"
+  },
+  "optionalDependencies": {
+    "@xenova/transformers": "^2.17.2",
+    "three": "^0.160.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@electron/fuses": "^2.1.1",
+    "autocannon": "^8.0.0",
+    "clinic": "^13.0.0",
+    "electron": "^41.0.0",
+    "electron-builder": "^25.0.0",
+    "electron-updater": "^6.8.3",
+    "memlab": "^2.0.3",
+    "playwright": "^1.60.0",
+    "vitest": "^2.1.9"
+  },
+  "build": {
+    "appId": "io.codesynapt.desktop",
+    "productName": "CodeSynapt",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "afterPack": "scripts/fuses-after-pack.cjs",
+    "asar": false,
+    "files": [
+      "electron/**/*",
+      "public/**/*",
+      "packages/core/**/*",
+      "plugin-api/**/*",
+      "scripts/**/*",
+      "server.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/bundled-node/",
+        "to": "bundled-node/",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/installer-bin/",
+        "to": "installer-bin/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CodeSynapt",
+      "uninstallDisplayName": "CodeSynapt ${version}",
+      "deleteAppDataOnUninstall": false,
+      "differentialPackage": false,
+      "runAfterFinish": true,
+      "include": "build/installer.nsh"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "synopsis": "MCP-native code graph visualizer for AI coding agents",
+      "description": "CodeSynapt visualizes how files in a codebase connect to each other in 3D, and exposes the dependency graph to AI coding agents via MCP — so agents can see blast radius before editing."
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "wing1008",
+        "repo": "codesynapt"
+      }
+    ]
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

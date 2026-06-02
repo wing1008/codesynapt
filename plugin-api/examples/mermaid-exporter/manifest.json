@@ -1,0 +1,12 @@
+{
+  "id": "mermaid-exporter",
+  "name": "Mermaid Exporter",
+  "version": "1.0.0",
+  "author": "filegraph3d",
+  "description": "Export the graph as a Mermaid diagram (.mmd) for use in Markdown",
+  "type": "exporter",
+  "main": "main.js",
+  "minAppVersion": "0.10.0",
+  "license": "MIT",
+  "permissions": []
+}

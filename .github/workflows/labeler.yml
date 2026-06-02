@@ -1,0 +1,39 @@
+name: labeler
+
+# Runs on every PR open/sync/reopen to apply file-path-based labels.
+#
+# We use pull_request_target (not pull_request) so the workflow can
+# access GITHUB_TOKEN with write permissions on PRs from forks. This is
+# safe because the labeler action:
+#   1. Does not check out PR code
+#   2. Only reads the list of changed files from the GitHub API
+#   3. Only writes labels (no other repository changes)
+#
+# Do not add additional steps that execute PR code here, or this
+# becomes a security hole.
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read         # to read the labeler config
+  pull-requests: write   # to apply labels
+
+# One labeler run per PR at a time — concurrent runs may apply duplicate labels
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          configuration-path: .github/labeler.yml
+          # Don't remove labels the maintainer added manually
+          sync-labels: false

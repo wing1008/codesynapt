@@ -1,0 +1,31 @@
+/* Sunset theme — warm coral/orange palette */
+/* Loaded automatically when user selects "Sunset" in Appearance */
+
+body[data-theme="sunset-theme"] {
+  --bg:           #1A0F0A;
+  --bg-deep:      #100805;
+  --bg-elev:      rgba(40, 22, 14, 0.85);
+  --bg-glass:     rgba(26, 15, 10, 0.85);
+  --bg-solid:     #261810;
+
+  --border:       rgba(255, 140, 66, 0.18);
+  --border-hot:   rgba(255, 140, 66, 0.55);
+  --border-edge:  rgba(255, 140, 66, 0.06);
+
+  --fg:           #FFE4C4;
+  --fg-dim:       #D8B080;
+  --fg-mute:      #A88060;
+  --fg-faint:     #685040;
+
+  --accent:       #FF8C42;     /* warm orange */
+  --accent-warm:  #FFB347;     /* amber */
+  --accent-pink:  #FF6B6B;     /* coral red */
+  --accent-cool:  #E8A87C;     /* dusty rose */
+  --danger:       #FF4444;
+
+  --decoration:   0;
+  --grain:        0.03;
+  --motion-scale: 0.6;
+
+  --radius:       4px;
+}

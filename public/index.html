@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' blob: 'sha256-NfHJr+xcDJiAGqHYgFEaR5vX+0YDa2Tbke39iP8L6uY='; img-src 'self' data:; connect-src 'self' ws: wss: blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';" />
+<title>CodeSynapt</title>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body class="no-folder">
+  <!-- Top bar -->
+  <header id="topbar">
+    <div class="drag-region"></div>
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="label">code<span class="accent">synapt</span></span>
+    </div>
+
+    <!-- Group: file ops -->
+    <div class="tb-group">
+      <button id="openFolderBtn" class="folder-btn" data-i18n-title="topbar.open_folder.title">
+        <span class="icon">📂</span>
+        <span id="pathLabel">Open Folder…</span>
+      </button>
+      <button id="projectSwitchBtn" class="folder-btn" data-i18n-title="topbar.project_switch.title">
+        <span class="icon">▾</span>
+      </button>
+      <button id="refreshBtn" class="folder-btn" data-i18n-title="topbar.refresh.title" disabled>
+        <span class="icon">↻</span>
+      </button>
+    </div>
+
+    <!-- Group: search -->
+    <div class="tb-group">
+      <div class="search-input-wrap">
+        <input id="search" type="text" data-i18n-placeholder="search.placeholder" autocomplete="off" />
+        <span id="searchCount" class="search-count"></span>
+      </div>
+      <button id="searchSyntaxBtn" class="micro-btn" data-i18n-title="search.syntax.title">aA</button>
+      <button id="searchModeBtn" class="micro-btn" data-i18n-title="search.mode.title">◐</button>
+    </div>
+
+    <!-- Group: view controls -->
+    <div class="tb-group">
+      <button id="pause" data-i18n-title="search.pause.title">❚❚</button>
+      <button id="recenter" data-i18n-title="search.recenter.title">⊕</button>
+    </div>
+
+    <!-- Group: AI tools -->
+    <div class="tb-group">
+      <button id="changesBtn" data-i18n-title="search.changes.title">📝</button>
+      <button id="statsBtn" class="micro-btn" data-i18n-title="search.stats.title">📊</button>
+    </div>
+
+    <div id="filterBadges" class="filter-badges"></div>
+
+    <div class="tb-spacer"></div>
+
+    <!-- Group: meta + more -->
+    <div class="meta">
+      <span id="stat-files">—</span>
+      <span class="sep">·</span>
+      <span id="stat-edges">—</span>
+    </div>
+    <div class="tb-group">
+      <button id="moreBtn" data-i18n-title="search.more.title">⋯</button>
+    </div>
+  </header>
+
+  <canvas id="canvas"></canvas>
+
+  <!-- View cube — small 3D widget showing current viewing angle, syncs with main camera -->
+  <canvas id="viewCubeCanvas" width="120" height="120"></canvas>
+
+
+  <!-- More popover — opens under the ⋯ button -->
+  <div id="moreMenu" class="hidden">
+    <button id="timelapseBtn" class="more-item" data-i18n-title="search.timelapse.title">
+      <span class="more-icon">⏱</span><span class="more-label" data-i18n="more.timelapse">Time-lapse</span>
+    </button>
+    <button id="packagesBtn" class="more-item" data-i18n-title="search.packages.title">
+      <span class="more-icon">📦</span><span class="more-label" data-i18n="more.packages">Packages</span>
+    </button>
+    <button id="legacyBtn" class="more-item" data-i18n-title="search.legacy.title">
+      <span class="more-icon">🧹</span><span class="more-label" data-i18n="more.legacy">Legacy audit</span>
+    </button>
+    <button id="langToggle" class="more-item" data-i18n-title="lang.toggle.title">
+      <span class="more-icon" id="langCurrent">A文</span><span class="more-label" data-i18n="more.lang">Language</span>
+    </button>
+    <button id="settingsBtn" class="more-item" data-i18n-title="search.settings.title">
+      <span class="more-icon">⚙</span><span class="more-label" data-i18n="more.settings">Settings</span>
+    </button>
+  </div>
+
+  <!-- Project switcher popover (anchored under the ▾ button) -->
+  <div id="projectSwitcher" class="hidden">
+    <div class="psw-head">
+      <span class="kicker" data-i18n="psw.title">projects</span>
+      <button id="pswPinCurrent" class="psw-btn" data-i18n-title="psw.pin_current.title">★ +</button>
+      <button id="pswClose" class="psw-btn">✕</button>
+    </div>
+    <div id="pswPinnedList" class="psw-section"></div>
+    <div class="psw-section-title" data-i18n="psw.recent">recent</div>
+    <div id="pswRecentList" class="psw-section"></div>
+    <div class="psw-empty hidden" id="pswEmpty" data-i18n="psw.empty">아직 등록된 프로젝트 없음. 폴더 열고 ★ +로 추가</div>
+  </div>
+
+  <!-- AI changes panel — files modified this session -->
+  <aside id="changes" class="hidden">
+    <div class="changes-head">
+      <div class="kicker" data-i18n="kicker.ai_work">ai work · session changes</div>
+      <button id="closeChanges">✕</button>
+    </div>
+    <div id="changesList" class="changes-list"></div>
+  </aside>
+
+
+  <!-- Packages panel (monorepo overview) -->
+  <aside id="packages" class="hidden">
+    <div class="packages-head">
+      <div class="kicker" data-i18n="kicker.packages">monorepo · packages</div>
+      <button id="closePackages">✕</button>
+    </div>
+    <div id="packagesMeta" class="packages-meta">—</div>
+    <div class="packages-actions">
+      <button id="pkgGroupingToggle" class="psw-btn" data-i18n="packages.group_by_package">패키지로 묶기</button>
+    </div>
+    <div id="packagesList" class="packages-list"></div>
+    <div id="packageDetail" class="package-detail hidden"></div>
+  </aside>
+
+  <!-- Legacy / migration audit panel -->
+  <aside id="legacy" class="hidden">
+    <div class="legacy-head">
+      <div class="kicker" data-i18n="kicker.legacy_audit">cleanup · migration audit</div>
+      <button id="closeLegacy">✕</button>
+    </div>
+    <div id="legacyMeta" class="legacy-meta">—</div>
+    <div class="legacy-toolbar">
+      <label class="legacy-conf">
+        <span data-i18n="legacy.min_conf">min confidence</span>
+        <input id="legacyMinConf" type="range" min="0" max="100" value="50">
+        <span id="legacyMinConfVal">0.50</span>
+      </label>
+      <button id="legacyHighlightBtn" class="psw-btn" data-i18n="legacy.highlight">3D 하이라이트</button>
+    </div>
+    <div id="legacyTabs" class="legacy-tabs">
+      <button data-tab="orphan"   class="legacy-tab active" data-i18n="legacy.tab.orphan">orphan</button>
+      <button data-tab="path"     class="legacy-tab" data-i18n="legacy.tab.path">path</button>
+      <button data-tab="filename" class="legacy-tab" data-i18n="legacy.tab.filename">filename</button>
+      <button data-tab="duplicate"class="legacy-tab" data-i18n="legacy.tab.duplicate">duplicate</button>
+    </div>
+    <div id="legacyList" class="legacy-list"></div>
+  </aside>
+
+  <!-- Time-lapse slider overlay -->
+  <div id="timelapse" class="hidden">
+    <div class="tl-head">
+      <span class="kicker" data-i18n="kicker.timelapse">time-lapse</span>
+      <span id="tlStamp" class="tl-stamp">—</span>
+      <button id="tlPlay" class="tl-btn" title="Play">▶</button>
+      <button id="tlReset" class="tl-btn" title="Show all">⏏</button>
+      <button id="tlClose" class="tl-btn" title="Close">✕</button>
+    </div>
+    <input id="tlSlider" type="range" min="0" max="100" value="100">
+    <div id="tlMeta" class="tl-meta">— · — · —</div>
+  </div>
+
+  <!-- Settings panel -->
+  <aside id="settings" class="hidden">
+    <div class="settings-head">
+      <div class="kicker" data-i18n="kicker.settings">settings</div>
+      <button id="closeSettings">✕</button>
+    </div>
+    <div class="settings-body">
+      <div class="settings-section" data-i18n="settings.physics.title">physics backend</div>
+      <p class="settings-help" data-i18n="settings.physics.help"></p>
+      <div class="radio-group" id="backendRadios">
+        <label class="radio">
+          <input type="radio" name="backend" value="auto" />
+          <span class="radio-label">
+            <strong data-i18n="settings.physics.auto">Auto</strong>
+            <span class="radio-sub" data-i18n="settings.physics.auto.sub"></span>
+          </span>
+        </label>
+        <label class="radio is-disabled" data-i18n-title="settings.physics.gpu.tip">
+          <input type="radio" name="backend" value="gpu" disabled />
+          <span class="radio-label">
+            <strong data-i18n="settings.physics.gpu">GPU only</strong>
+            <span class="radio-sub" data-i18n="settings.physics.gpu.sub"></span>
+          </span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="backend" value="cpu" />
+          <span class="radio-label">
+            <strong data-i18n="settings.physics.cpu">CPU only</strong>
+            <span class="radio-sub" data-i18n="settings.physics.cpu.sub"></span>
+          </span>
+        </label>
+      </div>
+      <div id="backendStatus" class="status-block">
+        <div class="status-row"><span class="status-key" data-i18n="settings.physics.active">active</span><span id="statusActive">—</span></div>
+        <div class="status-row"><span class="status-key" data-i18n="settings.physics.gpu_time">gpu time</span><span id="statusGpuTime">—</span></div>
+        <div class="status-row"><span class="status-key" data-i18n="settings.physics.status">status</span><span id="statusReason" class="reason">—</span></div>
+      </div>
+
+      <div class="settings-section" style="margin-top: 22px;" data-i18n="settings.focus.title">focus propagation</div>
+      <p class="settings-help" data-i18n="settings.focus.help"></p>
+      <div class="depth-control">
+        <label class="depth-input-label">
+          <span data-i18n="settings.focus.depth">depth</span>
+          <input type="number" id="focusDepthInput" min="1" max="20" step="1" value="3" />
+          <span class="depth-hint" data-i18n="settings.focus.hops">hops</span>
+        </label>
+        <button id="showAllBtn" class="toggle-btn" type="button">
+          <span class="toggle-dot"></span>
+          <span data-i18n="settings.focus.show_all">Show all connected</span>
+        </button>
+      </div>
+      <div class="depth-legend">
+        <div class="depth-row"><span class="depth-swatch" style="opacity:1.0"></span><span data-i18n="settings.focus.legend.selected">selected file</span></div>
+        <div class="depth-row"><span class="depth-swatch" style="opacity:0.78"></span><span data-i18n="settings.focus.legend.direct">directly connected</span></div>
+        <div class="depth-row"><span class="depth-swatch" style="opacity:0.56"></span><span data-i18n="settings.focus.legend.one">one degree away</span></div>
+        <div class="depth-row"><span class="depth-swatch" style="opacity:0.36"></span><span data-i18n="settings.focus.legend.two">two degrees away</span></div>
+        <div class="depth-row"><span class="depth-swatch" style="opacity:0.10"></span><span data-i18n="settings.focus.legend.beyond">unrelated / beyond depth</span></div>
+      </div>
+
+      <div class="settings-section" style="margin-top: 22px;" data-i18n="settings.layout.title">layout</div>
+      <p class="settings-help" data-i18n="settings.layout.help"></p>
+      <button id="folderGroupBtn" class="toggle-btn" type="button">
+        <span class="toggle-dot"></span>
+        <span data-i18n="settings.layout.cluster">Cluster files by folder</span>
+      </button>
+
+      <div class="slider-row">
+        <label class="slider-label">
+          <span data-i18n="settings.layout.node_distance">node distance</span>
+          <span id="nodeDistanceVal" class="slider-val">1.0×</span>
+        </label>
+        <input type="range" id="nodeDistanceSlider" min="0.3" max="3" step="0.05" value="1" />
+      </div>
+      <div class="slider-row">
+        <label class="slider-label">
+          <span data-i18n="settings.layout.node_size">node size</span>
+          <span id="nodeSizeVal" class="slider-val">1.0×</span>
+        </label>
+        <input type="range" id="nodeSizeSlider" min="0.3" max="3" step="0.05" value="1" />
+      </div>
+      <div class="slider-row">
+        <label class="slider-label">
+          <span data-i18n="settings.layout.max_world">max world size</span>
+          <span id="maxWorldVal" class="slider-val">200</span>
+        </label>
+        <input type="range" id="maxWorldSlider" min="60" max="2000" step="20" value="200" />
+      </div>
+      <div class="slider-row">
+        <label class="slider-label">
+          <span data-i18n="settings.layout.folder_strength">folder cluster strength</span>
+          <span id="folderStrengthVal" class="slider-val">0.30</span>
+        </label>
+        <input type="range" id="folderStrengthSlider" min="0" max="0.4" step="0.01" value="0.30" />
+      </div>
+      <div class="slider-row">
+        <label class="slider-label">
+          <span data-i18n="settings.layout.folder_spread">folder cluster spread</span>
+          <span id="folderSpreadVal" class="slider-val">0.85</span>
+        </label>
+        <input type="range" id="folderSpreadSlider" min="0.3" max="1.0" step="0.05" value="0.85" />
+      </div>
+      <button id="resetLayoutBtn" class="micro-btn" style="margin-top:6px;" data-i18n="settings.layout.reset">reset to defaults</button>
+
+      <div class="settings-section" style="margin-top: 22px;" data-i18n="settings.appearance.title">appearance</div>
+      <p class="settings-help" data-i18n="settings.appearance.help"></p>
+      <div class="theme-grid" id="themeGrid">
+        <button class="theme-card" data-theme="observatory" type="button">
+          <span class="theme-swatches">
+            <span class="theme-sw" style="background:#7ECFCF"></span>
+            <span class="theme-sw" style="background:#FFC850"></span>
+            <span class="theme-sw" style="background:#E879A6"></span>
+          </span>
+          <span class="theme-name">Observatory</span>
+          <span class="theme-desc">Brutalist + brackets · default</span>
+        </button>
+        <button class="theme-card" data-theme="minimal" type="button">
+          <span class="theme-swatches">
+            <span class="theme-sw" style="background:#8FB8E0"></span>
+            <span class="theme-sw" style="background:#E0B870"></span>
+            <span class="theme-sw" style="background:#C088B0"></span>
+          </span>
+          <span class="theme-name">Minimal</span>
+          <span class="theme-desc">Quiet · graph-first</span>
+        </button>
+        <button class="theme-card" data-theme="terminal" type="button">
+          <span class="theme-swatches">
+            <span class="theme-sw" style="background:#5B9DFF"></span>
+            <span class="theme-sw" style="background:#A8A8A8"></span>
+            <span class="theme-sw" style="background:#FF6464"></span>
+          </span>
+          <span class="theme-name">Terminal</span>
+          <span class="theme-desc">Monochrome · single accent</span>
+        </button>
+        <button class="theme-card" data-theme="maximal" type="button">
+          <span class="theme-swatches">
+            <span class="theme-sw" style="background:#FF55BB"></span>
+            <span class="theme-sw" style="background:#FFD700"></span>
+            <span class="theme-sw" style="background:#66E5FF"></span>
+          </span>
+          <span class="theme-name">Maximal</span>
+          <span class="theme-desc">Expressive · vivid</span>
+        </button>
+        <button class="theme-card" data-theme="carbon" type="button">
+          <span class="theme-swatches">
+            <span class="theme-sw" style="background:#50DC64"></span>
+            <span class="theme-sw" style="background:#FFD24D"></span>
+            <span class="theme-sw" style="background:#000000"></span>
+          </span>
+          <span class="theme-name">Carbon</span>
+          <span class="theme-desc">CRT phosphor · vim-ish</span>
+        </button>
+        <button class="theme-card" data-theme="mono" type="button">
+          <span class="theme-swatches">
+            <span class="theme-sw" style="background:#7AA2F7"></span>
+            <span class="theme-sw" style="background:#E0AF68"></span>
+            <span class="theme-sw" style="background:#BB9AF7"></span>
+          </span>
+          <span class="theme-name">Mono</span>
+          <span class="theme-desc">Tokyo Night · easy on eyes</span>
+        </button>
+        <button class="theme-card" data-theme="daylight" type="button">
+          <span class="theme-swatches">
+            <span class="theme-sw" style="background:#0969DA"></span>
+            <span class="theme-sw" style="background:#BF8700"></span>
+            <span class="theme-sw" style="background:#FFFFFF;border:1px solid rgba(0,0,0,0.1)"></span>
+          </span>
+          <span class="theme-name">Daylight</span>
+          <span class="theme-desc">Light mode · clean white</span>
+        </button>
+      </div>
+
+      <div class="settings-section" style="margin-top: 22px;" data-i18n="settings.export.title">export</div>
+      <p class="settings-help" data-i18n="settings.export.help"></p>
+      <div class="export-row">
+        <button id="exportPngBtn" class="export-btn" type="button" data-i18n="settings.export.png">📷 PNG screenshot</button>
+        <button id="exportJsonBtn" class="export-btn" type="button" data-i18n="settings.export.json">⤓ JSON graph</button>
+        <button id="exportCsvBtn" class="export-btn" type="button" data-i18n="settings.export.csv">⤓ CSV edges</button>
+      </div>
+
+      <div class="settings-section" style="margin-top: 22px;" data-i18n="settings.history.title">file history</div>
+      <p class="settings-help" data-i18n="history.settings.help"></p>
+      <div class="setting-row">
+        <label class="setting-toggle">
+          <input type="checkbox" id="historyEnabledToggle">
+          <span data-i18n="history.settings.toggle"></span>
+        </label>
+      </div>
+
+      <div class="settings-section" style="margin-top: 22px;" data-i18n="settings.camera.title">camera presets</div>
+      <p class="settings-help" data-i18n="settings.camera.help"></p>
+      <div class="preset-row">
+        <button class="preset-btn" data-view="default" data-i18n="settings.camera.default">default</button>
+        <button class="preset-btn" data-view="top"     data-i18n="settings.camera.top">top-down</button>
+        <button class="preset-btn" data-view="side"    data-i18n="settings.camera.side">side</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Unified left rail: file tree, pipelines, recent, legend
+       Each <section> is a `.lp-panel` that can be collapsed (click header)
+       and the `.lp-resize` strips between them are draggable vertical grips.
+       State persists in localStorage (codesynapt:left-rail). -->
+  <!-- Left sidebar with tab strip: files / pipelines / recent / legend.
+       Only one tab body is visible at a time. Active tab persists in
+       localStorage (codesynapt:left-tab). -->
+  <aside id="leftRail">
+    <div class="left-tabs" role="tablist">
+      <button class="left-tab active" data-tab="files"     role="tab" data-i18n="kicker.files">files</button>
+      <button class="left-tab"        data-tab="pipelines" role="tab" data-i18n="kicker.pipelines">pipelines</button>
+      <button class="left-tab"        data-tab="recent"    role="tab" data-i18n="kicker.recent">recent</button>
+      <button class="left-tab"        data-tab="legend"    role="tab" data-i18n="kicker.legend">extensions</button>
+    </div>
+    <div class="left-tab-pane" data-pane="files">
+      <section id="fileTreePanel">
+        <div class="ft-head">
+          <span class="kicker" data-i18n="kicker.files">files</span>
+          <div class="ft-actions">
+            <button id="ftCollapseAll" class="micro-btn" data-i18n-title="ft.collapse_all.title">⌃</button>
+            <button id="ftToggle" class="micro-btn" data-i18n-title="ft.hide.title">−</button>
+          </div>
+        </div>
+        <div id="ftRoot" class="ft-root" title=""></div>
+        <div id="fileTreeBody" class="ft-body"></div>
+      </section>
+    </div>
+    <div class="left-tab-pane hidden" data-pane="pipelines">
+      <section id="pipelinesPanel">
+        <div class="pp-head">
+          <span class="kicker" data-i18n="kicker.pipelines">pipelines</span>
+          <div class="pp-actions">
+            <button id="ppAddBtn" class="micro-btn" data-i18n-title="pp.add.title">+</button>
+            <button id="ppModeBtn" class="micro-btn" data-i18n-title="pp.mode.title">◐</button>
+          </div>
+        </div>
+        <div id="pipelinesList" class="pp-list"></div>
+      </section>
+    </div>
+    <div class="left-tab-pane hidden" data-pane="recent">
+      <section id="recentFiles">
+        <div class="rf-head">
+          <span class="kicker" data-i18n="kicker.recent">recent</span>
+          <button id="recentClearBtn" class="micro-btn" data-i18n-title="recent.clear.title">✕</button>
+        </div>
+        <div id="recentList-files" class="rf-list"></div>
+      </section>
+    </div>
+    <div class="left-tab-pane hidden" data-pane="legend">
+      <section id="legend">
+        <div class="legend-title" data-i18n="kicker.legend">extensions</div>
+        <div id="legend-items"></div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- Folder name labels — one per cluster when grouping is on -->
+  <div id="folderLabels" class="folder-labels"></div>
+
+  <!-- Full AI trace panel — session log, stats, sessions, replay, export -->
+  <aside id="traceFull" class="hidden">
+    <div class="trace-full-head">
+      <div class="kicker" data-i18n="kicker.ai_trace_full">ai trace · session</div>
+      <button id="closeTraceFull">✕</button>
+    </div>
+    <div id="traceFullMeta" class="trace-full-meta">—</div>
+    <div class="trace-full-toolbar">
+      <select id="traceToolFilter" class="trace-filter">
+        <option value="" data-i18n="trace.filter.all">all tools</option>
+      </select>
+      <button id="traceReplayBtn" class="psw-btn" data-i18n-title="trace.replay.title">▶ Replay</button>
+      <button id="traceExportBtn" class="psw-btn" data-i18n-title="trace.export.title">⬇ JSON</button>
+      <button id="traceClearBtn" class="psw-btn" data-i18n-title="trace.clear.title">🗑 Clear</button>
+      <button id="traceSessionsBtn" class="psw-btn" data-i18n-title="trace.sessions.title">📂 Sessions</button>
+    </div>
+    <div id="traceTabs" class="trace-tabs">
+      <button data-tab="log"   class="trace-tab active" data-i18n="trace.tab.log">log</button>
+      <button data-tab="stats" class="trace-tab" data-i18n="trace.tab.stats">stats</button>
+      <button data-tab="sessions" class="trace-tab" data-i18n="trace.tab.sessions">sessions</button>
+    </div>
+    <div id="traceFullBody" class="trace-full-body"></div>
+  </aside>
+
+
+  <!-- Controls hint -->
+  <div id="hints">
+    <span class="hint-key" data-i18n="hints.drag">drag</span> <span data-i18n="hints.orbit">orbit</span>
+    <span class="hint-sep">·</span>
+    <span class="hint-key" data-i18n="hints.scroll">scroll</span> <span data-i18n="hints.zoom">zoom</span>
+    <span class="hint-sep">·</span>
+    <span class="hint-key" data-i18n="hints.click">click</span> <span data-i18n="hints.inspect">inspect</span>
+    <span class="hint-sep">·</span>
+    <span class="hint-key" data-i18n="hints.hover">hover</span> <span data-i18n="hints.focus">focus</span>
+  </div>
+
+  <!-- Welcome / empty state — observatory console -->
+  <div id="welcome">
+    <div class="welcome-inner">
+      <div class="welcome-frame">
+        <span class="frame-corner tl"></span>
+        <span class="frame-corner tr"></span>
+        <span class="frame-corner bl"></span>
+        <span class="frame-corner br"></span>
+
+        <div class="welcome-meta">
+          <span class="welcome-coord">CH.001</span>
+          <span class="welcome-sep">·</span>
+          <span class="welcome-coord" data-i18n="welcome.coord.visualizer">visualizer</span>
+          <span class="welcome-sep">·</span>
+          <span class="welcome-coord" data-i18n="welcome.coord.offline">offline</span>
+        </div>
+
+        <div class="welcome-constellation" aria-hidden="true">
+          <svg viewBox="0 0 220 90" xmlns="http://www.w3.org/2000/svg">
+            <g stroke="currentColor" stroke-width="0.5" fill="none" opacity="0.35">
+              <line x1="30" y1="50" x2="80" y2="20"/>
+              <line x1="80" y1="20" x2="140" y2="35"/>
+              <line x1="140" y1="35" x2="120" y2="70"/>
+              <line x1="120" y1="70" x2="60" y2="65"/>
+              <line x1="60" y1="65" x2="30" y2="50"/>
+              <line x1="80" y1="20" x2="120" y2="70"/>
+              <line x1="140" y1="35" x2="190" y2="55"/>
+              <line x1="190" y1="55" x2="170" y2="20"/>
+            </g>
+            <g fill="currentColor">
+              <circle cx="30"  cy="50" r="1.5"/>
+              <circle cx="80"  cy="20" r="2.2"/>
+              <circle cx="140" cy="35" r="2.8"/>
+              <circle cx="120" cy="70" r="1.8"/>
+              <circle cx="60"  cy="65" r="1.4"/>
+              <circle cx="190" cy="55" r="2.0"/>
+              <circle cx="170" cy="20" r="1.6"/>
+            </g>
+          </svg>
+        </div>
+
+        <h1 class="welcome-title">
+          <span class="welcome-bracket">[</span>code<span class="accent">synapt</span><span class="welcome-bracket">]</span>
+        </h1>
+        <p class="welcome-sub" data-i18n="welcome.subtitle">a dependency observatory · point at any directory, watch the graph form</p>
+
+        <div class="welcome-divider">
+          <span>──</span><span class="welcome-divider-tick">▸</span><span data-i18n="welcome.begin">begin</span><span class="welcome-divider-tick">◂</span><span>──</span>
+        </div>
+
+        <button id="welcomeOpenBtn" class="primary-btn">
+          <span class="btn-icon">┌─┐</span>
+          <span data-i18n="welcome.open_folder">Open Folder</span>
+          <span class="btn-key">⌘O</span>
+        </button>
+
+        <div id="recentList"></div>
+
+        <div class="welcome-hint">
+          <span class="hint-dim">└─</span> <span data-i18n="welcome.drag_hint">or drag a folder onto this window</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right sidebar: minimap (top) + inspector + project context.
+       AI trace stays as a floating panel anchored to the canvas, not here. -->
+  <aside id="rightRail">
+    <section id="minimapWrap" class="rs-section">
+      <canvas id="minimapCanvas" width="280" height="280"></canvas>
+      <div class="minimap-corner top-left" data-i18n="kicker.overview">overview</div>
+      <button id="minimapToggle" class="minimap-corner top-right" data-i18n-title="minimap.hide.title">−</button>
+    </section>
+
+    <section id="inspector" class="rs-section">
+      <div class="inspector-head rs-head">
+        <div class="kicker" data-i18n="kicker.inspector">inspector</div>
+        <button id="closeInspector">✕</button>
+      </div>
+      <div id="inspector-body"><div class="rs-empty" data-i18n="inspector.empty">파일을 선택하면 정보가 표시됩니다</div></div>
+    </section>
+
+    <section id="contextPanel" class="rs-section">
+      <div class="ctx-head rs-head">
+        <span id="ctxKicker" class="kicker" data-i18n="kicker.project">project</span>
+        <button id="ctxEditBtn" class="micro-btn" data-i18n-title="project.edit.title" style="display:none">✎</button>
+      </div>
+      <div id="ctxBody" class="ctx-body">—</div>
+    </section>
+  </aside>
+
+  <!-- AI trace panel — floats over the canvas at bottom-right
+       (pulses when an MCP client / CLI hits the graph) -->
+  <aside id="aiTracePanel">
+    <div class="ai-trace-head">
+      <span class="kicker" data-i18n="kicker.ai_trace">ai trace</span>
+      <span class="trace-dot"></span>
+      <button id="aiTraceFullBtn" class="ai-trace-mini" data-i18n-title="trace.full.title">⤢</button>
+    </div>
+    <div id="aiTraceBody"><div class="trace-empty" data-i18n="trace.panel.empty"></div></div>
+  </aside>
+
+  <!-- Project info setup dialog -->
+  <div id="projectDialog" class="hidden">
+    <div class="dialog-backdrop"></div>
+    <div class="dialog-card">
+      <div class="dialog-head">
+        <div class="kicker" data-i18n="kicker.project_info">project info</div>
+        <button id="dialogClose">✕</button>
+      </div>
+      <p class="dialog-help" data-i18n="dialog.help"></p>
+      <div class="dialog-form">
+        <label class="form-row">
+          <span class="form-label" data-i18n="dialog.name">name</span>
+          <input type="text" id="pi_name" data-i18n-placeholder="dialog.name.ph" autocomplete="off" />
+        </label>
+        <label class="form-row">
+          <span class="form-label" data-i18n="dialog.version">version</span>
+          <input type="text" id="pi_version" placeholder="1.0.0" autocomplete="off" />
+        </label>
+        <label class="form-row">
+          <span class="form-label" data-i18n="dialog.stack">stack</span>
+          <input type="text" id="pi_stack" data-i18n-placeholder="dialog.stack.ph" autocomplete="off" />
+        </label>
+        <label class="form-row form-row-textarea">
+          <span class="form-label" data-i18n="dialog.description">description</span>
+          <textarea id="pi_description" rows="3" data-i18n-placeholder="dialog.description.ph"></textarea>
+        </label>
+        <label class="form-row form-row-textarea">
+          <span class="form-label" data-i18n="dialog.notes">notes</span>
+          <textarea id="pi_notes" rows="3" data-i18n-placeholder="dialog.notes.ph"></textarea>
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button id="dialogSkip" class="secondary-btn" data-i18n="dialog.skip">Skip</button>
+        <button id="dialogSave" class="primary-btn" data-i18n="dialog.save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Drop overlay -->
+  <div id="dropOverlay" class="hidden">
+    <div class="drop-inner" data-i18n="drop.overlay">drop folder to scan</div>
+  </div>
+
+  <!-- Status bar (bottom strip) -->
+  <div id="statusBar">
+    <div class="status-section status-left">
+      <span class="status-cell" id="sb_files" data-i18n-title="status.files.title">— <span data-i18n="status.files">files</span></span>
+      <span class="status-cell" id="sb_edges" data-i18n-title="status.edges.title">— <span data-i18n="status.edges">edges</span></span>
+      <span class="status-cell" id="sb_comps" data-i18n-title="status.comp.title">— <span data-i18n="status.comp">comp</span></span>
+      <span class="status-cell sb-clickable" id="sb_symbols" data-i18n-title="status.symbols.title" title="Click to build the symbol graph (codegraph-equivalent layer)">— <span data-i18n="status.symbols">syms</span></span>
+    </div>
+    <div class="status-section status-center">
+      <span class="status-cell" id="sb_state" data-i18n-title="status.state.title">—</span>
+      <span class="status-cell" id="sb_changed" data-i18n-title="status.changed.title">—</span>
+    </div>
+    <div class="status-section status-right">
+      <span class="status-cell" id="sb_backend" data-i18n-title="status.backend.title">CPU</span>
+      <span class="status-cell" id="sb_fps" data-i18n-title="status.fps.title">— fps</span>
+    </div>
+  </div>
+
+  <!-- Scan progress toast -->
+  <div id="scanToast" class="hidden">
+    <span class="spinner"></span>
+    <span class="scan-label"><span data-i18n="scan.scanning">Scanning…</span> <span id="scanCount">0</span> <span data-i18n="scan.files">files</span></span>
+  </div>
+
+  <!-- Stats panel -->
+  <aside id="statsPanel" class="hidden">
+    <div class="stats-head">
+      <div class="kicker" data-i18n="kicker.graph_stats">graph stats</div>
+      <button id="closeStats">✕</button>
+    </div>
+    <div class="stats-body" id="statsBody">—</div>
+  </aside>
+
+  <!-- Toast (generic notifications) -->
+  <div id="toastHost"></div>
+
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
