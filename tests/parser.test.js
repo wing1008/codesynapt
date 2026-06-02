@@ -315,6 +315,14 @@ describe('resolveImport', () => {
     expect(resolveImport('/x/main.py', 'data.loader', '/x', ids, 'py')).toBe('data/loader.py')
   })
 
+  it('resolves Python absolute import in a src/ layout (2026-06-02)', () => {
+    // `from attr.converters import x` where the package lives at src/attr/ —
+    // flat resolution would miss it.
+    const ids = new Set(['src/attr/converters.py', 'src/attr/__init__.py'])
+    expect(resolveImport('/x/src/attr/_make.py', 'attr.converters', '/x', ids, 'py')).toBe('src/attr/converters.py')
+    expect(resolveImport('/x/src/attr/_make.py', 'attr', '/x', ids, 'py')).toBe('src/attr/__init__.py')
+  })
+
   it('skips dart: and package: for Dart', () => {
     const ids = new Set(['lib/foo.dart'])
     expect(resolveImport('/x/lib/main.dart', 'dart:async', '/x', ids, 'dart')).toBeNull()

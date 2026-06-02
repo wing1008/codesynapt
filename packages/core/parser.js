@@ -1457,13 +1457,17 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
     return resolvePythonRelative(fromAbsPath, spec, rootAbs, validIds)
   }
 
-  // Python dotted module (a.b.c) → search from root
+  // Python dotted module (a.b.c) → search from the import root. Try flat
+  // layout (package at repo root) AND src-layout (`src/<pkg>/`), which is the
+  // modern standard and would otherwise be missed. (Only these two known
+  // layouts — a broad suffix match would create false edges for stdlib/3rd-
+  // party imports that happen to share an internal filename.)
   if ((fromExt === 'py' || fromExt === 'ipynb') && !spec.startsWith('.') && !spec.startsWith('/')) {
     const subPath = spec.replace(/\./g, '/')
-    for (const ext of ['.py', '/__init__.py']) {
-      const cand = path.join(rootAbs, subPath + ext)
-      const relId = idOf(rootAbs, cand)
-      if (validIds.has(relId)) return relId
+    for (const pfx of ['', 'src/']) {
+      for (const tail of [subPath + '.py', subPath + '/__init__.py']) {
+        if (validIds.has(pfx + tail)) return pfx + tail
+      }
     }
     return null
   }
