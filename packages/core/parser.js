@@ -1518,8 +1518,13 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
       const slash = body.indexOf('/')
       const pkg = slash < 0 ? body : body.slice(0, slash)
       const sub = slash < 0 ? '' : body.slice(slash + 1)
-      const self = loadPubspecName(rootAbs)
-      if (self && pkg === self && sub && validIds.has('lib/' + sub)) return 'lib/' + sub
+      // `package:<name>/sub` → that workspace package's lib/sub (self OR sibling).
+      const pkgs = loadDartPackages(rootAbs, validIds)
+      const dir = pkgs.get(pkg)
+      if (dir != null && sub) {
+        const cand = (dir ? dir + '/' : '') + 'lib/' + sub
+        if (validIds.has(cand)) return cand
+      }
       return null
     }
     const fromDir = path.dirname(fromAbsPath)
@@ -1553,16 +1558,10 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
   // and caching the module declaration; anything prefixed with that path
   // is internal and the suffix maps to a directory of .go files.
   if (fromExt === 'go' && /^[A-Za-z0-9_]/.test(spec)) {
-    const modPrefix = getGoModulePrefix(rootAbs)
-    let internalPath = null
-    if (modPrefix && spec === modPrefix) internalPath = ''
-    else if (modPrefix && spec.startsWith(modPrefix + '/')) {
-      internalPath = spec.slice(modPrefix.length + 1)
-    }
-    if (internalPath != null) {
-      // Return any .go file inside that subdir (graph-level — we just
-      // need *some* node in the target package).
-      const prefix = internalPath ? internalPath + '/' : ''
+    const loc = goImportLocation(spec, rootAbs, validIds)
+    if (loc) {
+      const prefix = (loc.dir ? loc.dir + '/' : '') + (loc.internalPath ? loc.internalPath + '/' : '')
+      // A representative .go file in the target package dir (immediate child).
       for (const id of validIds) {
         if (id.startsWith(prefix) && id.endsWith('.go')
             && !id.slice(prefix.length).includes('/')) return id
@@ -1637,7 +1636,7 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
   if (fromExt === 'php' && spec.includes('\\')) {
     const fqcn = spec.replace(/^\\+/, '')
     // Authoritative composer PSR-4 map first.
-    for (const { prefix, dir } of loadComposerPsr4(rootAbs)) {
+    for (const { prefix, dir } of loadComposerPsr4(rootAbs, validIds)) {
       if (fqcn === prefix || fqcn.startsWith(prefix + '\\')) {
         const rest = fqcn.slice(prefix.length).replace(/^\\+/, '').replace(/\\/g, '/')
         const cand = (rest ? (dir ? dir + '/' + rest : rest) : dir) + '.php'
@@ -1713,6 +1712,31 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
     if (r) return r
   }
 
+  // Monorepo workspace package — `import x from '@scope/utils'` (or a subpath)
+  // where `utils` is a SIBLING workspace package (by its package.json name).
+  // Resolve to that package's source entry / subpath, not node_modules.
+  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts', 'vue', 'svelte', 'astro'].includes(fromExt)
+      && /^(?:@[\w.-]+\/)?[\w.-]/.test(spec)) {
+    const ws = loadJsWorkspace(rootAbs, validIds)
+    let best = null
+    for (const name of ws.keys()) {
+      if ((spec === name || spec.startsWith(name + '/')) && (!best || name.length > best.length)) best = name
+    }
+    if (best) {
+      const { dir, entry } = ws.get(best)
+      const tryAt = (rel) => rel == null ? null : tryResolve(path.join(rootAbs, rel.split('/').join(path.sep)), rootAbs, validIds)
+      const pfx = dir ? dir + '/' : ''
+      if (spec === best) {
+        const r = tryAt(entry ? pfx + entry.replace(/^\.\//, '') : null) || tryAt(pfx + 'src') || tryAt(dir || '.')
+        if (r) return r
+      } else {
+        const sub = spec.slice(best.length + 1)
+        const r = tryAt(pfx + 'src/' + sub) || tryAt(pfx + sub)
+        if (r) return r
+      }
+    }
+  }
+
   // Bare specifier → either an external package or an unresolvable alias.
   return null
 }
@@ -1769,12 +1793,9 @@ export function resolveImportAll(fromAbsPath, spec, rootAbs, validIds, fromExt) 
   // Go: `import "mod/sub/pkg"` → every .go file in that package directory
   // (a Go package is the whole directory; importing it pulls in all its files).
   if (fromExt === 'go' && /^[A-Za-z0-9_]/.test(spec)) {
-    const modPrefix = getGoModulePrefix(rootAbs)
-    let internalPath = null
-    if (modPrefix && spec === modPrefix) internalPath = ''
-    else if (modPrefix && spec.startsWith(modPrefix + '/')) internalPath = spec.slice(modPrefix.length + 1)
-    if (internalPath == null) return []
-    const prefix = internalPath ? internalPath + '/' : ''
+    const loc = goImportLocation(spec, rootAbs, validIds)
+    if (!loc) return []
+    const prefix = (loc.dir ? loc.dir + '/' : '') + (loc.internalPath ? loc.internalPath + '/' : '')
     return [...validIds].filter((id) =>
       id.startsWith(prefix) && id.endsWith('.go') && !id.slice(prefix.length).includes('/'))
   }
@@ -1910,48 +1931,92 @@ function loadCsNamespaceIndex(rootAbs, validIds) {
 }
 
 const _composerCache = new Map()  // rootAbs → [{ prefix, dir }] longest-first
-function loadComposerPsr4(rootAbs) {
+function loadComposerPsr4(rootAbs, validIds) {
   if (_composerCache.has(rootAbs)) return _composerCache.get(rootAbs)
   let maps = []
-  try {
-    const c = path.join(rootAbs, 'composer.json')
-    if (fs.existsSync(c)) {
-      const parsed = JSON.parse(fs.readFileSync(c, 'utf8'))
+  // Scan EVERY composer.json (monorepos have one per package), not just the
+  // root — each PSR-4 dir is relative to its own composer.json location.
+  const composerFiles = validIds
+    ? [...validIds].filter((id) => (id === 'composer.json' || id.endsWith('/composer.json')) && !id.includes('vendor/'))
+    : ['composer.json']
+  for (const cf of composerFiles) {
+    try {
+      const abs = path.join(rootAbs, cf.split('/').join(path.sep))
+      if (!fs.existsSync(abs)) continue
+      const parsed = JSON.parse(fs.readFileSync(abs, 'utf8'))
+      const baseDir = cf.includes('/') ? cf.slice(0, cf.lastIndexOf('/')) : ''
       const sources = [parsed?.autoload?.['psr-4'], parsed?.['autoload-dev']?.['psr-4']]
       for (const m of sources) {
         if (!m) continue
         for (const [prefix, dir] of Object.entries(m)) {
           for (const one of (Array.isArray(dir) ? dir : [dir])) {
-            maps.push({
-              prefix: prefix.replace(/\\+$/, ''),
-              dir: String(one).replace(/^\.\//, '').replace(/\/+$/, ''),
-            })
+            let d = String(one).replace(/^\.\//, '').replace(/\/+$/, '')
+            if (baseDir) d = d ? baseDir + '/' + d : baseDir
+            maps.push({ prefix: prefix.replace(/\\+$/, ''), dir: d })
           }
         }
       }
-      maps.sort((a, b) => b.prefix.length - a.prefix.length)  // longest prefix wins
-    }
-  } catch {}
+    } catch {}
+  }
+  maps.sort((a, b) => b.prefix.length - a.prefix.length)  // longest prefix wins
   _composerCache.set(rootAbs, maps)
   return maps
 }
 
-// Dart package name (`pubspec.yaml`) — a Dart file can import its OWN package
-// via `package:<self>/x.dart`, which resolves to `lib/x.dart`. We need the
-// package name to tell self-imports from external pub.dev packages. Cached.
-const _pubspecCache = new Map()  // rootAbs → package name | null
-function loadPubspecName(rootAbs) {
+// Dart packages (`pubspec.yaml`) — `package:<name>/x.dart` resolves to that
+// package's `lib/x.dart`. A melos/workspace repo has many pubspec.yaml, so map
+// EVERY package name → its dir (not just the root), to resolve both self- and
+// sibling-package imports. Cached per root.
+const _pubspecCache = new Map()  // rootAbs → Map<name, packageDir>
+function loadDartPackages(rootAbs, validIds) {
   if (_pubspecCache.has(rootAbs)) return _pubspecCache.get(rootAbs)
-  let name = null
-  try {
-    const c = path.join(rootAbs, 'pubspec.yaml')
-    if (fs.existsSync(c)) {
-      const m = fs.readFileSync(c, 'utf8').match(/^name:\s*(\S+)/m)
-      if (m) name = m[1]
-    }
-  } catch {}
-  _pubspecCache.set(rootAbs, name)
-  return name
+  const byName = new Map()
+  const files = validIds
+    ? [...validIds].filter((id) => id === 'pubspec.yaml' || id.endsWith('/pubspec.yaml'))
+    : ['pubspec.yaml']
+  for (const pf of files) {
+    try {
+      const abs = path.join(rootAbs, pf.split('/').join(path.sep))
+      if (!fs.existsSync(abs)) continue
+      const m = fs.readFileSync(abs, 'utf8').match(/^name:\s*(\S+)/m)
+      if (m) byName.set(m[1], pf.includes('/') ? pf.slice(0, pf.lastIndexOf('/')) : '')
+    } catch {}
+  }
+  _pubspecCache.set(rootAbs, byName)
+  return byName
+}
+
+// JS/TS monorepo workspace index — `import … from '@scope/pkg'` (a sibling
+// workspace package by its package.json name) should resolve to that package's
+// SOURCE, not node_modules. Map every package.json name → its dir + entry.
+// Cached per root. Complements tsconfig path aliases.
+const _jsWsCache = new Map()  // rootAbs → Map<name, { dir, entry }>
+function loadJsWorkspace(rootAbs, validIds) {
+  if (_jsWsCache.has(rootAbs)) return _jsWsCache.get(rootAbs)
+  const byName = new Map()
+  const files = validIds
+    ? [...validIds].filter((id) => (id === 'package.json' || id.endsWith('/package.json')) && !id.includes('node_modules/'))
+    : []
+  for (const pf of files) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(rootAbs, pf.split('/').join(path.sep)), 'utf8'))
+      if (!parsed.name) continue
+      const dir = pf.includes('/') ? pf.slice(0, pf.lastIndexOf('/')) : ''
+      // Source entry: prefer exports['.'] / module / main (these may point at a
+      // built dist/, which simply won't resolve → we fall back to src/index).
+      let entry = null
+      const exp = parsed.exports
+      if (typeof exp === 'string') entry = exp
+      else if (exp && typeof exp === 'object') {
+        const dot = exp['.']
+        entry = typeof dot === 'string' ? dot : (dot && (dot.import || dot.default || dot.require || dot.types))
+      }
+      entry = entry || parsed.module || parsed.main || null
+      byName.set(parsed.name, { dir, entry })
+    } catch {}
+  }
+  _jsWsCache.set(rootAbs, byName)
+  return byName
 }
 
 // Resolve an import spec via tsconfig path mapping. Returns the
@@ -2010,6 +2075,36 @@ function getGoModulePrefix(rootAbs) {
   return prefix
 }
 
+// Go modules — a repo may hold several modules (go.work / nested go.mod), each
+// with its own `module <prefix>` declaration rooted at its own dir. Map every
+// go.mod → { prefix, dir } so an import is resolved within the RIGHT module.
+const _goModsCache = new Map()
+function loadGoModules(rootAbs, validIds) {
+  if (_goModsCache.has(rootAbs)) return _goModsCache.get(rootAbs)
+  const mods = []
+  const files = validIds
+    ? [...validIds].filter((id) => id === 'go.mod' || id.endsWith('/go.mod'))
+    : ['go.mod']
+  for (const gf of files) {
+    try {
+      const txt = fs.readFileSync(path.join(rootAbs, gf.split('/').join(path.sep)), 'utf8')
+      const m = txt.match(/^\s*module\s+(\S+)/m)
+      if (m) mods.push({ prefix: m[1], dir: gf.includes('/') ? gf.slice(0, gf.lastIndexOf('/')) : '' })
+    } catch {}
+  }
+  mods.sort((a, b) => b.prefix.length - a.prefix.length)  // longest module path first
+  _goModsCache.set(rootAbs, mods)
+  return mods
+}
+// Map a Go import path to { dir, internalPath } within a known module, or null.
+function goImportLocation(spec, rootAbs, validIds) {
+  for (const { prefix, dir } of loadGoModules(rootAbs, validIds)) {
+    if (spec === prefix) return { dir, internalPath: '' }
+    if (spec.startsWith(prefix + '/')) return { dir, internalPath: spec.slice(prefix.length + 1) }
+  }
+  return null
+}
+
 // Cargo workspace index — real Rust projects are almost always multi-crate
 // (a `crates/*/` workspace, or a Tauri `src-tauri/`), so the crate root is NOT
 // `<scanRoot>/src`. Read every Cargo.toml to learn each crate's name and src
@@ -2046,7 +2141,7 @@ function loadCargoWorkspace(rootAbs, validIds) {
 // opened leaks its cache entry. Pass a root to clear just that project, or
 // nothing to clear everything.
 export function clearParserCaches(rootAbs) {
-  const caches = [_tsconfigCache, _csNsCache, _composerCache, _pubspecCache, _goModCache, _cargoCache]
+  const caches = [_tsconfigCache, _csNsCache, _composerCache, _pubspecCache, _goModCache, _goModsCache, _cargoCache, _jsWsCache]
   if (rootAbs == null) { for (const c of caches) c.clear(); return }
   for (const c of caches) c.delete(rootAbs)
 }

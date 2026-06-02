@@ -420,7 +420,7 @@ export class Scanner extends EventEmitter {
   _maybeInvalidateCaches(absPath) {
     const base = path.basename(absPath).toLowerCase()
     const ext = path.extname(absPath).slice(1).toLowerCase()
-    if (ext === 'cs' || ['tsconfig.json', 'jsconfig.json', 'composer.json', 'pubspec.yaml', 'go.mod', 'cargo.toml'].includes(base)) {
+    if (ext === 'cs' || ['tsconfig.json', 'jsconfig.json', 'composer.json', 'pubspec.yaml', 'go.mod', 'cargo.toml', 'package.json'].includes(base)) {
       clearParserCaches(this.root)
     }
   }
