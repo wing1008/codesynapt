@@ -168,6 +168,25 @@ describe('control-server endpoints', () => {
     }
   })
 
+  it('GET /blast?compact=0 (and full=1) returns the FULL view, not compact', async () => {
+    const off = await call('GET', '/blast/src/foo.ts?depth=3&dir=users&compact=0')
+    expect(off.compact).toBeUndefined()                  // compact=0 means OFF
+    const full = await call('GET', '/blast/src/foo.ts?depth=3&dir=users&compact=1&full=1')
+    expect(full.compact).toBeUndefined()                 // full=1 overrides compact
+  })
+
+  it('GET /deps and /users return 404 for an unknown id (not 200 [])', async () => {
+    expect((await call('GET', '/deps/does-not-exist.ts')).error).toBeDefined()
+    expect((await call('GET', '/users/does-not-exist.ts')).error).toBeDefined()
+  })
+
+  it('POST /write is denied when the server has no authToken (no unauthenticated writes)', async () => {
+    const r = await call('POST', '/write/src/foo.ts', { content: 'malicious' })
+    expect(r.error).toMatch(/write disabled/i)
+    // and the file is untouched
+    expect(fs.readFileSync(path.join(tmpRoot, 'src/foo.ts'), 'utf8')).toBe('export const foo = 1')
+  })
+
   it('GET /safety/:id returns level', async () => {
     const r = await call('GET', '/safety/src/foo.ts')
     expect(['safe', 'caution', 'risky']).toContain(r.level)

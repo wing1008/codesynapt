@@ -1310,10 +1310,14 @@ function createControlServer(opts) {
         }
       }
       if (req.method === 'GET' && seg0 === 'deps' && rest.length > 0) {
-        return writeJson(res, 200, getDeps(idFromRest()))
+        const id = idFromRest()
+        if (!scanner.files.has(id)) return writeJson(res, 404, { error: 'not found' })
+        return writeJson(res, 200, getDeps(id))
       }
       if (req.method === 'GET' && seg0 === 'users' && rest.length > 0) {
-        return writeJson(res, 200, getUsers(idFromRest()))
+        const id = idFromRest()
+        if (!scanner.files.has(id)) return writeJson(res, 404, { error: 'not found' })
+        return writeJson(res, 200, getUsers(id))
       }
       if (req.method === 'GET' && seg0 === 'find') {
         return writeJson(res, 200, searchFiles(url.searchParams.get('q') || ''))
@@ -1379,7 +1383,11 @@ function createControlServer(opts) {
         if (!r) return writeJson(res, 404, { error: 'not found' })
         // IPC highlight always uses the full file set (desktop UI unaffected).
         if (onBlast) { try { onBlast({ seed: id, ids: r.files.map((f) => f.id) }) } catch {} }
-        if (url.searchParams.get('compact')) {
+        // Explicit truthiness: `compact=0` / `compact=false` must mean OFF,
+        // and `full=1` forces the complete view (matches the MCP contract).
+        const cp = url.searchParams.get('compact')
+        const wantCompact = cp != null && cp !== '0' && cp !== 'false' && url.searchParams.get('full') !== '1'
+        if (wantCompact) {
           const lim = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '25', 10)))
           return writeJson(res, 200, compactBlast(r, lim))
         }
@@ -1414,13 +1422,27 @@ function createControlServer(opts) {
         return writeJson(res, 200, { ok: true, id, dispatched: !!onOpen })
       }
       if (req.method === 'POST' && (seg0 === 'write' || seg0 === 'edit') && rest.length > 0) {
+        // Mutating endpoint — never allow UNauthenticated writes. If the server
+        // was started without a token, edits are disabled entirely; if a token
+        // is set, require it here too (independent of read-side policy).
+        const auth = String(req.headers['authorization'] || '')
+        if (!authToken) return writeJson(res, 403, { error: 'write disabled: start the server with CS_AUTH_TOKEN to enable edits' })
+        if (!auth.startsWith('Bearer ') || auth.slice(7) !== authToken) {
+          return writeJson(res, 401, { error: 'write requires Authorization: Bearer <token>' })
+        }
         const id = idFromRest()
         const root = getCurrentRoot()
         const full = path.join(root, id)
         if (!isInsideRoot(root, full)) return writeJson(res, 400, { error: 'outside root' })
-        let bodyChunks = []
-        req.on('data', (c) => bodyChunks.push(c))
+        let bodyChunks = [], bodyLen = 0, tooBig = false
+        req.on('data', (c) => {
+          bodyLen += c.length
+          if (bodyLen > 10 * 1024 * 1024) { tooBig = true; req.destroy(); return }   // 10 MB cap
+          bodyChunks.push(c)
+        })
+        req.on('error', () => { try { writeJson(res, 400, { error: 'request stream error' }) } catch {} })
         req.on('end', () => {
+          if (tooBig) return writeJson(res, 413, { error: 'request body too large (max 10MB)' })
           let body
           try { body = JSON.parse(Buffer.concat(bodyChunks).toString('utf8')) }
           catch { return writeJson(res, 400, { error: 'invalid JSON body' }) }

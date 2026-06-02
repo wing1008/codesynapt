@@ -877,6 +877,14 @@ const canvas = document.getElementById('canvas')
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
 
+// WebGL context can be lost under GPU pressure (driver reset, dGPU/iGPU
+// switch, another GPU-heavy app). Without this the render loop would throw
+// every frame and freeze the window. Pause rendering on loss, resume on
+// restore. preventDefault() is required for the 'restored' event to fire.
+let glContextLost = false
+canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); glContextLost = true }, false)
+canvas.addEventListener('webglcontextrestored', () => { glContextLost = false }, false)
+
 const scene = new THREE.Scene()
 scene.background = new THREE.Color('#03050C')
 // Fog disabled — colors stay vivid at distance instead of fading
@@ -2429,9 +2437,9 @@ function refreshTracePanel() {
     const d = new Date(t.ts)
     const stamp = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
     const short = t.id.length > 40 ? '…' + t.id.slice(-39) : t.id
-    return `<div class="trace-row" data-tool="${t.tool}">
+    return `<div class="trace-row" data-tool="${escapeAttr(t.tool)}">
       <span class="trace-stamp">${stamp}</span>
-      <span class="trace-tool">${t.tool}</span>
+      <span class="trace-tool">${escapeHTML(t.tool)}</span>
       <span class="trace-id" title="${escapeAttr(t.id)}">${escapeHTML(short)}</span>
     </div>`
   }).join('')
@@ -3315,6 +3323,7 @@ let lastChangeAt = 0   // performance.now() of most recent file mutation
 let GLOBAL_HEARTBEAT = 0
 function render() {
   requestAnimationFrame(render)
+  if (glContextLost) return   // GPU context gone — skip work, keep loop alive to resume on restore
   const now = performance.now()
   const dt = Math.min((now - lastTime) / 1000, 0.05)
   lastTime = now
@@ -4077,7 +4086,7 @@ function renderInspector(id) {
 
   inspectorBody.innerHTML = `
     <div class="ins-name">${escapeHTML(n.id)}</div>
-    <div class="ins-sub">.${n.ext} · ${n.loc} LOC · ${formatBytes(n.size)} · mass ${n.mass.toFixed(1)}</div>
+    <div class="ins-sub">.${escapeHTML(n.ext)} · ${n.loc} LOC · ${formatBytes(n.size)} · mass ${n.mass.toFixed(1)}</div>
     <div class="ins-badges">${badge}</div>
     ${actions}
     ${outgoing.length ? `<div class="ins-section">imports (${outCount})</div>

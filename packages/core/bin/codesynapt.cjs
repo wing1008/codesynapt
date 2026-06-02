@@ -333,9 +333,31 @@ async function runHeadlessServe(args) {
   })
   scanner.start()
 
+  // A bad file or a rejected promise on a fire-and-forget path must NOT take
+  // down a long-lived daemon the agent depends on. Log and keep serving.
+  process.on('uncaughtException', (e) => {
+    process.stderr.write(`[cs] uncaughtException: ${e && e.stack || e}\n`)
+  })
+  process.on('unhandledRejection', (e) => {
+    process.stderr.write(`[cs] unhandledRejection: ${e && e.stack || e}\n`)
+  })
+
+  const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
+  let lockWritten = false
+  let boundPort = port
   try {
     const { port: actualPort } = await startControlServer(port)
+    boundPort = actualPort
+    // Advertise the ACTUAL bound port so the CLI / MCP server auto-discover
+    // this instance (they read ~/.codesynapt/port). Without this, `cs serve`
+    // on any port is invisible to the MCP integration.
+    try {
+      fs.mkdirSync(path.dirname(lockPath), { recursive: true })
+      fs.writeFileSync(lockPath, String(actualPort))
+      lockWritten = true
+    } catch (e) { process.stderr.write(`[cs] warning: could not write port lock: ${e.message}\n`) }
     process.stderr.write(`[cs] HTTP API on http://127.0.0.1:${actualPort}\n`)
+    process.stderr.write(`[cs] port lock: ${lockPath}\n`)
     process.stderr.write(`[cs] try: curl http://127.0.0.1:${actualPort}/summary\n`)
     process.stderr.write(`[cs] Ctrl-C to stop.\n`)
   } catch (e) {
@@ -346,7 +368,9 @@ async function runHeadlessServe(args) {
   // Block forever — graceful shutdown on SIGINT/SIGTERM
   const shutdown = async (signal) => {
     process.stderr.write(`\n[cs] ${signal} → shutting down\n`)
-    try { scanner.stop() } catch {}
+    // Only remove the lock if it still points at us (avoid clobbering a newer instance).
+    try { if (lockWritten && fs.readFileSync(lockPath, 'utf8').trim() === String(boundPort)) fs.unlinkSync(lockPath) } catch {}
+    try { await scanner.stop() } catch {}
     try { await stopControlServer() } catch {}
     process.exit(0)
   }

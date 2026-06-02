@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import chokidar from 'chokidar'
 import { EventEmitter } from 'events'
-import { parseFile, resolveImport, resolveImportAll, normalizeUrlPath, routePathToRegex,
+import { parseFile, resolveImport, resolveImportAll, clearParserCaches, normalizeUrlPath, routePathToRegex,
          extractNextApiRoutes, extractNuxtServerRoutes, extractSvelteKitServerRoutes } from './parser.js'
 import { detectMonorepo, packageForFile } from './monorepo.js'
 
@@ -375,7 +375,16 @@ export class Scanner extends EventEmitter {
   }
 
   stop() {
-    if (this.watcher) this.watcher.close()
+    // Drop this root's resolution caches so reloading another project doesn't
+    // retain (or serve stale) the previous one's index — and return the
+    // watcher's close() promise so callers can await full teardown (chokidar
+    // close is async; not awaiting leaks fs handles, especially on Windows).
+    try { clearParserCaches(this.root) } catch {}
+    if (this.watcher) {
+      const w = this.watcher
+      this.watcher = null
+      return w.close()
+    }
   }
 
   snapshot() {
@@ -405,31 +414,56 @@ export class Scanner extends EventEmitter {
     }, 60)
   }
 
+  // A change to a .cs file (namespace index) or a resolution-manifest
+  // (tsconfig/jsconfig/composer/pubspec/go.mod) makes the per-root parser
+  // caches stale — drop them so the next rebuild re-resolves correctly.
+  _maybeInvalidateCaches(absPath) {
+    const base = path.basename(absPath).toLowerCase()
+    const ext = path.extname(absPath).slice(1).toLowerCase()
+    if (ext === 'cs' || ['tsconfig.json', 'jsconfig.json', 'composer.json', 'pubspec.yaml', 'go.mod'].includes(base)) {
+      clearParserCaches(this.root)
+    }
+  }
+
   async handleAdd(absPath, initial) {
-    if (!this.shouldTrack(absPath)) return
-    const file = this.parseOne(absPath)
-    if (!file) return
-    this.files.set(file.id, file)
-    if (!initial) {
-      this.emit('file-added', { id: file.id, absPath })
-      this.rebuildEdges()
-      this.emitSnapshot()
+    // These fire-and-forget from chokidar event listeners; an unhandled throw
+    // would become a fatal unhandledRejection (Node ≥20). Never let one bad
+    // file take down the daemon.
+    try {
+      if (!this.shouldTrack(absPath)) return
+      const file = this.parseOne(absPath)
+      if (!file) return
+      this.files.set(file.id, file)
+      if (!initial) {
+        this._maybeInvalidateCaches(absPath)
+        this.emit('file-added', { id: file.id, absPath })
+        this.rebuildEdges()
+        this.emitSnapshot()
+      }
+    } catch (e) {
+      process.stderr.write(`[scanner] handleAdd ${absPath}: ${e && e.message}\n`)
     }
   }
 
   async handleChange(absPath) {
-    if (!this.shouldTrack(absPath)) return
-    const file = this.parseOne(absPath)
-    if (!file) return
-    this.files.set(file.id, file)
-    this.emit('file-changed', { id: file.id, absPath })
-    this.rebuildEdges()
-    this.emitSnapshot()
+    try {
+      if (!this.shouldTrack(absPath)) return
+      const file = this.parseOne(absPath)
+      if (!file) return
+      this.files.set(file.id, file)
+      this._maybeInvalidateCaches(absPath)
+      this.emit('file-changed', { id: file.id, absPath })
+      this.rebuildEdges()
+      this.emitSnapshot()
+    } catch (e) {
+      process.stderr.write(`[scanner] handleChange ${absPath}: ${e && e.message}\n`)
+    }
   }
 
   handleRemove(absPath) {
     const id = this.toId(absPath)
     if (this.files.delete(id)) {
+      this._maybeInvalidateCaches(absPath)
       this.emit('file-removed', { id, absPath })
       this.rebuildEdges()
       this.emitSnapshot()
@@ -442,7 +476,14 @@ export class Scanner extends EventEmitter {
     const id = this.toId(absPath)
     const ext = path.extname(absPath).slice(1).toLowerCase()
     let content = ''
-    try { content = fs.readFileSync(absPath, 'utf8') } catch {}
+    // Size + binary gate: huge/generated/minified or binary files (which can
+    // slip past the extension filter) would stall or OOM the parser's regex
+    // passes. Index them as nodes (size known) but don't parse their content.
+    const MAX_PARSE_BYTES = 2 * 1024 * 1024  // 2 MB
+    if (stat.size <= MAX_PARSE_BYTES) {
+      try { content = fs.readFileSync(absPath, 'utf8') } catch {}
+      if (content.indexOf('\u0000') !== -1) content = ''   // binary → skip parsing
+    }
     const loc = content ? content.split('\n').length : 0
     const { imports, routes, apiCalls, externalUrls, dynamicPatterns, envUsage, dbModels, confidence } = parseFile(absPath, content, ext)
     // Augment with file-system server routes (Next.js / Nuxt 3 /
@@ -482,12 +523,26 @@ export class Scanner extends EventEmitter {
     const idSet = new Set(this.files.keys())
 
     // 1) Static import edges (file→file dependency)
+    // Memoize the fanout languages whose resolution depends only on (ext, spec)
+    // — Go/Swift scan the whole id-set per import, and the same package/module
+    // is imported many times; without this, rebuildEdges is O(imports × files)
+    // on every file change. (Relative/file-precise langs don't scan, so they
+    // are left un-memoized — their result also depends on the importing file.)
+    const fanoutMemo = new Map()
     for (const file of this.files.values()) {
       for (const imp of file.imports) {
-        // resolveImportAll fans out module/namespace imports (Go/C#/Swift) to
-        // every file in the unit; for file-precise languages it returns the
-        // single target, so behaviour there is unchanged.
-        for (const target of resolveImportAll(file.absPath, imp.spec, this.root, idSet, file.ext)) {
+        let targets
+        if (file.ext === 'go' || file.ext === 'swift') {
+          const key = file.ext + '\u0000' + imp.spec
+          targets = fanoutMemo.get(key)
+          if (!targets) {
+            targets = resolveImportAll(file.absPath, imp.spec, this.root, idSet, file.ext)
+            fanoutMemo.set(key, targets)
+          }
+        } else {
+          targets = resolveImportAll(file.absPath, imp.spec, this.root, idSet, file.ext)
+        }
+        for (const target of targets) {
           if (target && target !== file.id) {
             const key = `${file.id}→${target}:${imp.kind}`
             if (seen.has(key)) continue

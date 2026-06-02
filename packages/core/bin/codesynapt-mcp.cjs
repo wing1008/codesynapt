@@ -50,8 +50,15 @@ function apiReq(method, pathStr, query, body) {
       res.on('data', (c) => chunks.push(c))
       res.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8')
-        try { resolve({ status: res.statusCode, data: JSON.parse(text) }) }
-        catch { resolve({ status: res.statusCode, data: text }) }
+        let data
+        try { data = JSON.parse(text) } catch { data = text }
+        // Several actions (symbol/trace/history/legacy) are desktop-only and
+        // 404 against the headless `cs serve` backend. Turn the bare 404 into
+        // an actionable message instead of a confusing "unknown endpoint".
+        if (res.statusCode === 404 && data && typeof data === 'object' && /unknown endpoint/i.test(data.error || '')) {
+          data = { error: `'${method} ${pathStr}' is not available on the headless server (cs serve). This action requires the desktop app.` }
+        }
+        resolve({ status: res.statusCode, data })
       })
     })
     r.on('error', (err) => {

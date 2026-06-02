@@ -44,11 +44,19 @@ const MIME = {
   '.svg': 'image/svg+xml',
 }
 
+// Robust containment check — `startsWith` alone leaks sibling dirs that share
+// a prefix (e.g. /a/public vs /a/public-secret). Resolve and use path.relative.
+const isInside = (base, target) => {
+  const rel = path.relative(base, target)
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
 const server = http.createServer((req, res) => {
   let rel = req.url.split('?')[0]
+  try { rel = decodeURIComponent(rel) } catch {}   // normalize %2e%2e etc.
   if (rel === '/') rel = '/index.html'
   const filePath = path.join(PUBLIC, rel)
-  if (!filePath.startsWith(PUBLIC)) {
+  if (!isInside(PUBLIC, filePath)) {
     res.writeHead(403); res.end(); return
   }
   fs.readFile(filePath, (err, data) => {
@@ -82,7 +90,7 @@ wss.on('connection', (ws) => {
     if (msg.type === 'read_file') {
       try {
         const full = path.join(ROOT, msg.id)
-        if (!full.startsWith(ROOT)) return
+        if (!isInside(ROOT, full)) return
         const stat = fs.statSync(full)
         if (stat.size > 500_000) {
           ws.send(JSON.stringify({ type: 'file_content', id: msg.id,
@@ -111,6 +119,10 @@ server.listen(PORT, '127.0.0.1', () => {
 })
 
 scanner.start()
+
+// A bad file / rejected promise must not kill the dev server.
+process.on('uncaughtException', (e) => console.error('[server] uncaughtException:', e && e.stack || e))
+process.on('unhandledRejection', (e) => console.error('[server] unhandledRejection:', e && e.stack || e))
 
 process.on('SIGINT', () => {
   console.log('\nshutting down…')

@@ -2006,6 +2006,18 @@ function getGoModulePrefix(rootAbs) {
   return prefix
 }
 
+// Invalidate the per-root resolution caches. The long-running scanner / desktop
+// app must call this when the underlying inputs change (a .cs file's namespace,
+// tsconfig paths, composer PSR-4, pubspec name, go.mod module) — otherwise the
+// dependency graph silently goes stale after edits, and every project ever
+// opened leaks its cache entry. Pass a root to clear just that project, or
+// nothing to clear everything.
+export function clearParserCaches(rootAbs) {
+  const caches = [_tsconfigCache, _csNsCache, _composerCache, _pubspecCache, _goModCache]
+  if (rootAbs == null) { for (const c of caches) c.clear(); return }
+  for (const c of caches) c.delete(rootAbs)
+}
+
 // ─── Rust module resolution ─────────────────────────────────────
 // Maps `use crate::a::b`, `use self::x`, `use super::x`, `mod x;` into
 // a file path inside the repo. Best-effort: we look at `src/` first
