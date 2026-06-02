@@ -1575,7 +1575,7 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
   //
   // Maps the module path to `src/a/b/c.rs`, `src/a/b/c/mod.rs`, or for
   // `mod x;` resolved relative to the importing file's directory.
-  if (fromExt === 'rs' && /^[A-Za-z_]/.test(spec)) {
+  if (fromExt === 'rs' && /^(?:::)?[A-Za-z_]/.test(spec)) {   // allow leading `::` (absolute path)
     return resolveRustModule(fromAbsPath, spec, rootAbs, validIds)
   }
 
@@ -2006,6 +2006,35 @@ function getGoModulePrefix(rootAbs) {
   return prefix
 }
 
+// Cargo workspace index — real Rust projects are almost always multi-crate
+// (a `crates/*/` workspace, or a Tauri `src-tauri/`), so the crate root is NOT
+// `<scanRoot>/src`. Read every Cargo.toml to learn each crate's name and src
+// dir, so `crate::`/`self::` resolve within the FILE's crate and cross-crate
+// `use other_crate::…` resolves into that crate. Cached per root.
+const _cargoCache = new Map()  // rootAbs → { crateSrcs: [srcRootId...], nameToSrc: Map<name_,srcRoot> }
+function loadCargoWorkspace(rootAbs, validIds) {
+  if (_cargoCache.has(rootAbs)) return _cargoCache.get(rootAbs)
+  const crateSrcs = [], nameToSrc = new Map()
+  for (const id of validIds) {
+    if (!id.endsWith('Cargo.toml') || id.includes('/target/')) continue
+    const dir = id.slice(0, id.length - 'Cargo.toml'.length).replace(/\/$/, '')
+    const srcRoot = dir ? dir + '/src' : 'src'
+    let txt
+    try { txt = fs.readFileSync(path.join(rootAbs, id.split('/').join(path.sep)), 'utf8') } catch { continue }
+    // Only [package] crates have a name + src/; pure [workspace] roots don't.
+    const pkg = txt.match(/\[package\]([\s\S]*?)(?=\n\s*\[|$)/)
+    if (!pkg) continue
+    const nm = pkg[1].match(/\bname\s*=\s*["']([^"']+)["']/)
+    if (!nm) continue
+    nameToSrc.set(nm[1].replace(/-/g, '_'), srcRoot)
+    crateSrcs.push(srcRoot)
+  }
+  crateSrcs.sort((a, b) => b.length - a.length)   // longest (most specific) first
+  const idx = { crateSrcs, nameToSrc }
+  _cargoCache.set(rootAbs, idx)
+  return idx
+}
+
 // Invalidate the per-root resolution caches. The long-running scanner / desktop
 // app must call this when the underlying inputs change (a .cs file's namespace,
 // tsconfig paths, composer PSR-4, pubspec name, go.mod module) — otherwise the
@@ -2013,7 +2042,7 @@ function getGoModulePrefix(rootAbs) {
 // opened leaks its cache entry. Pass a root to clear just that project, or
 // nothing to clear everything.
 export function clearParserCaches(rootAbs) {
-  const caches = [_tsconfigCache, _csNsCache, _composerCache, _pubspecCache, _goModCache]
+  const caches = [_tsconfigCache, _csNsCache, _composerCache, _pubspecCache, _goModCache, _cargoCache]
   if (rootAbs == null) { for (const c of caches) c.clear(); return }
   for (const c of caches) c.delete(rootAbs)
 }
@@ -2024,57 +2053,59 @@ export function clearParserCaches(rootAbs) {
 // (cargo convention) and also resolve relative to the importing file
 // for `self::` / `super::` / bare `mod x;`.
 function resolveRustModule(fromAbsPath, spec, rootAbs, validIds) {
-  // Resolve a Rust module path to a file using the real 2018 module tree
-  // rather than guessing. We first derive the *importing file's* module
-  // path from its location (e.g. `src/de/enum_.rs` → module `de::enum_`,
-  // `src/internals/mod.rs` → `internals`, `src/lib.rs` → crate root), then
-  // turn the specifier into an absolute path of crate-root segments, and
-  // finally map those segments to `<src>/a/b.rs` or `<src>/a/b/mod.rs`.
+  // Resolve a Rust module path to a file using the real 2018 module tree, and
+  // — crucially for real projects — the Cargo WORKSPACE: a file's crate may
+  // live at `crates/<name>/src/` or `app/src-tauri/src/`, not `<root>/src/`,
+  // and `use other_crate::…` crosses into a sibling crate.
   const relId = idOf(rootAbs, fromAbsPath)
-  let srcPrefix = '', p = relId
-  if (p.startsWith('src/')) { srcPrefix = 'src/'; p = p.slice(4) }
+  const ws = loadCargoWorkspace(rootAbs, validIds)
+
+  // This file's crate src root (longest matching). Fall back to scan-root
+  // `src/` for a single-crate-at-root layout or synthetic/unit inputs.
+  let crateSrc = null
+  for (const s of ws.crateSrcs) { if (relId === s || relId.startsWith(s + '/')) { crateSrc = s; break } }
+  const srcPrefix = crateSrc ? crateSrc + '/' : (relId.startsWith('src/') ? 'src/' : '')
+
+  // The importing file's module path, relative to its crate src root.
+  let p = relId.startsWith(srcPrefix) ? relId.slice(srcPrefix.length) : relId
   p = p.replace(/\.rs$/, '')
-  let myMod = p.split('/')
+  let myMod = p.split('/').filter(Boolean)
   if (myMod[myMod.length - 1] === 'mod') myMod.pop()
   else if (myMod.length === 1 && (myMod[0] === 'lib' || myMod[0] === 'main')) myMod = []
 
   const raw = spec.split('::').filter((s) => s && s !== '*')
   if (!raw.length) return null
-  let abs, rooted = true
-  if (raw[0] === 'crate') {
-    abs = raw.slice(1)
-  } else if (raw[0] === 'self' || raw[0] === 'super') {
+
+  // `lib.rs`/`main.rs` are reserved crate-root filenames — only the empty path
+  // (the crate root itself) may map to them, never a named submodule.
+  const fileForIn = (pfx, segs) => segs.length
+    ? [pfx + segs.join('/') + '.rs', pfx + segs.join('/') + '/mod.rs']
+        .filter((c) => c !== pfx + 'lib.rs' && c !== pfx + 'main.rs')
+    : [pfx + 'lib.rs', pfx + 'main.rs']
+  // Walk prefixes longest→shortest: the deepest segment that maps to a real
+  // file is the target (segments below it are inline submodules/items in that
+  // file). `rooted` paths may collapse to the crate root; bare paths may not.
+  const walk = (pfx, segs, rooted) => {
+    const minN = rooted ? 0 : segs.length
+    for (let n = segs.length; n >= minN; n--) {
+      for (const cand of fileForIn(pfx, segs.slice(0, n))) if (validIds.has(cand)) return cand
+    }
+    return null
+  }
+
+  if (raw[0] === 'crate') return walk(srcPrefix, raw.slice(1), true)
+  if (raw[0] === 'self' || raw[0] === 'super') {
     const base = myMod.slice()
     let i = 0
     while (i < raw.length && raw[i] === 'super') { if (base.length) base.pop(); i++ }
     if (raw[i] === 'self') i++
-    abs = base.concat(raw.slice(i))
-  } else {
-    // Bare specifier: either `mod foo;` (a child module of THIS file, so the
-    // full path must hit a real file) or an external crate path like
-    // `syn::Type` (no repo file → null). We do NOT walk shorter prefixes
-    // here — that would wrongly collapse an external path onto this file or
-    // the crate root.
-    abs = myMod.concat(raw)
-    rooted = false
+    return walk(srcPrefix, base.concat(raw.slice(i)), true)
   }
-
-  // `lib.rs` / `main.rs` are reserved crate-root filenames — a *named*
-  // submodule can never live there (e.g. serde's inline `mod lib { ... }`
-  // std facade is NOT the crate root file), so only the empty path may map
-  // to them. This avoids spurious edges into the crate root.
-  const fileFor = (segs) => segs.length
-    ? [srcPrefix + segs.join('/') + '.rs', srcPrefix + segs.join('/') + '/mod.rs']
-        .filter((c) => c !== srcPrefix + 'lib.rs' && c !== srcPrefix + 'main.rs')
-    : [srcPrefix + 'lib.rs', srcPrefix + 'main.rs']
-  // For crate/self/super paths, walk prefixes longest→shortest: the deepest
-  // segment that maps to a real file is the target. Segments below it (e.g.
-  // `loom::sync::atomic` where only `loom.rs` is a file) are inline
-  // submodules/items living in that file. The empty prefix maps a top-level
-  // crate item to the crate root. Bare specifiers try the full path only.
-  const minN = rooted ? 0 : abs.length
-  for (let n = abs.length; n >= minN; n--) {
-    for (const cand of fileFor(abs.slice(0, n))) if (validIds.has(cand)) return cand
-  }
-  return null
+  // Bare head: cross-crate `use other_crate::a::b` if it names a workspace
+  // crate (Cargo uses hyphens, code uses underscores — normalize).
+  const head = raw[0].replace(/-/g, '_')
+  if (ws.nameToSrc.has(head)) return walk(ws.nameToSrc.get(head) + '/', raw.slice(1), true)
+  // Otherwise `mod foo;` (a child of the current module) or an external crate
+  // (no repo file → null). Full path only — don't collapse onto self/root.
+  return walk(srcPrefix, myMod.concat(raw), false)
 }
