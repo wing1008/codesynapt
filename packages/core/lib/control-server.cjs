@@ -1027,12 +1027,22 @@ function createControlServer(opts) {
       reasons.push(t('safety.reason.no_tests', loc))
     }
 
+    // Honesty: the verdict is only as complete as the static graph. If the seed
+    // OR anything in its impact set uses dynamic/reflective/DI patterns, a
+    // dynamic dependent can't be ruled out — so a 🟢/low result is NOT a
+    // certainty. Surface that as `confidence` (localized to this query, so it
+    // doesn't fire on every file of a messy project) rather than silently
+    // implying completeness. Never let an agent read 🟢 as "definitely safe".
+    const confidence = (dynamic || blast.caveat) ? 'limited' : 'high'
+
     return {
       id, level, dependents,
       routes: routeCount, apiCalls: apiCallCount, externalUrls: externalUrlCount,
       dynamic, testsInBlast,
       blastTokenEstimate: blast.tokenEstimate,
       reasons, advice,
+      confidence,
+      caveat: blast.caveat,   // dynamic files in the impact set, if any
       blastFiles: opts.deep ? blast.files.map((bf) => bf.id) : undefined,
     }
   }

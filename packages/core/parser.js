@@ -147,7 +147,7 @@ export function parseFile(absPath, content, ext) {
 function confidenceFor(dynamicPatterns, content, ext) {
   const patterns = dynamicPatterns || []
   // 1. Hard "low" signals from dynamic patterns
-  const HARD = new Set(['eval', 'new Function', 'Reflect', 'exec'])
+  const HARD = new Set(['eval', 'new Function', 'exec'])
   if (patterns.some((p) => HARD.has(p))) return 'low'
   // 2. DI framework hints (low even with zero dynamic patterns) — JS/TS only
   const jsLike = ['js','jsx','mjs','cjs','ts','tsx','vue','svelte','astro'].includes(ext)
@@ -182,20 +182,21 @@ function detectDynamicPatterns(content, ext) {
     if (/\bimport\s*\(\s*(?!['"`][^'"`]*['"`]\s*\))/g.test(content)) found.push('import(expr)')
     // Template literal in require/import that interpolates variables
     if (/\b(?:require|import)\s*\(\s*`[^`]*\$\{/g.test(content)) found.push('require/import template literal')
-    // eval / new Function
+    // eval / new Function — can load/run arbitrary (cross-file) code
     if (/\beval\s*\(/g.test(content)) found.push('eval')
     if (/\bnew\s+Function\s*\(/g.test(content)) found.push('new Function')
-    // Reflection
-    if (/\bReflect\s*\.\s*(?:get|apply|construct|ownKeys|invoke)/.test(content)) found.push('Reflect')
-    // Computed property bracket access on require/import result (very rough)
-    if (/\b(?:globalThis|window|self)\s*\[\s*[^'"\]]+\]/.test(content)) found.push('dynamic global access')
+    // NOTE: Reflect.* and globalThis[x] are dispatch/access on ALREADY-referenced
+    // values — they don't hide a cross-file import edge, so flagging them is just
+    // noise (fires on huge fractions of real code). Intentionally NOT marked.
   }
   if (pyLike) {
     if (/\bimportlib\b/.test(content)) found.push('importlib')
     if (/\b__import__\s*\(/.test(content)) found.push('__import__')
     if (/\beval\s*\(/.test(content)) found.push('eval')
     if (/\bexec\s*\(/.test(content)) found.push('exec')
-    if (/\bgetattr\s*\(/.test(content)) found.push('getattr')
+    // NOTE: getattr() is attribute access on an already-imported object — it does
+    // NOT hide a cross-file dependency, and fires on ~22% of real Python files.
+    // Marking it would drown the real signals (importlib/__import__/eval). Skipped.
   }
   // Cross-language dependency-injection + reflection blind spots: the dependency
   // is real at runtime but its target isn't a static import/use, so the graph
@@ -215,7 +216,10 @@ function detectDynamicPatterns(content, ext) {
     if (/\bcall_user_func|\bReflectionClass\b|\bclass_exists\s*\(|\$\$|\b(?:app|resolve)\s*\(/.test(content)) found.push('dynamic/DI call')
   }
   if (ext === 'rb') {
-    if (/\.(?:send|public_send)\s*\(|\bconst_get\b|\bmethod_missing\b|\bdefine_method\b/.test(content)) found.push('metaprogramming')
+    // const_get can load a class (Rails autoload = cross-file); method_missing /
+    // define_method synthesize methods. `send`/`public_send` is plain dispatch on
+    // an existing object (idiomatic, not file-hiding) → excluded to avoid noise.
+    if (/\bconst_get\b|\bmethod_missing\b|\bdefine_method\b/.test(content)) found.push('metaprogramming')
   }
   return found  // empty array = no dynamic patterns
 }

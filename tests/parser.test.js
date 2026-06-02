@@ -287,9 +287,11 @@ describe('parseFile — confidence (P2·3)', () => {
     expect(r.confidence).toBe('low')
   })
 
-  it('Reflect.* → low', () => {
-    const r = parseFile('x.ts', `Reflect.apply(fn, null, [])`, 'ts')
-    expect(r.confidence).toBe('low')
+  it('Reflect.* alone does NOT lower confidence (not a cross-file blind spot) (2026-06-02)', () => {
+    // Reflect.apply dispatches on an already-referenced fn — it hides no import
+    // edge, so flagging it was noise. eval/exec/new Function still → low.
+    expect(parseFile('x.ts', `Reflect.apply(fn, null, [])`, 'ts').confidence).toBe('high')
+    expect(parseFile('y.ts', `eval('1')`, 'ts').confidence).toBe('low')
   })
 
   it('NestJS @Injectable decorator → low', () => {
@@ -313,9 +315,10 @@ describe('parseFile — confidence (P2·3)', () => {
     expect(parseFile('P.cs', `services.AddScoped<IFoo, Foo>();`, 'cs').dynamicPatterns).toContain('DI registration')
     expect(parseFile('g.go', `reflect.ValueOf(x).MethodByName("Run").Call(nil)`, 'go').dynamicPatterns).toContain('reflection/plugin')
     expect(parseFile('s.php', `$obj = app(Foo::class);`, 'php').dynamicPatterns).toContain('dynamic/DI call')
-    expect(parseFile('r.rb', `obj.send(:run)`, 'rb').dynamicPatterns).toContain('metaprogramming')
-    // a plain file has no blind-spot markers (no false flags)
-    expect(parseFile('q.rb', `require_relative 'x'\nFoo.new.run`, 'rb').dynamicPatterns).toEqual([])
+    expect(parseFile('r.rb', `klass = Object.const_get(name)`, 'rb').dynamicPatterns).toContain('metaprogramming')
+    // dispatch/access on existing objects is NOT a blind spot (avoid noise):
+    expect(parseFile('q.rb', `require_relative 'x'\nobj.send(:run)`, 'rb').dynamicPatterns).toEqual([])
+    expect(parseFile('p.py', `x = getattr(obj, 'attr', None)`, 'py').dynamicPatterns).toEqual([])
   })
 })
 

@@ -455,7 +455,10 @@ async function buildLegacyCached() {
 }
 
 async function startScanner(root) {
-  if (scanner) { scanner.stop(); scanner = null }
+  // Await teardown: scanner.stop() returns chokidar's close() promise. Not
+  // awaiting leaks the old watcher's fs handles when we immediately attach a
+  // new one (worst on Windows). clearParserCaches also runs inside stop().
+  if (scanner) { try { await scanner.stop() } catch {} ; scanner = null }
   await loadScannerModule()
 
   if (!fs.existsSync(root)) {
@@ -530,7 +533,7 @@ async function startScanner(root) {
 }
 
 function stopScanner() {
-  if (scanner) { scanner.stop(); scanner = null }
+  if (scanner) { Promise.resolve(scanner.stop()).catch(() => {}); scanner = null }
   closeTraceWriteStream()
   currentRoot = null
 }
