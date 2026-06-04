@@ -2228,6 +2228,40 @@ async function handleControlRequest(req, res) {
         const id = decodeURIComponent(rest.slice(1).join('/'))
         return writeJson(res, 200, withMeta({ id, callees: g.calleesOf(id) }))
       }
+      // Function-level blast: what breaks if this symbol changes (transitive
+      // callers), or what it depends on (callees). Accepts the id either in
+      // the path (/symbol/blast/<id>, this server's style) OR as ?id= (the
+      // control-server / MCP cs_blast{action:'function'} style) so the same
+      // tool call works whether it lands on the desktop or the headless server.
+      if (req.method === 'GET' && sub === 'blast') {
+        const id = rest[1] ? decodeURIComponent(rest.slice(1).join('/'))
+                           : decodeURIComponent(url.searchParams.get('id') || '')
+        if (!id || !g.nodes.has(id)) return writeJson(res, 404, { error: 'symbol not found', id })
+        const depth = Math.min(6, Math.max(1, parseInt(url.searchParams.get('depth') || '3', 10)))
+        const direction = url.searchParams.get('direction') === 'callees' ? 'callees' : 'callers'
+        const visited = new Set([id]); let frontier = new Set([id]); const byDepth = [{ depth: 0, count: 1 }]
+        for (let d = 1; d <= depth; d++) {
+          const next = new Set()
+          for (const sid of frontier) {
+            const adj = direction === 'callers' ? g.inAdj.get(sid) : g.outAdj.get(sid)
+            if (!adj) continue
+            for (const n of adj) if (!visited.has(n)) { visited.add(n); next.add(n) }
+          }
+          if (!next.size) break
+          byDepth.push({ depth: d, count: next.size }); frontier = next
+        }
+        const impacted = [...visited].filter((x) => x !== id)
+          .map((x) => { const n = g.nodes.get(x); return n ? { name: n.qualifiedName || n.name, kind: n.kind, file: n.file, line: n.startLine } : null })
+          .filter(Boolean)
+        const files = new Set(impacted.map((i) => i.file))
+        const seed = g.nodes.get(id)
+        return writeJson(res, 200, withMeta({
+          seed: { id, name: seed.qualifiedName || seed.name, file: seed.file, line: seed.startLine },
+          direction, depth, totalImpacted: impacted.length, filesTouched: files.size,
+          byDepth, impacted: impacted.slice(0, 200), truncated: impacted.length > 200,
+          caveat: 'Static call graph; dynamic/reflective dispatch (signals/slots, getattr, DI) and ambiguous method names are not resolved — treat as a floor.',
+        }))
+      }
       if (req.method === 'GET' && sub === 'explore') {
         const q = url.searchParams.get('q') || ''
         const budget = parseInt(url.searchParams.get('budget') || '8000', 10)
