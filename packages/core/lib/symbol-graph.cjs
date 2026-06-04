@@ -154,6 +154,13 @@ class SymbolGraph {
     for (const id of set) {
       const node = this.nodes.get(id)
       if (!node) continue
+      // Exact-case match. byName is lowercased (so search/findByName is
+      // case-insensitive), but call RESOLUTION must respect case — every
+      // language we parse is case-sensitive. Without this, a call to the
+      // class `Request` (urllib) folds onto a user method `request`, a
+      // constructor `Transformer()` onto a function `transformer`, etc.
+      // — phantom edges to same-spelled-different-case symbols (B-2).
+      if (node.name !== name) continue
       if (node.file === fromFileId) { sameFile = node; break }
       if (!imported && importsOf && importsOf.has(node.file)) imported = node
       if (!isAuxPath(node.file)) { prodCount++; if (!prodOne) prodOne = node }
