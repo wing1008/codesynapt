@@ -5,6 +5,7 @@ import { EventEmitter } from 'events'
 import { parseFile, resolveImport, resolveImportAll, clearParserCaches, normalizeUrlPath, routePathToRegex,
          extractNextApiRoutes, extractNuxtServerRoutes, extractSvelteKitServerRoutes } from './parser.js'
 import { detectMonorepo, packageForFile } from './monorepo.js'
+import { registerAll as registerSymbolParsers, SymbolGraph } from './lib/symbol-parsers.cjs'
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg',
@@ -188,6 +189,11 @@ export class Scanner extends EventEmitter {
     this.files = new Map() // id -> { id, ext, loc, size, imports, absPath, pkg }
     this.edges = []
     this.pkgEdges = []  // package-to-package edges aggregated from file edges
+    // Layer-2 (symbol/function graph). Lazy: built on first request, marked
+    // stale whenever the file graph changes. See docs/SYMBOL-MODE-PLAN.md.
+    this.symbolGraph = null
+    this._symbolGraphStale = true
+    this._symbolGraphBuilding = null
     this.watcher = null
     this._pendingSnapshot = null
     // True once the chokidar 'ready' has fired and the initial walk is done.
@@ -635,6 +641,44 @@ export class Scanner extends EventEmitter {
 
     this.edges = edges
     this.rebuildPackageEdges()
+    // File graph changed → the symbol graph (which folds in these import
+    // edges for call resolution) is now stale; rebuild lazily on next request.
+    this._symbolGraphStale = true
+  }
+
+  // ── Layer-2: symbol / function-call graph ────────────────────────
+  // Build the function/method-level graph from the current file set + import
+  // edges. fileImports (caller → imported files) lets call resolution prefer
+  // a method in a file the caller actually imports. Async because tree-sitter
+  // parsers init a WASM grammar on first use. See docs/SYMBOL-MODE-PLAN.md.
+  async buildSymbolGraph() {
+    registerSymbolParsers()
+    const entries = []
+    for (const f of this.files.values()) {
+      entries.push({ id: f.id, absPath: f.absPath, ext: f.ext })
+    }
+    const fileImports = new Map()
+    for (const e of this.edges) {
+      if (!fileImports.has(e.s)) fileImports.set(e.s, new Set())
+      fileImports.get(e.s).add(e.t)
+    }
+    const g = new SymbolGraph()
+    await g.build(entries, fileImports, {})
+    this.symbolGraph = g
+    this._symbolGraphStale = false
+    return g
+  }
+
+  // Lazy accessor. Coalesces concurrent callers onto one in-flight build so a
+  // burst of /symbol/* requests doesn't trigger N parallel scans.
+  async getSymbolGraph() {
+    if (this.symbolGraph && !this._symbolGraphStale) return this.symbolGraph
+    if (!this._symbolGraphBuilding) {
+      this._symbolGraphBuilding = this.buildSymbolGraph()
+        .finally(() => { this._symbolGraphBuilding = null })
+    }
+    await this._symbolGraphBuilding
+    return this.symbolGraph
   }
 
   // Aggregate file-level edges into package-level edges. A single edge
