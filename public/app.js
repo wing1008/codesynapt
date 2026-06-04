@@ -880,7 +880,7 @@ function refreshMainCentroid(frame) {
 //  Three.js scene
 // ═══════════════════════════════════════════════════════════════
 const canvas = document.getElementById('canvas')
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true })
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
 
 // WebGL context can be lost under GPU pressure (driver reset, dGPU/iGPU
