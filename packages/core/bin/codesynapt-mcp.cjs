@@ -244,7 +244,15 @@ const TOOLS = [
     handler: async ({ action, name }) => {
       switch (action) {
         case 'health':         return (await apiReq('GET', '/health')).data
-        case 'project':        return (await apiReq('GET', '/summary')).data
+        case 'project': {
+          const data = (await apiReq('GET', '/summary')).data
+          // Turn the one tool agents reliably read into the gate for the ones they
+          // skip: name the next action explicitly, tied to the hub list just shown.
+          if (data && typeof data === 'object') {
+            data._guidance = 'Before editing any high-importer (hub) file listed above, call cs_blast({action:"safety", id}) FIRST — editing a hub blind can break its importers. For "who uses X" use cs_query({action:"users", id}) rather than grep.'
+          }
+          return data
+        }
         case 'packages':       return (await apiReq('GET', '/packages')).data
         case 'package_graph':  return (await apiReq('GET', '/package-graph')).data
         case 'package_detail':
@@ -645,6 +653,15 @@ async function handle(msg) {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
         serverInfo: { name: 'codesynapt', version: '0.2.0' },
+        // Clients (e.g. Claude Code) surface this in context every session, so the
+        // usage contract does not depend on a slash command read once and forgotten.
+        instructions:
+          'CodeSynapt exposes this project\'s dependency graph. Use it proactively instead of guessing from partial file reads:\n' +
+          '• New/unfamiliar project: call cs_summary({action:"project"}) once (~300 tokens) for structure + top hubs.\n' +
+          '• BEFORE editing a hub or any non-trivial file: cs_blast({action:"safety", id}) first. A file with many importers (see summary topHubs) can break callers you have not read — do not edit a hub blind.\n' +
+          '• "who uses / imports / references X": cs_query({action:"users", id}) — the graph is exact and cheaper than grep.\n' +
+          '• Before committing a change set: cs_health({action:"preflight"}).\n' +
+          'CAVEAT: results are static import-level; dynamic/reflective/DI coupling and within-file complexity are not fully captured — treat blast counts as a floor, not the whole risk.',
       })
     }
     if (method === 'notifications/initialized') {
