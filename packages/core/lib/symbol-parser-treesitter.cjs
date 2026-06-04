@@ -532,6 +532,11 @@ const IDENT_TYPES = new Set([
 const NAV_TYPES = new Set([
   'member_expression', 'selector_expression', 'field_expression',
   'navigation_expression', 'method_invocation',
+  // Python `obj.method()` — the call's `function` field is an `attribute`
+  // node. Without this, every Python method call yielded a null callee name
+  // and was dropped, so only bare `foo()` calls were detected (≈6× under-
+  // count on method-heavy code like PyQt apps). See docs/SYMBOL-MODE-PLAN.md.
+  'attribute',
 ])
 
 function lastIdentText(node) {
