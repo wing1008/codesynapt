@@ -101,6 +101,7 @@
     "artifactName": "${productName}-Setup-${version}.${ext}",
     "afterPack": "scripts/fuses-after-pack.cjs",
     "asar": false,
+    "npmRebuild": false,
     "files": [
       "electron/**/*",
       "public/**/*",
@@ -108,7 +109,10 @@
       "plugin-api/**/*",
       "scripts/**/*",
       "server.js",
-      "package.json"
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/napi-v3/darwin/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v3/linux/**/*",
+      "!node_modules/sharp/**/*"
     ],
     "extraResources": [
       {

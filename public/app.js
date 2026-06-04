@@ -6,6 +6,12 @@ import { initPlugins, pluginRegistry } from './plugin-host.js'
 // backend.runStep() will detect this and stay on CPU.
 const stepGPU = null
 
+// Symbol-mode state. Declared at the top of the module: the status-bar
+// renderer (renderStatusBar) reads it far earlier than its original
+// definition further down, which threw a TDZ ReferenceError and aborted
+// module evaluation (so the snapshot listener never registered → blank app).
+const symbolModeState = { count: null, edges: null, loading: false, lastRoot: null }
+
 // One-time localStorage migration: `filegraph3d:*` → `codesynapt:*`.
 // Renamed from FileGraph 3D in 0.14.6. We copy old keys (don't delete)
 // so downgrading still works. Marker key prevents re-running.
@@ -6723,8 +6729,8 @@ function refreshThemePicker() {
 //  Symbol-mode status cell — clickable in the status bar.
 //  Click → builds the symbol graph (codegraph-equivalent layer).
 //  Reset whenever the loaded folder changes (snapshot:applied event).
+//  (symbolModeState is declared near the top of the module to avoid a TDZ.)
 // ═══════════════════════════════════════════════════════════════
-const symbolModeState = { count: null, edges: null, loading: false, lastRoot: null }
 
 async function buildSymbolGraph() {
   if (symbolModeState.loading) return

@@ -1,5 +1,13 @@
 // Electron main process — desktop app shell for CodeSynapt
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, protocol, net } = require('electron')
+
+// Renderer loads over a custom app:// scheme (standard + secure) instead of
+// file://. `<script type="module">` + importmap are blocked under file:// by
+// CORS (origin 'null'), so app.js never loads in the packaged app. Registering
+// app:// as a privileged standard scheme lets ES modules + importmap load.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+])
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
@@ -546,6 +554,7 @@ function createWindow() {
     minWidth: 720,
     minHeight: 480,
     backgroundColor: '#07090F',
+    show: false,   // shown on 'ready-to-show' so the renderer paints first (no white flash)
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     title: 'CodeSynapt',
     webPreferences: {
@@ -559,7 +568,8 @@ function createWindow() {
     },
   })
 
-  mainWindow.loadFile(path.join(__dirname, '..', 'public', 'index.html'))
+  mainWindow.loadURL('app://bundle/index.html')
+  mainWindow.once('ready-to-show', () => mainWindow.show())
 
   mainWindow.on('close', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2774,6 +2784,20 @@ if (!gotSingleInstanceLock) {
 
 // ─── App lifecycle ──────────────────────────────────────────────
 app.whenReady().then(() => {
+  // Serve public/ over the app:// scheme registered above (fixes ESM/importmap
+  // under file://). Containment: only files inside public/ are served.
+  protocol.handle('app', (request) => {
+    const { pathToFileURL } = require('url')
+    const publicDir = path.join(__dirname, '..', 'public')
+    const { pathname } = new URL(request.url)
+    const rel = pathname === '/' ? '/index.html' : decodeURIComponent(pathname)
+    const filePath = path.normalize(path.join(publicDir, rel))
+    if (filePath !== publicDir && !filePath.startsWith(publicDir + path.sep)) {
+      return new Response('forbidden', { status: 403 })
+    }
+    return net.fetch(pathToFileURL(filePath).toString())
+  })
+
   if (!HEADLESS) {
     rebuildMenu()
     createWindow()
