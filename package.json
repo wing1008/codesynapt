@@ -39,10 +39,10 @@
   "type": "module",
   "main": "electron/main.cjs",
   "bin": {
-    "codesynapt-server": "./server.js",
-    "codesynapt": "./packages/core/bin/codesynapt.cjs",
-    "cs": "./packages/core/bin/codesynapt.cjs",
-    "codesynapt-mcp": "./packages/core/bin/codesynapt-mcp.cjs"
+    "codesynapt-server": "server.js",
+    "codesynapt": "packages/core/bin/codesynapt.cjs",
+    "cs": "packages/core/bin/codesynapt.cjs",
+    "codesynapt-mcp": "packages/core/bin/codesynapt-mcp.cjs"
   },
   "files": [
     "packages/core/",
