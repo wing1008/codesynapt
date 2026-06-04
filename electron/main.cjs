@@ -570,6 +570,9 @@ function createWindow() {
 
   mainWindow.loadURL('app://bundle/index.html')
   mainWindow.once('ready-to-show', () => mainWindow.show())
+  // Safety net: if the renderer never reports ready (load failure), show the
+  // window anyway so it can't get stuck invisible.
+  setTimeout(() => { try { if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) mainWindow.show() } catch {} }, 8000)
 
   mainWindow.on('close', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {

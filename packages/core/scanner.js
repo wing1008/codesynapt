@@ -361,8 +361,14 @@ export class Scanner extends EventEmitter {
       })
       .on('change', (p) => this.handleChange(p))
       .on('unlink', (p) => this.handleRemove(p))
-      .on('ready', () => {
+      .on('ready', async () => {
         initial = false
+        // Finish draining the cooperative parse queue before resolving edges.
+        if (this._initialDrain) { try { await this._initialDrain } catch {} }
+        while (this._initialQueue && this._initialQueue.length) {
+          const p = this._initialQueue.shift()
+          try { const f = this.parseOne(p); if (f) this.files.set(f.id, f) } catch {}
+        }
         this.initialScanComplete = true
         this.emit('scan-progress', { count: scanCount, done: true })
         this.scanEnvFiles()
@@ -379,6 +385,7 @@ export class Scanner extends EventEmitter {
     // retain (or serve stale) the previous one's index — and return the
     // watcher's close() promise so callers can await full teardown (chokidar
     // close is async; not awaiting leaks fs handles, especially on Windows).
+    this._stopped = true   // aborts any in-flight cooperative parse drain
     try { clearParserCaches(this.root) } catch {}
     if (this.watcher) {
       const w = this.watcher
@@ -431,18 +438,46 @@ export class Scanner extends EventEmitter {
     // file take down the daemon.
     try {
       if (!this.shouldTrack(absPath)) return
+      if (initial) {
+        // Cooperative initial scan: enqueue and parse in batches that yield the
+        // event loop (see _ensureInitialDrain), so the control-server stays
+        // responsive during a large scan instead of freezing for seconds.
+        ;(this._initialQueue || (this._initialQueue = [])).push(absPath)
+        this._ensureInitialDrain()
+        return
+      }
       const file = this.parseOne(absPath)
       if (!file) return
       this.files.set(file.id, file)
-      if (!initial) {
-        this._maybeInvalidateCaches(absPath)
-        this.emit('file-added', { id: file.id, absPath })
-        this.rebuildEdges()
-        this.emitSnapshot()
-      }
+      this._maybeInvalidateCaches(absPath)
+      this.emit('file-added', { id: file.id, absPath })
+      this.rebuildEdges()
+      this.emitSnapshot()
     } catch (e) {
       process.stderr.write(`[scanner] handleAdd ${absPath}: ${e && e.message}\n`)
     }
+  }
+
+  // Drain the initial-scan parse queue in batches, yielding the event loop
+  // between batches so HTTP requests are serviced while a big project scans.
+  _ensureInitialDrain() {
+    if (this._draining) return this._initialDrain
+    this._draining = true
+    this._initialDrain = (async () => {
+      const BATCH = 100
+      while (true) {
+        if (this._stopped) { this._draining = false; return }
+        const q = this._initialQueue
+        if (!q || q.length === 0) { this._draining = false; return }
+        const n = Math.min(BATCH, q.length)
+        for (let i = 0; i < n; i++) {
+          const p = q.shift()
+          try { const f = this.parseOne(p); if (f) this.files.set(f.id, f) } catch (e) { process.stderr.write(`[scanner] parse ${p}: ${e && e.message}\n`) }
+        }
+        await new Promise((r) => setImmediate(r))   // yield → service pending HTTP/IO
+      }
+    })()
+    return this._initialDrain
   }
 
   async handleChange(absPath) {
@@ -451,6 +486,9 @@ export class Scanner extends EventEmitter {
       const file = this.parseOne(absPath)
       if (!file) return
       this.files.set(file.id, file)
+      // During the initial scan, just record the latest content — the single
+      // rebuildEdges on 'ready' covers it. Avoids redundant partial rebuilds.
+      if (!this.initialScanComplete) return
       this._maybeInvalidateCaches(absPath)
       this.emit('file-changed', { id: file.id, absPath })
       this.rebuildEdges()

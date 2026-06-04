@@ -25,10 +25,148 @@ function resolvePort() {
   } catch { /* fall through */ }
   return 7707
 }
-const PORT = resolvePort()
+let PORT = resolvePort()
 const HOST = '127.0.0.1'
 
-function apiReq(method, pathStr, query, body) {
+// ── Auto-start backend ───────────────────────────────────────────────
+// The MCP server bridges to a control-server. If none is running (no live
+// desktop app / `cs serve`), spawn one in-process scanning CS_ROOT||cwd — so
+// setup is a single `claude mcp add` with nothing else to keep running.
+let _backendReady = null
+
+function _lockPort() {
+  try {
+    const lp = path.join(os.homedir(), '.codesynapt', 'port')
+    if (fs.existsSync(lp)) { const p = parseInt(fs.readFileSync(lp, 'utf8').trim(), 10); if (p > 0 && p < 65536) return p }
+  } catch {}
+  return null
+}
+
+function _ping(port) {
+  return new Promise((res) => {
+    const r = http.get({ host: HOST, port, path: '/health', timeout: 800 }, (resp) => { resp.resume(); res(resp.statusCode === 200) })
+    r.on('error', () => res(false))
+    r.on('timeout', () => { r.destroy(); res(false) })
+  })
+}
+
+// The project this MCP instance should serve (CS_ROOT, else the project root
+// detected from cwd). Resolved up-front so we only attach to a backend that is
+// actually serving THIS project (not, say, a desktop open on another repo).
+function _intendedRoot() {
+  let root = path.resolve(process.env.CS_ROOT || process.cwd())
+  if (!process.env.CS_ROOT) {
+    try { if (fs.existsSync(root) && fs.statSync(root).isDirectory()) { const f = _findProjectRoot(root); if (f) root = f } } catch {}
+  }
+  return root
+}
+const _sameRoot = (a, b) => !!a && !!b && (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b)
+function _backendRoot(port) {
+  return new Promise((res) => {
+    const r = http.get({ host: HOST, port, path: '/summary', timeout: 1500 }, (resp) => {
+      let d = ''; resp.on('data', (c) => d += c); resp.on('end', () => { try { res(path.resolve(JSON.parse(d).root)) } catch { res(null) } })
+    })
+    r.on('error', () => res(null)); r.on('timeout', () => { r.destroy(); res(null) })
+  })
+}
+
+function ensureBackend() {
+  if (_backendReady) return _backendReady
+  _backendReady = (async () => {
+    const want = _intendedRoot()
+    // Reuse an already-running backend ONLY if it serves the same project
+    // (e.g. the desktop app open on this repo → the agent's calls pulse there).
+    const seen = new Set()
+    for (const cand of [PORT, _lockPort()]) {
+      if (!cand || seen.has(cand)) continue
+      seen.add(cand)
+      if (await _ping(cand) && _sameRoot(await _backendRoot(cand), want)) { PORT = cand; return }
+    }
+    await _startInProcessBackend()   // nothing serving this project → self-host
+  })()
+  return _backendReady
+}
+
+// Walk up from `start` to the nearest project root (a directory containing a
+// recognizable marker). Returns null if none is found before the home/drive
+// boundary. This is what makes the agent scan the *project* regardless of which
+// subdirectory it was launched from — the real fix; the home/root check below
+// is only a fallback.
+function _findProjectRoot(start) {
+  // STRONG markers = repo / workspace root: they win, so a monorepo root is
+  // chosen over a nested sub-package. WEAK markers = a project; the nearest one
+  // is used only when no strong marker is found further up.
+  const STRONG = ['.git', '.hg', '.svn', 'pnpm-workspace.yaml', 'lerna.json', 'go.work', '.codesynaptignore']
+  const WEAK = ['package.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'composer.json', 'pubspec.yaml']
+  const home = path.resolve(os.homedir())
+  const fsRoot = path.parse(start).root
+  let dir = start, nearestWeak = null
+  while (true) {
+    for (const m of STRONG) { try { if (fs.existsSync(path.join(dir, m))) return dir } catch {} }
+    if (!nearestWeak) { for (const m of WEAK) { try { if (fs.existsSync(path.join(dir, m))) { nearestWeak = dir; break } } catch {} } }
+    if (dir === fsRoot || dir === home) break
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return nearestWeak
+}
+
+async function _startInProcessBackend() {
+  let root = path.resolve(process.env.CS_ROOT || process.cwd())
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`CS_ROOT/cwd is not a directory: ${root}`)
+  // Resolve the real project root by walking up to the nearest marker, so the
+  // agent scans the project even when launched from a subdirectory. An explicit
+  // CS_ROOT is honored as-is (the user chose it).
+  if (!process.env.CS_ROOT) { const found = _findProjectRoot(root); if (found) root = found }
+  // Fallback guard: never scan a drive root or the home directory.
+  if (root === path.parse(root).root || root === path.resolve(os.homedir())) {
+    throw new Error(`codesynapt: no project found at '${process.cwd()}' — looked for .git / package.json / go.mod / Cargo.toml / pyproject.toml up to your home folder. Run the agent inside a project, or set CS_ROOT to a project path.`)
+  }
+  const { Scanner } = await import('../scanner.js')
+  const { createControlServer } = require('../lib/control-server.cjs')
+  const scanner = new Scanner(root)
+  const { startControlServer } = createControlServer({
+    scanner,
+    getCurrentRoot: () => root,
+    authToken: process.env.CS_AUTH_TOKEN || null,
+    auditLogDir: path.join(os.homedir(), '.codesynapt', 'audit'),
+  })
+  const firstScan = new Promise((res) => {
+    let done = false
+    scanner.once('snapshot', () => { if (!done) { done = true; res() } })
+    setTimeout(() => { if (!done) { done = true; res() } }, 25000)
+  })
+  scanner.start()
+  let bound = null
+  const base = parseInt(process.env.CS_PORT || '7707', 10)
+  for (let p = base; p < base + 25 && !bound; p++) {
+    try { const r = await startControlServer(p); bound = r.port } catch (e) { if (e.code !== 'EADDRINUSE') throw e }
+  }
+  if (!bound) throw new Error('no free port for the in-process backend')
+  PORT = bound
+  // Advertise via the lock for `cs` CLI discovery — but NEVER clobber a lock a
+  // different live backend already holds (e.g. a desktop on another project),
+  // so multiple projects can coexist without stealing each other's discovery.
+  try {
+    const existing = _lockPort()
+    const heldByOther = existing && existing !== bound && (await _ping(existing))
+    if (!heldByOther) {
+      const lp = path.join(os.homedir(), '.codesynapt', 'port')
+      fs.mkdirSync(path.dirname(lp), { recursive: true })
+      fs.writeFileSync(lp, String(bound))
+      const clean = () => { try { if (fs.readFileSync(lp, 'utf8').trim() === String(bound)) fs.unlinkSync(lp) } catch {} }
+      process.on('exit', clean)
+      process.on('SIGINT', () => { clean(); process.exit(0) })
+      process.on('SIGTERM', () => { clean(); process.exit(0) })
+    }
+  } catch {}
+  process.stderr.write(`[codesynapt-mcp] auto-started backend on 127.0.0.1:${bound} scanning ${root}\n`)
+  await firstScan
+}
+
+async function apiReq(method, pathStr, query, body) {
+  await ensureBackend()
   return new Promise((resolve, reject) => {
     let qs = ''
     if (query) {
@@ -63,7 +201,7 @@ function apiReq(method, pathStr, query, body) {
     })
     r.on('error', (err) => {
       if (err.code === 'ECONNREFUSED') {
-        reject(new Error(`codesynapt server is not running at ${HOST}:${PORT}. Start the desktop app first, or run 'cs serve'. Override port via CS_PORT.`))
+        reject(new Error(`codesynapt backend not reachable at ${HOST}:${PORT}. It auto-starts in-process; check stderr for errors. Override target with CS_PORT, or scan a specific folder with CS_ROOT.`))
       } else reject(err)
     })
     if (payload) r.write(payload)
