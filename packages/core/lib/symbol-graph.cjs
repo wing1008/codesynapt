@@ -40,6 +40,27 @@ function isAuxPath(fileId) {
   return parts.some((p) => AUX_PATH_SEGMENTS.has(p))
 }
 
+// Common builtin / inherited / stdlib method names. When a call's receiver
+// type is unknown, a bare `.add()` / `.resolve()` / `.save()` is almost
+// never a call to a user-defined *module-level* function that merely shares
+// the name — it's a method on a value, a Promise, an EventEmitter, a stdlib
+// object. The old allowAny path linked these to unrelated same-named symbols
+// across files, sending AI down false trails. We refuse to guess on them.
+// See docs/SYMBOL-MODE-PLAN.md §5–6. List intentionally conservative; a real
+// imported call still resolves via the same-file / imported / qualified
+// paths above this fallback.
+const BUILTIN_NAMES = new Set([
+  'resolve', 'reject', 'emit', 'on', 'off', 'once', 'add', 'remove', 'delete',
+  'has', 'get', 'set', 'clear', 'push', 'pop', 'shift', 'unshift', 'slice',
+  'splice', 'map', 'filter', 'reduce', 'foreach', 'find', 'join', 'split',
+  'replace', 'match', 'test', 'log', 'warn', 'error', 'info', 'debug', 'write',
+  'read', 'close', 'open', 'end', 'start', 'stop', 'run', 'init', 'setup',
+  'destroy', 'connect', 'send', 'next', 'then', 'catch', 'append', 'prepend',
+  'save', 'load', 'update', 'create', 'show', 'hide', 'flush', 'data',
+  'tostring', 'valueof', 'keys', 'values', 'entries', 'includes', 'indexof',
+  'trim', 'concat', 'flat', 'sort', 'reverse', 'call', 'apply', 'bind',
+])
+
 function registerParser(extOrExts, parser) {
   const exts = Array.isArray(extOrExts) ? extOrExts : [extOrExts]
   for (const e of exts) PARSERS[e] = parser
@@ -66,6 +87,10 @@ class SymbolGraph {
     this.builtAt  = 0
     this.fileCount = 0
     this.scanMs = 0
+    // Honest signal: calls we saw a candidate for but declined to resolve
+    // (builtin/common name, or ambiguous across >1 production file). Surfaced
+    // in stats() so "unresolved" reads as data, not a silent drop.
+    this.unresolvedAmbiguous = 0
   }
 
   clear() {
@@ -79,6 +104,7 @@ class SymbolGraph {
     this.builtAt = 0
     this.fileCount = 0
     this.scanMs = 0
+    this.unresolvedAmbiguous = 0
   }
 
   // Best symbol match for `name` called from `fromFileId`. Preference:
@@ -112,32 +138,32 @@ class SymbolGraph {
     const set = this.byName.get(name.toLowerCase())
     if (!set || !set.size) return null
     let sameFile = null, imported = null
-    // Two-bucket fallback: prefer a production-path candidate
-    // over an auxiliary-path one (scripts/, test/, build/, examples/
-    // etc.) when nothing imported matches. Stops the case where
-    // production code's call to `fetch(...)` lands on a helper named
-    // `fetch` defined in scripts/.
-    let prodAny = null, auxAny = null
-    const callerIsAux = isAuxPath(fromFileId)
+    // Count *production* candidates (not aux: scripts/, test/, build/…).
+    // The tightened allowAny fallback resolves only when exactly one
+    // production symbol bears the name — more than one is ambiguous and we
+    // refuse to guess (see docs/SYMBOL-MODE-PLAN.md §5).
+    let prodOne = null, prodCount = 0
     const importsOf = this.fileImports.get(fromFileId)
     for (const id of set) {
       const node = this.nodes.get(id)
       if (!node) continue
       if (node.file === fromFileId) { sameFile = node; break }
       if (!imported && importsOf && importsOf.has(node.file)) imported = node
-      if (isAuxPath(node.file)) {
-        if (!auxAny) auxAny = node
-      } else {
-        if (!prodAny) prodAny = node
-      }
+      if (!isAuxPath(node.file)) { prodCount++; if (!prodOne) prodOne = node }
     }
     if (sameFile) return sameFile
     if (imported) return imported
     if (!allowAny) return null
-    // Prefer production over auxiliary unless the caller itself is
-    // already aux (in which case linking back into scripts/ is fine).
-    if (callerIsAux) return prodAny || auxAny
-    return prodAny || auxAny
+    // Tightened fallback. The old code returned ANY same-named symbol here,
+    // which mis-linked `.add()`/`.resolve()` method calls on unknown
+    // receivers to unrelated module functions. Now: never guess a builtin /
+    // common method name by bare name, and leave an ambiguous name (>1
+    // production candidate) unresolved rather than mis-link. Phase-0 spike:
+    // suspect cross-file edges −81% (JS) / −54% (Python), <1% real loss.
+    if (BUILTIN_NAMES.has(name.toLowerCase())) { this.unresolvedAmbiguous++; return null }
+    if (prodCount === 1) return prodOne
+    this.unresolvedAmbiguous++
+    return null
   }
 
   addNode(node) {
@@ -395,6 +421,7 @@ class SymbolGraph {
       scanMs: this.scanMs,
       builtAt: this.builtAt,
       abortedAt: this.abortedAt || null,   // null | 'symbols' | 'edges'
+      unresolvedAmbiguous: this.unresolvedAmbiguous,  // calls we declined to guess
     }
   }
 }
