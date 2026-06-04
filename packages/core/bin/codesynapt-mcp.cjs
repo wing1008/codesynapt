@@ -330,13 +330,15 @@ const TOOLS = [
       '  · safety — 🟢/🟡/🔴 verdict + reasons + one-line advice (the usual first call). (id, deep=true returns full impacted list)\n' +
       '  · bundle — pack closest neighbours within token budget — call when safety=🟡/🔴 to load the right context (id, budget=8000, depth=3)\n' +
       '  · radius — transitive dependents/dependencies via BFS, with token estimate (deeper analysis when needed) (id, depth=3, dir=users|deps)\n' +
+      '  · function — FUNCTION-level blast: what breaks if you change a specific function/method, not just its file. Use when editing one function inside a large/hub file — a file with few importers can still hold a function called from everywhere (file-level blast misses this). id = function/method name; optional file= to disambiguate; dir=users(callers, default)|deps(callees). Coverage: JS/TS + Python only.\n' +
       'RULE: 🔴 RISKY → STOP, surface to user, do not auto-edit. 🟡 CAUTION → call bundle first.\n' +
       'CAVEAT: if the response has a `caveat` field, the impact set contains files using dynamic/reflective/DI deps that static analysis CANNOT resolve — the real blast may be LARGER. Do NOT treat the count as complete; inspect caveat.dynamicFiles directly.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['radius', 'safety', 'bundle'] },
-        id:     { type: 'string' },
+        action: { type: 'string', enum: ['radius', 'safety', 'bundle', 'function'] },
+        id:     { type: 'string', description: 'file id for radius/safety/bundle; function/method NAME for action:function' },
+        file:   { type: 'string', description: 'function — narrow to this file when several functions share the name' },
         depth:  { type: 'number', description: 'radius / bundle BFS depth (1-10, default 3)' },
         dir:    { type: 'string', enum: ['users', 'deps'], description: 'radius direction (default users)' },
         deep:   { type: 'boolean', description: 'safety — include full impacted file list' },
@@ -346,9 +348,18 @@ const TOOLS = [
       },
       required: ['action', 'id'],
     },
-    handler: async ({ action, id, depth, dir, deep, budget, locale, full }) => {
+    handler: async ({ action, id, depth, dir, deep, budget, locale, full, file }) => {
       if (!id) bad('id is required')
       switch (action) {
+        case 'function': {
+          // Resolve the function NAME to a symbol, then function-level blast.
+          const fr = (await apiReq('GET', '/symbol/find', { q: id })).data
+          let matches = (fr && fr.matches) || []
+          if (file) matches = matches.filter((mn) => mn.file === file || mn.file.endsWith('/' + file) || mn.file.endsWith(file))
+          if (!matches.length) return { error: `no symbol named "${id}"${file ? ' in ' + file : ''}`, hint: 'retry without file=, or this language may not be symbol-covered (JS/TS + Python only)' }
+          if (matches.length > 1) return { ambiguous: true, message: `${matches.length} symbols named "${id}" — pass file: to disambiguate`, candidates: matches.map((mn) => ({ id: mn.id, file: mn.file, line: mn.line, kind: mn.kind, callers: mn.callers })) }
+          return (await apiReq('GET', '/symbol/blast', { id: matches[0].id, depth: depth ?? 3, direction: dir === 'deps' ? 'callees' : 'callers' })).data
+        }
         case 'radius':
           // Compact by default — a large blast's full per-hop list can cost
           // tens of thousands of tokens; the agent gets counts + top files and
