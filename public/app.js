@@ -2760,6 +2760,22 @@ try {
   }
 } catch {}
 
+// Reveal the canvas (hide the dark loading overlay) once the graph's first
+// frame has drawn — covers the brief white an opaque WebGL canvas shows before
+// its first render. Double rAF guarantees a real frame painted first. Fallback
+// timeout handles the no-folder / no-snapshot case so it never lingers.
+;(() => {
+  let hidden = false
+  const hide = () => {
+    if (hidden) return; hidden = true
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      document.getElementById('canvas-loading')?.classList.add('hidden')
+    }))
+  }
+  bus.on('snapshot:applied', hide)
+  setTimeout(hide, 6000)
+})()
+
 // Subscribe file tree to relevant events.
 bus.on('snapshot:applied', () => {
   buildFileTree()

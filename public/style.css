@@ -329,6 +329,13 @@ body.no-folder            { grid-template-columns: 0 1fr 0; column-gap: 0; paddi
 #topbar    { grid-area: top; }
 #leftRail  { grid-area: lft; }
 #canvas    { grid-area: can; width: 100%; height: 100%; min-width: 0; min-height: 0; display: block; background: #03050C; }
+/* Dark overlay covering the canvas until the first graph frame is drawn — hides
+   the brief white the WebGL canvas shows before its first render. Same color as
+   scene.background so the fade-out is seamless. */
+#canvas-loading { grid-area: can; background: #03050C; z-index: 60; display: flex; align-items: center; justify-content: center; transition: opacity .3s ease; }
+#canvas-loading.hidden { opacity: 0; pointer-events: none; }
+#canvas-loading .cs-spin { width: 30px; height: 30px; border: 3px solid rgba(126,207,207,.22); border-top-color: #7ECFCF; border-radius: 50%; animation: cs-spin .8s linear infinite; }
+@keyframes cs-spin { to { transform: rotate(360deg); } }
 #rightRail { grid-area: rgt; }
 #statusBar { grid-area: bot; }
 
