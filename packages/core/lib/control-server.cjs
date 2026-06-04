@@ -17,6 +17,7 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const { SUPPORTED_EXTS } = require('./symbol-parsers.cjs')
 
 // ─── i18n strings (en + ko) ──────────────────────────────────
 // Keys are stable identifiers; values are functions so we can
@@ -378,6 +379,83 @@ function createControlServer(opts) {
       files: files.sort((a, b) => b.size - a.size).slice(0, 200),
       byDepth,
       caveat,
+    }
+  }
+
+  // ── Layer-2: symbol (function-call) graph views ──────────────────
+  function symbolNodeView(g, n) {
+    return {
+      id: n.id, name: n.qualifiedName || n.name, kind: n.kind,
+      file: n.file, line: n.startLine,
+      exported: !!n.exported,
+      callers: g.inAdj.get(n.id)?.size || 0,
+      callees: g.outAdj.get(n.id)?.size || 0,
+    }
+  }
+  // Honest coverage: the symbol graph only parses the oracle-validated
+  // languages (SUPPORTED_EXTS). Tell the agent which files are NOT covered
+  // so an under-populated graph isn't mistaken for "few dependencies".
+  function symbolCoverage() {
+    const byExt = {}; let covered = 0, total = 0
+    for (const f of scanner.files.values()) {
+      total++; byExt[f.ext] = (byExt[f.ext] || 0) + 1
+      if (SUPPORTED_EXTS.has(f.ext)) covered++
+    }
+    const uncovered = Object.keys(byExt).filter((e) => !SUPPORTED_EXTS.has(e))
+      .sort((a, b) => byExt[b] - byExt[a])
+    return {
+      filesCovered: covered, filesTotal: total,
+      coveragePct: total ? Math.round((100 * covered) / total) : 0,
+      uncoveredLangs: uncovered.slice(0, 8),
+      note: covered < total
+        ? 'Symbol (function-level) graph covers JS/TS + Python only; other languages are tracked at file level (layer-1) only.'
+        : undefined,
+    }
+  }
+  function symbolSummary(g) {
+    const hubs = []
+    for (const n of g.nodes.values()) {
+      const callers = g.inAdj.get(n.id)?.size || 0
+      if (callers > 0) {
+        hubs.push({ name: n.qualifiedName || n.name, kind: n.kind, file: n.file, line: n.startLine, callers })
+      }
+    }
+    hubs.sort((a, b) => b.callers - a.callers)
+    return { ...g.stats(), topHubs: hubs.slice(0, 15), coverage: symbolCoverage() }
+  }
+  // Function-level blast radius. direction 'callers' = "what breaks if I
+  // change this symbol" (transitive callers); 'callees' = "what this symbol
+  // depends on". This is the layer-2 answer to the file-level blast's blind
+  // spot: a 5000-line hub with 3 file-importers can still have a function
+  // called from everywhere.
+  function symbolBlast(g, id, depth = 3, direction = 'callers') {
+    if (!g.nodes.has(id)) return null
+    const visited = new Set([id]); let frontier = new Set([id])
+    const byDepth = [{ depth: 0, count: 1 }]
+    for (let d = 1; d <= depth; d++) {
+      const next = new Set()
+      for (const sid of frontier) {
+        const adj = direction === 'callers' ? g.inAdj.get(sid) : g.outAdj.get(sid)
+        if (!adj) continue
+        for (const n of adj) if (!visited.has(n)) { visited.add(n); next.add(n) }
+      }
+      if (!next.size) break
+      byDepth.push({ depth: d, count: next.size })
+      frontier = next
+    }
+    const impacted = [...visited].filter((x) => x !== id)
+      .map((x) => { const n = g.nodes.get(x); return n ? { name: n.qualifiedName || n.name, kind: n.kind, file: n.file, line: n.startLine } : null })
+      .filter(Boolean)
+    const files = new Set(impacted.map((i) => i.file))
+    const seed = g.nodes.get(id)
+    return {
+      seed: { id, name: seed.qualifiedName || seed.name, file: seed.file, line: seed.startLine },
+      direction, depth,
+      totalImpacted: impacted.length, filesTouched: files.size,
+      byDepth,
+      impacted: impacted.slice(0, 200),
+      truncated: impacted.length > 200,
+      caveat: 'Static call graph. Dynamic/reflective dispatch (signals/slots, getattr, DI) and ambiguous method names are not resolved — treat this as a floor. Coverage: JS/TS + Python only.',
     }
   }
 
@@ -1258,6 +1336,8 @@ function createControlServer(opts) {
             'GET /suggest [?top=N]', 'GET /feature/:keyword', 'GET /preflight',
             'GET /schema [?model=Name]', 'GET /url [?path=/...]', 'GET /secrets',
             'GET /vendors',
+            'GET /symbol/summary', 'GET /symbol/find?q=', 'GET /symbol/node?id=',
+            'GET /symbol/blast?id=[&depth=&direction=callers|callees]',
             'POST /write/:id', 'POST /edit/:id',
           ],
         })
@@ -1314,6 +1394,41 @@ function createControlServer(opts) {
         return writeJson(res, 200, withMeta({
           ...node, imports: getDeps(id), importedBy: getUsers(id),
         }))
+      }
+      // ── Layer-2 symbol endpoints. Symbol ids contain #/@ so they ride a
+      //    query param (?id=) rather than the path. getSymbolGraph() is async
+      //    (tree-sitter WASM init + parse), so we resolve then write. ──
+      if (req.method === 'GET' && seg0 === 'symbol') {
+        const sub = rest[0] || 'summary'
+        scanner.getSymbolGraph().then((g) => {
+          if (sub === 'summary') return writeJson(res, 200, withMeta(symbolSummary(g)))
+          if (sub === 'find') {
+            const q = url.searchParams.get('q') || ''
+            return writeJson(res, 200, withMeta({
+              query: q, matches: g.findByName(q, 50).map((n) => symbolNodeView(g, n)),
+            }))
+          }
+          if (sub === 'node') {
+            const id = decodeURIComponent(url.searchParams.get('id') || '')
+            const n = g.nodes.get(id)
+            if (!n) return writeJson(res, 404, { error: 'symbol not found', id })
+            return writeJson(res, 200, withMeta({
+              ...symbolNodeView(g, n),
+              callers: g.callersOf(id).map((c) => symbolNodeView(g, c)),
+              callees: g.calleesOf(id).map((c) => symbolNodeView(g, c)),
+            }))
+          }
+          if (sub === 'blast') {
+            const id = decodeURIComponent(url.searchParams.get('id') || '')
+            const depth = Math.min(6, Math.max(1, parseInt(url.searchParams.get('depth') || '3', 10)))
+            const dir = url.searchParams.get('direction') === 'callees' ? 'callees' : 'callers'
+            const r = symbolBlast(g, id, depth, dir)
+            if (!r) return writeJson(res, 404, { error: 'symbol not found', id })
+            return writeJson(res, 200, withMeta(r))
+          }
+          return writeJson(res, 404, { error: 'unknown symbol endpoint', sub, valid: ['summary', 'find?q=', 'node?id=', 'blast?id=[&depth=&direction=callers|callees]'] })
+        }).catch((e) => writeJson(res, 500, { error: 'symbol graph build failed', message: e && e.message }))
+        return
       }
       if (req.method === 'GET' && seg0 === 'file' && rest.length > 0) {
         const id = idFromRest()
