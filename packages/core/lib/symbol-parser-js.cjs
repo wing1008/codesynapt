@@ -449,7 +449,6 @@ function extractReferences(content, fileId, index) {
       // otherwise mis-link to an unrelated same-named free function
       // (B-2 caught `visited.add()` → a same-file `add`). Empty beats
       // wrong — see docs/SYMBOL-MODE-PLAN.md §5.
-      const isMemberCall = callee.type === 'MemberExpression'
       let target = null
       if (receiverClass) {
         // Typed member call: exact `Type.method` match only — no bare-name
@@ -459,7 +458,17 @@ function extractReferences(content, fileId, index) {
           ? index.resolveCall(fileId, `${receiverClass}.${name}`, { allowAny: true, qualifiedOnly: true })
           : null
       }
-      if (!target && !isMemberCall) target = resolveCall(name)
+      // Bare-name fallback for BOTH `foo()` and untyped `obj.foo()`. The
+      // tightened resolveCall (builtin-name filter + exact-case + unique-
+      // production-candidate) keeps this precise; passing memberCall makes
+      // it reject builtin method names (.add/.get) BEFORE the same-file
+      // lookup so `visited.add()` can't grab a same-file `add`. B-1.1 blocked
+      // member calls entirely here, which collapsed recall on method-heavy
+      // code (entry.js measured 6%); this recovers it without the FP.
+      const isMemberCall = callee.type === 'MemberExpression'
+      if (!target && index.resolveCall) {
+        target = index.resolveCall(fileId, name, { allowAny: true, memberCall: isMemberCall })
+      }
       if (!target || target.id === src) return
       edges.push({
         source: src,

@@ -116,8 +116,18 @@ class SymbolGraph {
   // they share a name. AI agents downstream would get noise edges
   // and follow false trails. Conservative beats clever here.
   // If the host wants the loose match, set `allowAny: true`.
-  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false } = {}) {
+  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false } = {}) {
     if (!name) return null
+    // Untyped member call `obj.foo()` where foo is a builtin / common method
+    // name (.add/.get/.map/.then…): never a call to a user free function of
+    // that name. Reject before the same-file/imported lookup (those run
+    // before the allowAny builtin filter and would otherwise grab a same-file
+    // `add` for `visited.add()` — B-2 / the JS-recall measurement). Bare
+    // calls `foo()` are unaffected (memberCall=false).
+    if (memberCall && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
+      this.unresolvedAmbiguous++
+      return null
+    }
     // Type-aware lookup: `User.method` matches a symbol whose
     // qualifiedName === 'User.method' exactly. Higher priority than
     // name-only matches because it narrows from "any method named X"
