@@ -116,7 +116,7 @@ class SymbolGraph {
   // they share a name. AI agents downstream would get noise edges
   // and follow false trails. Conservative beats clever here.
   // If the host wants the loose match, set `allowAny: true`.
-  resolveCall(fromFileId, name, { allowAny = false } = {}) {
+  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false } = {}) {
     if (!name) return null
     // Type-aware lookup: `User.method` matches a symbol whose
     // qualifiedName === 'User.method' exactly. Higher priority than
@@ -131,8 +131,15 @@ class SymbolGraph {
           if (node?.qualifiedName === name) return node
         }
       }
-      // No qualifiedName match — fall back to the bare method name
-      // through the regular path below.
+      // A typed member call (`Type.method`) with no exact qualifiedName
+      // match must NOT degrade to a bare-name guess — that is how
+      // `visited.add()` ('Set.add' → no match → bare 'add') mis-linked to
+      // an unrelated same-file `add` (B-2). Callers that know the receiver
+      // type pass qualifiedOnly so "type known, method not found" stays
+      // empty rather than wrong.
+      if (qualifiedOnly) return null
+      // Otherwise fall back to the bare method name through the regular
+      // path below.
       name = tail
     }
     const set = this.byName.get(name.toLowerCase())

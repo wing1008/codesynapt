@@ -440,13 +440,26 @@ function extractReferences(content, fileId, index) {
         }
       }
       if (!name) return
-      // Try the type-qualified lookup first; fall back to the loose
-      // call resolver if nothing matches.
+      // Resolve. A bare call `foo()` may resolve loosely (same-file /
+      // imported / unique-production) — no receiver, so it's a strong
+      // signal for an in-scope or module-level function. A member call
+      // `obj.foo()` resolves ONLY when we know the receiver's type
+      // (→ qualified `Type.foo`); we do NOT fall back to a bare-name
+      // lookup for it. `.add()` / `.get()` on an untyped receiver would
+      // otherwise mis-link to an unrelated same-named free function
+      // (B-2 caught `visited.add()` → a same-file `add`). Empty beats
+      // wrong — see docs/SYMBOL-MODE-PLAN.md §5.
+      const isMemberCall = callee.type === 'MemberExpression'
       let target = null
       if (receiverClass) {
-        target = resolveCall(`${receiverClass}.${name}`)
+        // Typed member call: exact `Type.method` match only — no bare-name
+        // degrade (qualifiedOnly), so `visited.add()` → 'Set.add' (no such
+        // symbol) stays unresolved instead of grabbing a same-file `add`.
+        target = index.resolveCall
+          ? index.resolveCall(fileId, `${receiverClass}.${name}`, { allowAny: true, qualifiedOnly: true })
+          : null
       }
-      if (!target) target = resolveCall(name)
+      if (!target && !isMemberCall) target = resolveCall(name)
       if (!target || target.id === src) return
       edges.push({
         source: src,
@@ -498,7 +511,17 @@ function extractReferences(content, fileId, index) {
       if (path.parent?.type === 'CallExpression' && path.parent.callee === path.node) return
       const prop = path.node.property
       if (!prop || prop.type !== 'Identifier') return
-      const target = resolveRef(prop.name)
+      // Type-aware, mirroring CallExpression: emit a ref only when we know
+      // the receiver's type (→ qualified `Type.prop`). An untyped `e.t`
+      // must not link to a same-named free function (B-2: `e.t` → i18n `t`).
+      const obj = path.node.object
+      let receiverClass = null
+      if (obj?.type === 'Identifier') { const ty = lookupVarType(obj.name); if (ty) receiverClass = ty }
+      else if (obj?.type === 'ThisExpression' && currentClass) receiverClass = currentClass
+      if (!receiverClass) return
+      const target = index.resolveCall
+        ? index.resolveCall(fileId, `${receiverClass}.${prop.name}`, { qualifiedOnly: true })
+        : null
       if (!target || target.id === src) return
       edges.push({ source: src, target: target.id, kind: 'ref', line: path.node.loc?.start.line || 0 })
     },
