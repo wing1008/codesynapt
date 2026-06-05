@@ -83,6 +83,53 @@ function extractTypeName(node) {
   return null
 }
 
+// Harvest known property types of a class so `this.prop.method()` can resolve
+// to `PropType.method`. Only records types we actually KNOW (a TS annotation or
+// a `new X()` initializer / assignment) — never a guess, so the qualified
+// resolution it enables stays precision-safe. Sources:
+//   • class field `collection: Collection` / `collection = new Collection()`
+//   • TS parameter property `constructor(private collection: Collection)`
+//   • constructor body `this.collection = new Collection()`
+function harvestClassProps(classNode, map) {
+  const body = classNode.body?.body
+  if (!Array.isArray(body)) return
+  for (const m of body) {
+    const mt = m.type
+    if ((mt === 'ClassProperty' || mt === 'PropertyDefinition' || mt === 'ClassPrivateProperty') && m.key) {
+      const pname = m.key.name || m.key.id?.name
+      if (!pname) continue
+      const annT = extractTypeName(m.typeAnnotation?.typeAnnotation)
+      if (annT) { map.set(pname, annT); continue }
+      if (m.value?.type === 'NewExpression') {
+        const c = extractTypeName(m.value.callee)
+        if (c) map.set(pname, c)
+      }
+      continue
+    }
+    if (mt === 'ClassMethod' && m.kind === 'constructor') {
+      for (const p of m.params || []) {
+        const id = p?.type === 'TSParameterProperty' ? p.parameter : p
+        if (id?.type === 'Identifier') {
+          const t = extractTypeName(id.typeAnnotation?.typeAnnotation)
+          if (t) map.set(id.name, t)
+        }
+      }
+      const stmts = m.body?.body
+      if (Array.isArray(stmts)) for (const s of stmts) {
+        const a = s.type === 'ExpressionStatement' ? s.expression : null
+        if (a?.type === 'AssignmentExpression'
+            && a.left?.type === 'MemberExpression'
+            && a.left.object?.type === 'ThisExpression'
+            && a.left.property?.type === 'Identifier'
+            && a.right?.type === 'NewExpression') {
+          const c = extractTypeName(a.right.callee)
+          if (c) map.set(a.left.property.name, c)
+        }
+      }
+    }
+  }
+}
+
 // Extract a one-line signature from a function/class declaration.
 function signatureOf(node, content) {
   if (!node?.loc) return ''
@@ -269,6 +316,7 @@ function extractReferences(content, fileId, index) {
   const edges = []
   const enclosing = makeEnclosingStack()
   let currentClass = null
+  let currentPropTypes = null   // class property name → known type (for this.x.m())
 
   // Two modes mirroring the tree-sitter parser. Calls allow the
   // any-file fallback (`foo()` is a strong signal); plain references
@@ -383,6 +431,8 @@ function extractReferences(content, fileId, index) {
       enter(path) {
         const n = path.node
         currentClass = n.id?.name || null
+        currentPropTypes = currentClass ? new Map() : null
+        if (currentPropTypes) harvestClassProps(n, currentPropTypes)
         if (currentClass && n.loc) {
           const classId = mkId(fileId, currentClass, n.loc.start.line)
           // `class Foo extends Bar` / `extends Bar.Baz` / `extends Generic<T>`
@@ -402,7 +452,7 @@ function extractReferences(content, fileId, index) {
           }
         }
       },
-      exit() { currentClass = null },
+      exit() { currentClass = null; currentPropTypes = null },
     },
     // TS `interface Foo extends Bar, Baz`
     TSInterfaceDeclaration: {
@@ -524,6 +574,15 @@ function extractReferences(content, fileId, index) {
           if (t) receiverClass = t
         } else if (obj?.type === 'ThisExpression' && currentClass) {
           receiverClass = currentClass
+        } else if (obj?.type === 'MemberExpression'
+                   && obj.object?.type === 'ThisExpression'
+                   && obj.property?.type === 'Identifier'
+                   && currentPropTypes) {
+          // `this.collection.method()` — resolve via the class's known
+          // property type (`this.collection: Collection`). Type is known, so
+          // qualified resolution stays precise.
+          const t = currentPropTypes.get(obj.property.name)
+          if (t) receiverClass = t
         }
       }
       if (!name) return
