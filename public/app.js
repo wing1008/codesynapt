@@ -1311,12 +1311,15 @@ symPoints.visible = false
 scene.add(symPoints)
 
 const symEdgePositions = new Float32Array(MAX_SYMBOL_EDGES * 6)
+const symEdgeColors    = new Float32Array(MAX_SYMBOL_EDGES * 6)
 const symEdgeGeo = new THREE.BufferGeometry()
 const symEdgePosAttr = new THREE.BufferAttribute(symEdgePositions, 3); symEdgePosAttr.setUsage(THREE.DynamicDrawUsage)
+const symEdgeColAttr = new THREE.BufferAttribute(symEdgeColors, 3);    symEdgeColAttr.setUsage(THREE.DynamicDrawUsage)
 symEdgeGeo.setAttribute('position', symEdgePosAttr)
+symEdgeGeo.setAttribute('color', symEdgeColAttr)
 symEdgeGeo.setDrawRange(0, 0)
 const symEdgeMat = new THREE.LineBasicMaterial({
-  color: 0x55aaff, transparent: true, opacity: 0.20, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending,
 })
 const symEdgeLines = new THREE.LineSegments(symEdgeGeo, symEdgeMat)
 symEdgeLines.frustumCulled = false
@@ -1329,6 +1332,7 @@ const SYM_KIND_COLOR = {
   type:      new THREE.Color(0xc8a2ff), const: new THREE.Color(0x9aa7b5),
 }
 const _symDefColor = new THREE.Color(0x9fd0ff)
+const _symHiColor  = new THREE.Color(0xffffff)   // hovered/selected symbol point
 
 // ───────────────────────────────────────────────────────────────
 // Folder bubbles — translucent colored spheres that wrap each
@@ -2257,7 +2261,7 @@ function applySnapshot(files, edges, root) {
     state.selectedId = null
     bus.emit('selection:changed', null)
   }
-  if (state.hoverId && !state.nodes.has(state.hoverId)) {
+  if (state.hoverId && !state.nodes.has(state.hoverId) && !state.symbols.has(state.hoverId)) {
     state.hoverId = null
   }
   if (state.draggingNode && !state.nodes.has(state.draggingNode.id)) {
@@ -2557,6 +2561,19 @@ function pickAtNDC(mx, my) {
     // Prefer closer to camera (smaller v.z) and nearer in NDC
     const score = d2 + v.z * 0.001
     if (score < bestScore) { bestScore = score; bestId = n.id }
+  }
+  // Symbol (function) nodes — pickable when the layer is on. Same NDC test.
+  if (state.showSymbols) {
+    for (const sym of state.symbols.values()) {
+      if (!sym.shown) continue
+      v.copy(sym.p).project(camera)
+      if (v.z > 1 || v.x < -1 || v.x > 1 || v.y < -1 || v.y > 1) continue
+      const dx = v.x - mx, dy = v.y - my
+      const d2 = dx*dx + dy*dy
+      if (d2 > pxRadius * pxRadius) continue
+      const score = d2 + v.z * 0.001
+      if (score < bestScore) { bestScore = score; bestId = sym.id }
+    }
   }
   return bestId
 }
@@ -3663,6 +3680,11 @@ function render() {
 
   // ─── Symbol layer: ride each function on its parent file node ───
   if (state.showSymbols && state.symbols.size) {
+    // The hovered/selected symbol, if any — its call edges light up so you
+    // see what a function connects to (its synapses). Others recede.
+    const hlSym = (state.hoverId && state.symbols.has(state.hoverId)) ? state.hoverId
+                : (state.selectedId && state.symbols.has(state.selectedId)) ? state.selectedId
+                : null
     let si = 0
     for (const sym of state.symbols.values()) {
       const fn = state.nodes.get(sym.file)
@@ -3670,7 +3692,7 @@ function render() {
       sym.p.copy(fn.p).add(sym.off)
       sym.shown = true
       symPositions[si*3] = sym.p.x; symPositions[si*3+1] = sym.p.y; symPositions[si*3+2] = sym.p.z
-      const c = SYM_KIND_COLOR[sym.kind] || _symDefColor
+      const c = (sym.id === hlSym) ? _symHiColor : (SYM_KIND_COLOR[sym.kind] || _symDefColor)
       symColors[si*3] = c.r; symColors[si*3+1] = c.g; symColors[si*3+2] = c.b
       si++
       if (si >= MAX_SYMBOLS) break
@@ -3685,11 +3707,18 @@ function render() {
       if (!a || !b || !a.shown || !b.shown) continue
       symEdgePositions[se*6]   = a.p.x; symEdgePositions[se*6+1] = a.p.y; symEdgePositions[se*6+2] = a.p.z
       symEdgePositions[se*6+3] = b.p.x; symEdgePositions[se*6+4] = b.p.y; symEdgePositions[se*6+5] = b.p.z
+      let r, g2, b2
+      if (!hlSym)                                       { r = 0.30; g2 = 0.55; b2 = 0.95 }
+      else if (call.s === hlSym || call.t === hlSym)    { r = 0.55; g2 = 0.95; b2 = 1.00 }
+      else                                              { r = 0.05; g2 = 0.07; b2 = 0.13 }
+      symEdgeColors[se*6]   = r; symEdgeColors[se*6+1] = g2; symEdgeColors[se*6+2] = b2
+      symEdgeColors[se*6+3] = r; symEdgeColors[se*6+4] = g2; symEdgeColors[se*6+5] = b2
       se++
       if (se >= MAX_SYMBOL_EDGES) break
     }
-    symEdgePosAttr.needsUpdate = true
+    symEdgePosAttr.needsUpdate = true; symEdgeColAttr.needsUpdate = true
     symEdgePosAttr.clearUpdateRanges(); symEdgePosAttr.addUpdateRange(0, se*6)
+    symEdgeColAttr.clearUpdateRanges(); symEdgeColAttr.addUpdateRange(0, se*6)
     symEdgeGeo.setDrawRange(0, se*2)
   }
 
