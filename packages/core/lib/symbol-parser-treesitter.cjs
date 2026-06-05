@@ -283,7 +283,7 @@ function walk(node, ctx) {
       }
       ctx.symbols.push(sym)
       const propTypes = new Map()
-      if (ctx.passTwo && ctx.lang === 'python') harvestPyClassProps(node, propTypes)
+      if (ctx.passTwo && ctx.lang === 'python') harvestPyClassProps(node, propTypes, ctx)
       ctx.classStack.push({ name, sym, propTypes })
       pushedCls = true
       // Inheritance edges (pass 2 only — we need every symbol indexed
@@ -344,11 +344,17 @@ function walk(node, ctx) {
         doc: docOf(node, ctx.content),
         exported: isExported(node, ctx.content),
       }
+      // Declared return type — `def f() -> Foo:` — lets `x = f(); x.m()` and
+      // `f().m()` resolve to `Foo.m` (return-type inference). Python only.
+      if (ctx.lang === 'python') {
+        const rt = pyTypeName(node.childForFieldName?.('return_type'))
+        if (rt) sym.returnType = rt
+      }
       ctx.symbols.push(sym)
       ctx.fnStack.push(sym.id)
       if (ctx.varTypeStack) {
         const vmap = new Map()
-        if (ctx.passTwo && ctx.lang === 'python') harvestPyFuncTypes(node, vmap)
+        if (ctx.passTwo && ctx.lang === 'python') harvestPyFuncTypes(node, vmap, ctx)
         ctx.varTypeStack.push(vmap)
       }
       pushedFn = true
@@ -604,8 +610,18 @@ function pyScanAssignments(node, onAssign) {
   if (t === 'assignment') onAssign(node)
   for (let i = 0; i < node.childCount; i++) pyScanAssignments(node.child(i), onAssign)
 }
-// Local var types inside a function: typed params + `x = Foo()` / `x: T = …`.
-function harvestPyFuncTypes(fnNode, map) {
+// Type a Python expression evaluates to, if known: `Foo(...)` construction or
+// a call whose target declares a `-> Foo` return type. Never a guess.
+function pyValueType(valueNode, ctx) {
+  if (!valueNode) return null
+  const ct = pyConstructType(valueNode)
+  if (ct) return ct
+  if (valueNode.type === 'call') { const n = pyResolveCalledNode(valueNode, ctx); return n?.returnType || null }
+  return null
+}
+// Local var types inside a function: typed params + `x = Foo()` / `x: T = …` /
+// `x = factory()` where factory declares a return type.
+function harvestPyFuncTypes(fnNode, map, ctx) {
   const params = fnNode.childForFieldName?.('parameters')
   if (params) for (let i = 0; i < params.namedChildCount; i++) {
     const p = params.namedChild(i)
@@ -618,13 +634,13 @@ function harvestPyFuncTypes(fnNode, map) {
   pyScanAssignments(fnNode.childForFieldName?.('body'), (a) => {
     const left = a.childForFieldName?.('left')
     if (left?.type !== 'identifier') return
-    const tn = pyTypeName(a.childForFieldName?.('type')) || pyConstructType(a.childForFieldName?.('right'))
+    const tn = pyTypeName(a.childForFieldName?.('type')) || pyValueType(a.childForFieldName?.('right'), ctx)
     if (tn) map.set(left.text, tn)
   })
 }
 // Class property types: class-level `x: T` / `x = Foo()` and `__init__`'s
 // `self.x = Foo()` / `self.x: T`.
-function harvestPyClassProps(classNode, map) {
+function harvestPyClassProps(classNode, map, ctx) {
   const body = classNode.childForFieldName?.('body')
   if (!body) return
   for (let i = 0; i < body.namedChildCount; i++) {
@@ -634,7 +650,7 @@ function harvestPyClassProps(classNode, map) {
       if (a?.type === 'assignment') {
         const left = a.childForFieldName?.('left')
         if (left?.type === 'identifier') {
-          const tn = pyTypeName(a.childForFieldName?.('type')) || pyConstructType(a.childForFieldName?.('right'))
+          const tn = pyTypeName(a.childForFieldName?.('type')) || pyValueType(a.childForFieldName?.('right'), ctx)
           if (tn) map.set(left.text, tn)
         }
       }
@@ -645,26 +661,22 @@ function harvestPyClassProps(classNode, map) {
         const o = left.childForFieldName?.('object')
         const attr = left.childForFieldName?.('attribute')
         if (o?.type === 'identifier' && (o.text === 'self' || o.text === 'cls') && attr?.type === 'identifier') {
-          const tn = pyTypeName(a.childForFieldName?.('type')) || pyConstructType(a.childForFieldName?.('right'))
+          const tn = pyTypeName(a.childForFieldName?.('type')) || pyValueType(a.childForFieldName?.('right'), ctx)
           if (tn) map.set(attr.text, tn)
         }
       })
     }
   }
 }
-// Resolve a Python call's receiver to a known class name, or null.
-//   self.method()       → enclosing class
-//   self.attr.method()  → class property type
-//   var.method()        → local var / param type
-function pyReceiverType(callNode, ctx) {
-  const fn = callNode.childForFieldName?.('function')
-  if (!fn || fn.type !== 'attribute') return null
-  const obj = fn.childForFieldName?.('object')
+// Known class of a receiver expression, or null.
+//   self / cls          → enclosing class
+//   self.attr           → class property type
+//   var                 → local var / param type
+//   a call `f()`        → f's declared return type (chains: `f().method()`)
+function pyObjType(obj, ctx) {
   if (!obj) return null
   if (obj.type === 'identifier') {
-    if (obj.text === 'self' || obj.text === 'cls') {
-      return ctx.classStack[ctx.classStack.length - 1]?.name || null
-    }
+    if (obj.text === 'self' || obj.text === 'cls') return ctx.classStack[ctx.classStack.length - 1]?.name || null
     const st = ctx.varTypeStack
     if (st) for (let i = st.length - 1; i >= 0; i--) { const ty = st[i].get(obj.text); if (ty) return ty }
     return null
@@ -675,8 +687,30 @@ function pyReceiverType(callNode, ctx) {
     if (oo?.type === 'identifier' && (oo.text === 'self' || oo.text === 'cls') && attr?.type === 'identifier') {
       return ctx.classStack[ctx.classStack.length - 1]?.propTypes?.get(attr.text) || null
     }
+    return null
   }
+  if (obj.type === 'call') { const n = pyResolveCalledNode(obj, ctx); return n?.returnType || null }
   return null
+}
+// Symbol node a call resolves to (one receiver level; bounded by AST depth for
+// chains). Used only for reading the target's return type — precision-safe
+// (a known receiver class + exact qualified lookup, or a bare call).
+function pyResolveCalledNode(callNode, ctx) {
+  const fnName = extractCalleeName(callNode)
+  if (!fnName) return null
+  const fn = callNode.childForFieldName?.('function')
+  if (fn?.type === 'attribute') {
+    const recv = pyObjType(fn.childForFieldName?.('object'), ctx)
+    if (recv && ctx.resolveQualified) return ctx.resolveQualified(`${recv}.${fnName}`)
+    return null
+  }
+  return ctx.resolve ? ctx.resolve(fnName, { forCall: true }) : null
+}
+// Known class of a call's receiver, for resolving `recv.method()`.
+function pyReceiverType(callNode, ctx) {
+  const fn = callNode.childForFieldName?.('function')
+  if (!fn || fn.type !== 'attribute') return null
+  return pyObjType(fn.childForFieldName?.('object'), ctx)
 }
 
 function extractCalleeName(callNode) {
