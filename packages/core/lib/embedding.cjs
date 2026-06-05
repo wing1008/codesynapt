@@ -1,7 +1,16 @@
 // Semantic embeddings via @xenova/transformers (MiniLM-L6-v2, ~25 MB
 // quantized ONNX model). Runs entirely locally — no network call at
-// query time, no telemetry. The model itself is fetched once on
-// first load and cached under the OS HF cache directory.
+// query time, no telemetry.
+//
+// OFFLINE BY DESIGN: by default this module NEVER reaches the network.
+// @xenova/transformers ships with allowRemoteModels:true and a
+// huggingface.co remote host, which would silently download the model
+// on first use — a violation of the project's offline-by-design hard
+// rule (AGENTS.md / CLAUDE.md). We pin env.allowRemoteModels=false so a
+// cold-cache machine resolves the model strictly from disk, and if it
+// is absent we cleanly fall back to keyword-only scoring instead of
+// fetching. Users who explicitly want the one-time download must opt in
+// with CS_EMBEDDING_DOWNLOAD=1 (off by default).
 //
 // Used by /symbol/explore to give "auth" ↔ "login" / "signIn" /
 // "verifyJWT" the synonym match that keyword-only scoring misses.
@@ -22,6 +31,11 @@ async function loadPipeline() {
   _pipelinePromise = (async () => {
     try {
       const mod = await import('@xenova/transformers')
+      // Offline by default: forbid any outbound fetch to huggingface.co.
+      // Only enable remote downloads when the user explicitly opts in.
+      const allowDownload = process.env.CS_EMBEDDING_DOWNLOAD === '1'
+      mod.env.allowRemoteModels = allowDownload
+      mod.env.allowLocalModels = true
       const p = await mod.pipeline(
         'feature-extraction',
         'Xenova/all-MiniLM-L6-v2',

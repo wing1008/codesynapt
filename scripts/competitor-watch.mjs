@@ -3,16 +3,34 @@
 // every repo listed in docs/COMPETITOR-WATCH.md and write a digest
 // to docs/competitor-log.md. Run weekly.
 //
+// MAINTAINER-ONLY / OPT-IN. This is the one script in the repo that
+// makes outbound network calls (to api.github.com). The shipped product
+// is offline by design, so:
+//   1. it is excluded from the npm package `files` whitelist (see
+//      package.json: "!scripts/competitor-watch.mjs"), so it does NOT
+//      travel inside the distributed artifact; and
+//   2. it refuses to run unless CS_COMPETITOR_WATCH=1 is set, so it can
+//      never fire by accident (e.g. if invoked from a packaged tree).
+//
 // Uses the public GitHub API (no token required for low-rate usage).
 // If GITHUB_TOKEN is set, it's used to lift the 60/h anon rate limit.
 //
 // Usage:
-//   node scripts/competitor-watch.mjs                  # default cadence
-//   node scripts/competitor-watch.mjs --since 14d      # last 14 days only
-//   node scripts/competitor-watch.mjs --repo codegraph # just one repo
+//   CS_COMPETITOR_WATCH=1 node scripts/competitor-watch.mjs               # default cadence
+//   CS_COMPETITOR_WATCH=1 node scripts/competitor-watch.mjs --since 14d   # last 14 days only
+//   CS_COMPETITOR_WATCH=1 node scripts/competitor-watch.mjs --repo codegraph
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
+
+if (process.env.CS_COMPETITOR_WATCH !== '1') {
+  console.error(
+    '[competitor-watch] refusing to run: this maintainer script makes outbound\n' +
+    'network calls to api.github.com and is opt-in only. Re-run with\n' +
+    'CS_COMPETITOR_WATCH=1 to confirm you want the network fetch.'
+  )
+  process.exit(2)
+}
 
 const REPOS = [
   { owner: 'colbymchenry',   name: 'codegraph',     cadence: 'weekly',     why: 'direct competitor' },

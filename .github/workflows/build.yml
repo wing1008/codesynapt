@@ -38,6 +38,11 @@ jobs:
           npm sbom --sbom-format=cyclonedx --sbom-type=application > sbom.cyclonedx.json
           echo "=== SBOM size: $(wc -c < sbom.cyclonedx.json) bytes ==="
           # Move into dist/ so the release-attach step picks it up.
+          # dist/ is gitignored and not created until electron-builder
+          # runs in the later "Build app" step, so create it first —
+          # otherwise the mv fails ("No such file or directory") and,
+          # under set -eo pipefail, aborts the whole Linux release job.
+          mkdir -p dist
           mv sbom.cyclonedx.json dist/sbom.cyclonedx.json
 
       - name: Build app
