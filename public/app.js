@@ -709,6 +709,9 @@ const state = {
   nodes: new Map(),     // id → node
   byIdx: [],            // compact array — order matches GPU buffers
   edges: [],            // {s, t, k}
+  symbols: new Map(),   // symbolId → { id, file, name, kind, off, p, shown } — layer-2 function nodes
+  symbolCalls: [],      // { s, t } — function-level call edges
+  showSymbols: false,   // toggle the 3D function/symbol layer
   adj: new Map(),       // id → Set(neighbor ids)
   hoverId: null,
   selectedId: null,
@@ -1282,6 +1285,50 @@ const trailMat = new THREE.LineBasicMaterial({
 const trailLine = new THREE.Line(trailGeo, trailMat)
 trailLine.frustumCulled = false
 scene.add(trailLine)
+
+// ─── Symbol layer (layer-2): functions/methods as points clustered around
+// their parent file node, with call edges between them. Same Points +
+// LineSegments batching as the file graph. Off by default; toggled from the
+// status-bar symbol cell, which fetches /symbol/graph. Positioned each frame
+// at parentFile.p + a stable per-symbol offset so functions ride their file.
+const MAX_SYMBOLS = 40000
+const MAX_SYMBOL_EDGES = 80000
+const symPositions = new Float32Array(MAX_SYMBOLS * 3)
+const symColors    = new Float32Array(MAX_SYMBOLS * 3)
+const symGeo = new THREE.BufferGeometry()
+const symPosAttr = new THREE.BufferAttribute(symPositions, 3); symPosAttr.setUsage(THREE.DynamicDrawUsage)
+const symColAttr = new THREE.BufferAttribute(symColors, 3);    symColAttr.setUsage(THREE.DynamicDrawUsage)
+symGeo.setAttribute('position', symPosAttr)
+symGeo.setAttribute('color', symColAttr)
+symGeo.setDrawRange(0, 0)
+const symMat = new THREE.PointsMaterial({
+  size: 2.4, sizeAttenuation: true, vertexColors: true,
+  transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
+})
+const symPoints = new THREE.Points(symGeo, symMat)
+symPoints.frustumCulled = false
+symPoints.visible = false
+scene.add(symPoints)
+
+const symEdgePositions = new Float32Array(MAX_SYMBOL_EDGES * 6)
+const symEdgeGeo = new THREE.BufferGeometry()
+const symEdgePosAttr = new THREE.BufferAttribute(symEdgePositions, 3); symEdgePosAttr.setUsage(THREE.DynamicDrawUsage)
+symEdgeGeo.setAttribute('position', symEdgePosAttr)
+symEdgeGeo.setDrawRange(0, 0)
+const symEdgeMat = new THREE.LineBasicMaterial({
+  color: 0x55aaff, transparent: true, opacity: 0.20, depthWrite: false, blending: THREE.AdditiveBlending,
+})
+const symEdgeLines = new THREE.LineSegments(symEdgeGeo, symEdgeMat)
+symEdgeLines.frustumCulled = false
+symEdgeLines.visible = false
+scene.add(symEdgeLines)
+
+const SYM_KIND_COLOR = {
+  function:  new THREE.Color(0x6fe0ff), method: new THREE.Color(0x8affc1),
+  class:     new THREE.Color(0xffd479), interface: new THREE.Color(0xc8a2ff),
+  type:      new THREE.Color(0xc8a2ff), const: new THREE.Color(0x9aa7b5),
+}
+const _symDefColor = new THREE.Color(0x9fd0ff)
 
 // ───────────────────────────────────────────────────────────────
 // Folder bubbles — translucent colored spheres that wrap each
@@ -3613,6 +3660,38 @@ function render() {
   edgePosAttr.clearUpdateRanges(); edgePosAttr.addUpdateRange(0, e * 6)
   edgeColorAttr.clearUpdateRanges(); edgeColorAttr.addUpdateRange(0, e * 6)
   edgeGeo.setDrawRange(0, e * 2)
+
+  // ─── Symbol layer: ride each function on its parent file node ───
+  if (state.showSymbols && state.symbols.size) {
+    let si = 0
+    for (const sym of state.symbols.values()) {
+      const fn = state.nodes.get(sym.file)
+      if (!fn || fn.visible === false) { sym.shown = false; continue }
+      sym.p.copy(fn.p).add(sym.off)
+      sym.shown = true
+      symPositions[si*3] = sym.p.x; symPositions[si*3+1] = sym.p.y; symPositions[si*3+2] = sym.p.z
+      const c = SYM_KIND_COLOR[sym.kind] || _symDefColor
+      symColors[si*3] = c.r; symColors[si*3+1] = c.g; symColors[si*3+2] = c.b
+      si++
+      if (si >= MAX_SYMBOLS) break
+    }
+    symPosAttr.needsUpdate = true; symColAttr.needsUpdate = true
+    symPosAttr.clearUpdateRanges(); symPosAttr.addUpdateRange(0, si*3)
+    symColAttr.clearUpdateRanges(); symColAttr.addUpdateRange(0, si*3)
+    symGeo.setDrawRange(0, si)
+    let se = 0
+    for (const call of state.symbolCalls) {
+      const a = state.symbols.get(call.s), b = state.symbols.get(call.t)
+      if (!a || !b || !a.shown || !b.shown) continue
+      symEdgePositions[se*6]   = a.p.x; symEdgePositions[se*6+1] = a.p.y; symEdgePositions[se*6+2] = a.p.z
+      symEdgePositions[se*6+3] = b.p.x; symEdgePositions[se*6+4] = b.p.y; symEdgePositions[se*6+5] = b.p.z
+      se++
+      if (se >= MAX_SYMBOL_EDGES) break
+    }
+    symEdgePosAttr.needsUpdate = true
+    symEdgePosAttr.clearUpdateRanges(); symEdgePosAttr.addUpdateRange(0, se*6)
+    symEdgeGeo.setDrawRange(0, se*2)
+  }
 
   // ─── AI navigation trail (a Line through last N traced nodes) ───
   // Pull most-recent first → reverse render order so newest = brightest
@@ -6748,33 +6827,48 @@ function refreshThemePicker() {
 //  (symbolModeState is declared near the top of the module to avoid a TDZ.)
 // ═══════════════════════════════════════════════════════════════
 
+// Toggle the 3D symbol (function) layer. First enable fetches /symbol/graph
+// and builds state.symbols (each with a stable offset around its parent file)
+// + state.symbolCalls; the render loop then draws them as Points + call edges.
 async function buildSymbolGraph() {
-  if (symbolModeState.loading) return
   const cell = document.getElementById('sb_symbols')
-  if (!cell) return
+  state.showSymbols = !state.showSymbols
+  symPoints.visible = state.showSymbols
+  symEdgeLines.visible = state.showSymbols
+  if (cell) cell.classList.toggle('active', state.showSymbols)
+  if (!state.showSymbols) return                 // turned off — just hide
+  if (symbolModeState.loading) return
+  // Already loaded for this project? just show.
+  if (state.symbols.size && symbolModeState.lastRoot === state.root) {
+    if (cell) cell.title = `${state.symbols.size.toLocaleString()} functions · ${state.symbolCalls.length.toLocaleString()} calls · click to hide`
+    return
+  }
   symbolModeState.loading = true
-  cell.classList.add('loading', 'sb-clickable')
+  if (cell) cell.classList.add('loading', 'sb-clickable')
   try {
-    // GET /symbol/summary triggers a lazy build server-side; the
-    // response also gives us the symbol count + edge count. The
-    // control server tries ports 7707..7716 to find a free one, so
-    // we ask the main process for the actual port via IPC instead
-    // of hard-coding 7707 — otherwise this fetch breaks whenever
-    // a second instance bumped the port.
     let port = 7707
-    try {
-      if (window.codesynapt?.controlPort) port = await window.codesynapt.controlPort()
-    } catch {}
-    const r = await fetch(`http://127.0.0.1:${port}/symbol/summary`)
+    try { if (window.codesynapt?.controlPort) port = await window.codesynapt.controlPort() } catch {}
+    const r = await fetch(`http://127.0.0.1:${port}/symbol/graph`)
     const j = await r.json()
-    symbolModeState.count = j.symbolCount ?? null
-    symbolModeState.edges = j.edgeCount ?? null
-    cell.title = `${symbolModeState.count?.toLocaleString() || '?'} symbols · ${symbolModeState.edges?.toLocaleString() || '?'} edges · click to re-scan`
+    state.symbols.clear()
+    for (const s of (j.symbols || [])) {
+      // Stable offset on a small sphere shell around the parent file node,
+      // so a file's functions cluster on/around it instead of overlapping.
+      const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
+      const len = off.length() || 1
+      off.multiplyScalar((1.2 + Math.random() * 1.8) / len)
+      state.symbols.set(s.id, { id: s.id, file: s.file, name: s.name, kind: s.kind, off, p: new THREE.Vector3(), shown: false })
+    }
+    state.symbolCalls = j.calls || []
+    symbolModeState.count = state.symbols.size
+    symbolModeState.edges = state.symbolCalls.length
+    symbolModeState.lastRoot = state.root
+    if (cell) cell.title = `${state.symbols.size.toLocaleString()} functions · ${state.symbolCalls.length.toLocaleString()} calls · click to hide`
   } catch (e) {
-    cell.title = 'symbol build failed: ' + (e.message || e)
+    if (cell) cell.title = 'symbol layer failed: ' + (e.message || e)
   } finally {
     symbolModeState.loading = false
-    cell.classList.remove('loading')
+    if (cell) cell.classList.remove('loading')
   }
 }
 

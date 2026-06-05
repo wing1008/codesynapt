@@ -2200,6 +2200,23 @@ async function handleControlRequest(req, res) {
       if (req.method === 'GET' && (sub === '' || sub === 'summary')) {
         return writeJson(res, 200, withMeta(g.stats()))
       }
+      if (req.method === 'GET' && sub === 'graph') {
+        // Render payload for the 3D function layer (symbols + call edges).
+        const limit = Math.min(40000, Math.max(1, parseInt(url.searchParams.get('limit') || '12000', 10)))
+        const symbols = []
+        for (const n of g.nodes.values()) {
+          symbols.push({ id: n.id, file: n.file, name: n.qualifiedName || n.name, kind: n.kind, line: n.startLine })
+          if (symbols.length >= limit) break
+        }
+        const ids = new Set(symbols.map((s) => s.id))
+        const calls = []
+        for (const e of g.edges) {
+          if (e.kind !== 'call') continue
+          if (ids.has(e.source) && ids.has(e.target)) calls.push({ s: e.source, t: e.target })
+          if (calls.length >= limit * 3) break
+        }
+        return writeJson(res, 200, withMeta({ symbols, calls, truncated: g.nodes.size > symbols.length }))
+      }
       if (req.method === 'GET' && sub === 'find') {
         const q = url.searchParams.get('q') || ''
         const limit = Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10))
