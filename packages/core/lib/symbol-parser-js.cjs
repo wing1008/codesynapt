@@ -479,6 +479,34 @@ function extractReferences(content, fileId, index) {
         else enclosing.pop()
       },
     },
+    // FunctionExpression mirrors ArrowFunctionExpression. Named via a const
+    // (`const f = function () {}`) or object property (`{ f: function () {} }`)
+    // is an extracted symbol — attribute its body's calls to it; anonymous
+    // (`arr.forEach(function () { … })`) inherits the nearest named enclosing.
+    FunctionExpression: {
+      enter(path) {
+        const parent = path.parentPath?.node
+        let name = null
+        if (parent?.type === 'VariableDeclarator') name = parent.id?.name
+        else if (parent?.type === 'ObjectProperty' && !parent.computed) {
+          name = parent.key?.name ?? (parent.key?.value != null ? String(parent.key.value) : null)
+        }
+        if (name && parent.loc) {
+          pushEnclosing(name, parent.loc.start.line)
+          pushTypes(); harvestTypesFrom(path.node)
+          return
+        }
+        enclosing.push(enclosing.top())
+      },
+      exit(path) {
+        const parent = path.parentPath?.node
+        let named = false
+        if (parent?.type === 'VariableDeclarator') named = !!parent.id?.name
+        else if (parent?.type === 'ObjectProperty' && !parent.computed) named = parent.key?.name != null || parent.key?.value != null
+        if (named && parent.loc) { enclosing.pop(); popTypes() }
+        else enclosing.pop()
+      },
+    },
     CallExpression(path) {
       const src = enclosing.top()
       if (!src) return
