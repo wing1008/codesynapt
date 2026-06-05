@@ -36,6 +36,11 @@ function req(method, pathStr, query, body) {
       if (parts.length) qs = '?' + parts.join('&')
     }
     const headers = {}
+    // When the backend runs with CS_AUTH_TOKEN, control-server gates EVERY
+    // request behind Bearer auth (reads included). Without this header every
+    // `cs` command 401s once a token is set to enable edits. (CLI half of
+    // SEC-002 — the MCP apiReq was already fixed.)
+    if (process.env.CS_AUTH_TOKEN) headers['Authorization'] = `Bearer ${process.env.CS_AUTH_TOKEN}`
     let payload = null
     if (body !== undefined && body !== null) {
       payload = typeof body === 'string' ? body : JSON.stringify(body)

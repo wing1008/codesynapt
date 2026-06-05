@@ -2558,7 +2558,9 @@ function pickAtNDC(mx, my) {
   // Pixel-space hit radius (NDC units, depending on canvas size)
   const cw = canvas.clientWidth || window.innerWidth
   const ch = canvas.clientHeight || window.innerHeight
-  const pxRadius = 14 / Math.min(cw, ch)
+  // NDC spans 2 (-1..1) per axis, so a pixel radius converts with 2/dim, not
+  // 1/dim — without the ×2 the hit target was half the intended ~14px.
+  const pxRadius = (14 * 2) / Math.min(cw, ch)
   for (let i = 0; i < state.byIdx.length; i++) {
     const n = state.byIdx[i]
     if (n.visible === false) continue

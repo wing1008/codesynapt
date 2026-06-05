@@ -165,6 +165,7 @@ function extractSymbols(content, fileId) {
   if (!ast) return []
   const symbols = []
   let currentClass = null
+  const cjsExports = new Set()   // names assigned to module.exports / exports.X
 
   traverse(ast, {
     FunctionDeclaration(path) {
@@ -304,7 +305,35 @@ function extractSymbols(content, fileId) {
         signature: signatureOf(n, content), doc: docOf(n), exported: false,
       })
     },
+    // CommonJS exports: `module.exports = foo`, `module.exports = { foo, bar }`,
+    // `module.exports.foo = …`, `exports.foo = …`. The visitors above default
+    // exported:false and only knew ES `export`, so CJS-exported functions were
+    // all mislabelled un-exported.
+    AssignmentExpression(path) {
+      const { left, right } = path.node
+      if (left?.type !== 'MemberExpression') return
+      const o = left.object, p = left.property
+      const isModuleExports = (node) => node?.type === 'MemberExpression'
+        && node.object?.type === 'Identifier' && node.object.name === 'module'
+        && node.property?.type === 'Identifier' && node.property.name === 'exports'
+      // exports.foo = … / module.exports.foo = …
+      if (((o?.type === 'Identifier' && o.name === 'exports') || isModuleExports(o)) && p?.type === 'Identifier') {
+        cjsExports.add(p.name)
+        if (right?.type === 'Identifier') cjsExports.add(right.name)
+        return
+      }
+      // module.exports = foo | module.exports = { foo, bar }
+      if (isModuleExports(left)) {
+        if (right?.type === 'Identifier') cjsExports.add(right.name)
+        else if (right?.type === 'ObjectExpression') for (const pr of (right.properties || [])) {
+          if (pr.key?.type === 'Identifier') cjsExports.add(pr.key.name)
+          if (pr.value?.type === 'Identifier') cjsExports.add(pr.value.name)
+        }
+      }
+    },
   })
+
+  for (const s of symbols) if (cjsExports.has(s.name)) s.exported = true
 
   return symbols
 }

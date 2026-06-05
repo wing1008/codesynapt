@@ -84,9 +84,20 @@ scanner.on('snapshot', (snap) => {
   ]
   expected.forEach((e) => console.log('  ' + e))
 
+  // Actually ASSERT (previously this only printed two lists and exited 0,
+  // so the CI smoke test could never fail). Every expected edge must be
+  // present in the produced graph; the `(dynamic)` annotation is informational
+  // and stripped for the membership check.
+  const actual = new Set(snap.edges.map((e) => `${e.s} → ${e.t}`))
+  const missing = expected.filter((e) => !actual.has(e.replace(/ \(dynamic\)$/, '')))
   scanner.stop()
-  // Cleanup
   fs.rmSync(tmp, { recursive: true, force: true })
+  if (missing.length) {
+    console.error(`\n❌ SMOKE FAIL: ${missing.length} expected edge(s) missing:`)
+    missing.forEach((m) => console.error('  - ' + m))
+    process.exit(1)
+  }
+  console.log('\n✅ smoke: all expected edges present')
   process.exit(0)
 })
 
