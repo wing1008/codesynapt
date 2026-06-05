@@ -1,5 +1,5 @@
 // Preload — safe IPC bridge between renderer (untrusted) and main (privileged)
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const csApi = {
   // Imperative
@@ -34,6 +34,16 @@ const csApi = {
   revealInOS: (id) => ipcRenderer.invoke('reveal-in-os', id),
   openInEditor: (id) => ipcRenderer.invoke('open-in-editor', id),
 
+  // Resolve the absolute filesystem path of a dropped File. Electron 32+
+  // (we ship 41) removed the non-standard `File.path` property, so a
+  // drag-dropped folder/file no longer carries its path in the renderer.
+  // webUtils.getPathForFile() is the supported replacement and is only
+  // reachable from the preload context — expose it so the drop handler
+  // can recover the path and loadFolder() it. Returns '' if unavailable.
+  getPathForFile: (file) => {
+    try { return webUtils.getPathForFile(file) } catch { return '' }
+  },
+
   // Event subscriptions (main → renderer)
   onSnapshot: (cb) => {
     const handler = (_e, data) => cb(data)
@@ -65,6 +75,43 @@ const csApi = {
     ipcRenderer.on('scan-progress', handler)
     return () => ipcRenderer.off('scan-progress', handler)
   },
+  // Per-snapshot scanner stats (file count, edge count, scan timings).
+  // main.cjs emits 'stats' on every scanner 'stats' event; previously
+  // unbridged, so the renderer could never see it.
+  onStats: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('stats', handler)
+    return () => ipcRenderer.off('stats', handler)
+  },
+
+  // ─── Auto-updater ────────────────────────────────────────────
+  // main.cjs's updater emits these events; the renderer subscribes here
+  // and drives download/install via the invoke methods below. Without
+  // this bridge the 'download / restart' toast could never receive the
+  // updater:* events nor trigger a download — the flow was detect-only.
+  onUpdaterAvailable: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('updater:available', handler)
+    return () => ipcRenderer.off('updater:available', handler)
+  },
+  onUpdaterProgress: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('updater:progress', handler)
+    return () => ipcRenderer.off('updater:progress', handler)
+  },
+  onUpdaterDownloaded: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('updater:downloaded', handler)
+    return () => ipcRenderer.off('updater:downloaded', handler)
+  },
+  onUpdaterError: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('updater:error', handler)
+    return () => ipcRenderer.off('updater:error', handler)
+  },
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate:  () => ipcRenderer.invoke('updater:install'),
+  checkForUpdate: () => ipcRenderer.invoke('updater:check'),
 
   // Panel data — bypasses fetch/CSP for tour, timeline, changes
   getTour:       () => ipcRenderer.invoke('panel:tour'),

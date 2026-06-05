@@ -8,5 +8,5 @@
   "main": "main.js",
   "minAppVersion": "0.10.0",
   "license": "MIT",
-  "permissions": []
+  "permissions": ["export"]
 }

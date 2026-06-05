@@ -111,6 +111,36 @@ registerSymbolParsers()
 let symbolGraph = null            // SymbolGraph instance; rebuilt per project
 let _symbolBuilding = null        // in-flight build promise (avoid double work)
 
+// Drop the cached L2 symbol graph so the next /symbol/* request rebuilds.
+// Called on every watched-file add/change/remove. The symbol graph spans
+// the whole project (cross-file call resolution, re-export chains, route
+// edges), so a single-file edit can change edges anywhere — a targeted
+// per-file patch isn't safe; a full rebuild on next query is. We only
+// invalidate when a graph (or in-flight build) actually exists, so the
+// common "no symbol query yet" path stays a no-op.
+function invalidateSymbolGraph(id, reason) {
+  if (!symbolGraph && !_symbolBuilding) return
+  symbolGraph = null
+  _symbolBuilding = null
+  try { log.info('symbol graph invalidated', { file: id, reason }) } catch {}
+}
+
+// Fingerprint of a scanner's exact file set, as sorted "id:mtimeMs" pairs.
+// Used by the opt-in symbol disk cache (CS_SYMBOL_CACHE=1) so cache validity
+// also depends on the file set itself, not just the newest surviving mtime
+// (which can't see deletions/renames/additions). Missing-stat files are
+// included as id:0 so an unreadable file still perturbs the hash.
+function symbolFileSetHash(sc) {
+  const parts = []
+  for (const f of sc.files.values()) {
+    let m = 0
+    try { m = fs.statSync(f.absPath).mtimeMs } catch {}
+    parts.push(f.id + ':' + m)
+  }
+  parts.sort()
+  return require('crypto').createHash('sha1').update(parts.join('\n')).digest('hex')
+}
+
 // Path looks like a test file? Used by explore() ranking to push real
 // implementation symbols above test fixtures with similar names.
 // Heavier explore-only auxiliary-path filter than `isTestPath` —
@@ -521,6 +551,7 @@ async function startScanner(root) {
     mainWindow?.webContents.send('scan-progress', p)
   })
   scanner.on('file-changed', ({ id, absPath }) => {
+    invalidateSymbolGraph(id, 'changed')
     try {
       const stat = fs.statSync(absPath)
       if (stat.size > 2_000_000) return
@@ -529,6 +560,16 @@ async function startScanner(root) {
       trackChange(id, content)
     } catch {}
   })
+  // The L2 symbol graph is built lazily and cached in-memory until the
+  // next project swap. Without these hooks, adding/editing/deleting a
+  // file left /symbol/* serving symbols + call edges from the pre-edit
+  // source — e.g. a renamed function still resolved, a deleted file's
+  // symbols still listed. Drop the cached graph (and its in-flight
+  // build) so the next /symbol/* request rebuilds against the current
+  // file set. Cheap: rebuild is amortised over the next query, and the
+  // file-mode graph the scanner already maintains is untouched.
+  scanner.on('file-added',   ({ id }) => invalidateSymbolGraph(id, 'added'))
+  scanner.on('file-removed', ({ id }) => invalidateSymbolGraph(id, 'removed'))
 
   mainWindow?.webContents.send('folder-loaded', { root })
   startTraceSession()
@@ -1021,6 +1062,49 @@ ipcMain.handle('open-plugin-dir', () => {
 })
 
 ipcMain.handle('plugin-dir', () => pluginLoader.getPluginDir())
+
+// ─── Auto-updater control (renderer-driven) ────────────────────
+// The updater is wired in app.whenReady() below; these handlers let the
+// renderer toast drive download/install. `_autoUpdater` is null when the
+// updater is disabled (CS_DISABLE_UPDATER=1) or electron-updater isn't
+// installed (CLI/MCP-only builds) — handlers degrade gracefully then.
+let _autoUpdater = null
+let _updateAvailableInfo = null    // last 'update-available' info, if any
+let _updateDownloaded = false      // true once 'update-downloaded' fired
+// Renderer requests the actual download once the user clicks "download".
+ipcMain.handle('updater:download', async () => {
+  if (!_autoUpdater) return { ok: false, error: 'updater unavailable' }
+  if (!_updateAvailableInfo) return { ok: false, error: 'no update available' }
+  try {
+    await _autoUpdater.downloadUpdate()
+    return { ok: true }
+  } catch (e) {
+    log.error('updater download failed', { message: e.message })
+    return { ok: false, error: e.message }
+  }
+})
+// Renderer requests install (quit + relaunch into the new version) once
+// the user clicks "restart". quitAndInstall does not return.
+ipcMain.handle('updater:install', () => {
+  if (!_autoUpdater) return { ok: false, error: 'updater unavailable' }
+  if (!_updateDownloaded) return { ok: false, error: 'no update downloaded' }
+  try {
+    setImmediate(() => { try { _autoUpdater.quitAndInstall() } catch (e) { log.error('quitAndInstall failed', { message: e.message }) } })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+// Manual "check now" trigger (e.g. a menu/settings button).
+ipcMain.handle('updater:check', async () => {
+  if (!_autoUpdater) return { ok: false, error: 'updater unavailable' }
+  try {
+    const r = await _autoUpdater.checkForUpdates()
+    return { ok: true, updateInfo: r?.updateInfo ? { version: r.updateInfo.version } : null }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
 
 // ─── Pinned projects ──────────────────────────────────────────
 function basenameOf(p) {
@@ -1754,11 +1838,28 @@ let _searchWorkerReady = false
 let _searchScannerRef = null
 let _searchInFlight = null   // { reqId, resolve, reject, timer }
 let _searchReqCounter = 0
+// Named refs for the scanner cache-sync listeners so teardown can remove
+// them. Previously these were anonymous closures re-added on every worker
+// rebuild and never removed; on the timeout/crash recycle path (same
+// long-lived Scanner instance) they accumulated linearly, eventually
+// tripping Node's MaxListenersExceededWarning and leaking memory.
+let _searchScannerListeners = null   // { scanner, onChanged, onRemoved }
+
+function _detachSearchScannerListeners() {
+  if (!_searchScannerListeners) return
+  const { scanner: s, onChanged, onRemoved } = _searchScannerListeners
+  try { s.off('file-changed', onChanged) } catch {}
+  try { s.off('file-removed', onRemoved) } catch {}
+  _searchScannerListeners = null
+}
 
 function _teardownSearchWorker() {
   if (_searchWorker) { try { _searchWorker.terminate() } catch {} }
   _searchWorker = null
   _searchWorkerReady = false
+  // Remove the per-worker scanner listeners so a subsequent rebuild on the
+  // same Scanner doesn't stack another pair (the leak fix).
+  _detachSearchScannerListeners()
   if (_searchInFlight) {
     clearTimeout(_searchInFlight.timer)
     _searchInFlight.reject(new Error('worker recycled'))
@@ -1795,10 +1896,17 @@ function _ensureSearchWorker() {
       _searchInFlight = null
     }
   })
-  // Keep worker's cache in sync with scanner
+  // Keep worker's cache in sync with scanner. Register named listeners and
+  // remember them so _teardownSearchWorker can detach them on recycle
+  // (otherwise they leak — see _searchScannerListeners above). _teardown
+  // already ran at the top of this function, so there is no live pair to
+  // double up on here.
   if (scanner) {
-    scanner.on('file-changed', ({ id }) => { try { w.postMessage({ type: 'invalidate', id }) } catch {} })
-    scanner.on('file-removed', ({ id }) => { try { w.postMessage({ type: 'invalidate', id }) } catch {} })
+    const onChanged = ({ id }) => { try { w.postMessage({ type: 'invalidate', id }) } catch {} }
+    const onRemoved = ({ id }) => { try { w.postMessage({ type: 'invalidate', id }) } catch {} }
+    scanner.on('file-changed', onChanged)
+    scanner.on('file-removed', onRemoved)
+    _searchScannerListeners = { scanner, onChanged, onRemoved }
   }
   _searchWorker = w
   return w
@@ -1960,7 +2068,13 @@ async function handleControlRequest(req, res) {
                     try { const t = fs.statSync(f.absPath).mtimeMs; if (t > newest) newest = t } catch {}
                   }
                   const cacheMtime = fs.statSync(cachePath).mtimeMs
-                  if (newest > 0 && cacheMtime >= newest) {
+                  // mtime alone can't detect deletions/renames: removing or
+                  // renaming a file never lowers a surviving file's mtime, so
+                  // `cacheMtime >= newest` stayed true and the cache served
+                  // symbols for files that no longer exist. Add a file-set
+                  // fingerprint (sorted id+mtime hash) that must also match.
+                  const fileSetHash = symbolFileSetHash(scanner)
+                  if (newest > 0 && cacheMtime >= newest && cached.fileSetHash === fileSetHash) {
                     const g = new SymbolGraph()
                     for (const n of cached.nodes) g.addNode(n)
                     for (const e of cached.edges) g.addEdge(e)
@@ -2139,6 +2253,11 @@ async function handleControlRequest(req, res) {
                   edges: g.edges,
                   fileCount: g.fileCount,
                   builtAt: g.builtAt,
+                  // Fingerprint of the exact file set this graph was built
+                  // from. Read-side validation rejects the cache if the live
+                  // file set differs (deletion/rename/addition), which the
+                  // mtime check alone cannot detect.
+                  fileSetHash: symbolFileSetHash(scanner),
                 }
                 fs.writeFileSync(cachePath, JSON.stringify(payload))
               } catch {}
@@ -2843,17 +2962,44 @@ app.whenReady().then(() => {
   // Auto-updater (GitHub Releases). Disabled by env var for users who
   // want zero outbound network calls. Silently no-ops if no published
   // releases yet (404 from update feed → updater logs and does nothing).
+  //
+  // Full flow (previously detect-only, which left an available update
+  // permanently un-installable):
+  //   1. checkForUpdates() ~10s after boot.
+  //   2. on 'update-available' → notify renderer (toast: download / dismiss).
+  //   3. renderer calls updater:download → autoUpdater.downloadUpdate();
+  //      download-progress is streamed back so the toast can show %.
+  //   4. on 'update-downloaded' → notify renderer (toast: restart / later).
+  //   5. renderer calls updater:install → autoUpdater.quitAndInstall().
+  // autoInstallOnAppQuit is left ON (electron-updater default) so a
+  // downloaded update that the user dismissed still applies on next quit.
   if (process.env.CS_DISABLE_UPDATER !== '1') {
     try {
       const { autoUpdater } = require('electron-updater')
+      _autoUpdater = autoUpdater
       autoUpdater.autoDownload = false   // ask user before downloading
-      autoUpdater.on('error', (e) => log.error('updater error', { message: e.message }))
+      autoUpdater.on('error', (e) => {
+        log.error('updater error', { message: e.message })
+        mainWindow?.webContents.send('updater:error', { message: e.message })
+      })
       autoUpdater.on('update-available', (info) => {
         log.info('update available', { version: info.version })
+        _updateAvailableInfo = info
         // Notify renderer; renderer shows a toast with "download / dismiss".
         mainWindow?.webContents.send('updater:available', { version: info.version, releaseNotes: info.releaseNotes })
       })
+      autoUpdater.on('update-not-available', () => {
+        _updateAvailableInfo = null
+      })
+      autoUpdater.on('download-progress', (p) => {
+        // p: { percent, bytesPerSecond, transferred, total }
+        mainWindow?.webContents.send('updater:progress', {
+          percent: p.percent, transferred: p.transferred, total: p.total,
+          bytesPerSecond: p.bytesPerSecond,
+        })
+      })
       autoUpdater.on('update-downloaded', (info) => {
+        _updateDownloaded = true
         mainWindow?.webContents.send('updater:downloaded', { version: info.version })
       })
       // Check ~10s after boot so the scanner gets the network priority.
@@ -2883,10 +3029,17 @@ app.on('web-contents-created', (_e, contents) => {
     if (url.startsWith('http')) shell.openExternal(url)
     return { action: 'deny' }
   })
-  // Defense-in-depth: block all in-window navigation away from our file://.
-  // CSP already blocks remote loads, but this is one more layer.
+  // Defense-in-depth: block all in-window navigation away from our own
+  // renderer origin. The packaged app is served over the custom app://
+  // scheme (loadURL('app://bundle/index.html') + protocol.handle('app')),
+  // NOT file:// — file:// was abandoned during migration because ESM +
+  // importmap are blocked there by CORS. The old guard hard-coded
+  // 'file://', so any legitimate same-origin app:// navigation would have
+  // been wrongly preventDefault()'d. Allow app:// (and file:// as a
+  // belt-and-braces fallback for any dev/unpackaged run); block the rest,
+  // forwarding external http(s) links to the user's browser.
   contents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('file://')) {
+    if (!url.startsWith('app://') && !url.startsWith('file://')) {
       event.preventDefault()
       if (url.startsWith('http')) shell.openExternal(url)
     }

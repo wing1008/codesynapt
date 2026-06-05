@@ -18,18 +18,102 @@
 // ═══════════════════════════════════════════════════════════
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const { app } = require('electron')
 
 const VALID_TYPES = new Set(['theme', 'exporter', 'parser', 'layout', 'panel', 'action'])
 const VALID_PERMISSIONS = new Set([
   'read-files', 'read-graph', 'modify-graph',
-  'ui-panel', 'context-menu', 'export', 'parse'
+  'ui-panel', 'context-menu', 'export', 'parse',
+  // 'command' and 'layout' gate ui.registerCommand / layouts.register in
+  // plugin-host.js. They live here so a manifest can actually *declare*
+  // the permission the renderer requires (keep this whitelist in sync
+  // with the requirePerm() calls in public/plugin-host.js).
+  'command', 'layout',
 ])
 
 // Resolve the per-OS plugin folder. We pin it under userData so the
 // app handles cross-platform paths for us.
 function getPluginDir() {
   return path.join(app.getPath('userData'), 'plugins')
+}
+
+// ─── Trust / approval gate ──────────────────────────────────────
+//
+// A userData plugin is *untrusted code dropped into a folder*. Once the
+// renderer import()s its source it runs in the same JS realm as the
+// privileged window.codesynapt bridge and can call any IPC directly,
+// bypassing the per-plugin permission model entirely (the renderer-side
+// `ctx` gate only constrains well-behaved plugins).
+//
+// The only real boundary is the main process: we must NOT hand a
+// plugin's executable source to the renderer unless the user has
+// explicitly approved that exact code. We pin approval to a content
+// hash so that silently editing/replacing an approved plugin (e.g. a
+// supply-chain swap on disk) revokes trust until re-approved.
+//
+// The trust store lives in userData root (NOT inside plugins/, so it
+// can't be shadowed by a plugin folder) as a simple JSON map:
+//   { "<pluginId>": "<sha256-of-manifest+entry>" }
+function getTrustStorePath() {
+  return path.join(app.getPath('userData'), 'plugins-trust.json')
+}
+
+function readTrustStore() {
+  try {
+    const raw = fs.readFileSync(getTrustStorePath(), 'utf8')
+    const obj = JSON.parse(raw)
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeTrustStore(store) {
+  try {
+    fs.writeFileSync(getTrustStorePath(), JSON.stringify(store, null, 2), 'utf8')
+    return true
+  } catch (err) {
+    console.warn('[plugin-loader] could not persist trust store:', err.message)
+    return false
+  }
+}
+
+// Stable fingerprint of the exact bytes the renderer would execute,
+// bound to the plugin id so a renamed/relocated copy still needs its
+// own approval.
+function fingerprint(id, manifestRaw, entryContent) {
+  const h = crypto.createHash('sha256')
+  h.update(String(id))
+  h.update('\0')
+  h.update(manifestRaw || '')
+  h.update('\0')
+  h.update(entryContent || '')
+  return h.digest('hex')
+}
+
+// Mark a plugin (by id, at its current on-disk hash) as approved.
+// Returns true on success. Called from the privileged main process in
+// response to an explicit user action (e.g. a "Trust this plugin"
+// button), never from a plugin.
+function approvePlugin(id, hash) {
+  if (!id || !hash) return false
+  const store = readTrustStore()
+  store[id] = hash
+  return writeTrustStore(store)
+}
+
+// Withdraw trust for a plugin id.
+function revokePlugin(id) {
+  if (!id) return false
+  const store = readTrustStore()
+  if (!(id in store)) return true
+  delete store[id]
+  return writeTrustStore(store)
+}
+
+function isTrusted(store, id, hash) {
+  return Boolean(id) && store[id] === hash
 }
 
 // Make sure the directory exists so users can drop plugins into it
@@ -92,11 +176,17 @@ function validateManifest(raw) {
 }
 
 // Discover all plugins. Returns an array of:
-//   { manifest, folder, entryPath, entryContent?, error? }
+//   { manifest, folder, entryPath, entryContent?, hash?, trusted, error? }
 //
 // For theme plugins we read the CSS file directly here so the renderer
 // can just inject it. For code plugins we read the JS source string and
 // pass it to the renderer to execute in its sandbox.
+//
+// Trust gate: a plugin is only handed its executable `entryContent` once
+// the user has approved that exact code (see the trust store above).
+// Un-approved plugins are still *listed* (so the settings UI can show a
+// "Trust" prompt) but with entryContent withheld and an explanatory
+// error, so the renderer's activatePlugin() skips them.
 function discoverPlugins() {
   const dir = ensurePluginDir()
   let entries
@@ -107,6 +197,7 @@ function discoverPlugins() {
     return []
   }
 
+  const trustStore = readTrustStore()
   const results = []
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
@@ -115,8 +206,10 @@ function discoverPlugins() {
     const manifestPath = path.join(folder, 'manifest.json')
 
     let raw
+    let rawText
     try {
-      raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+      rawText = fs.readFileSync(manifestPath, 'utf8')
+      raw = JSON.parse(rawText)
     } catch (err) {
       results.push({
         folder, error: `manifest unreadable: ${err.message}`,
@@ -165,11 +258,31 @@ function discoverPlugins() {
       continue
     }
 
+    // Trust gate: fingerprint the exact bytes the renderer would run and
+    // compare against the user-approved hash. Withhold entryContent
+    // until approved so the renderer cannot import()/activate untrusted
+    // code (which would otherwise reach window.codesynapt directly).
+    const hash = fingerprint(manifest.id, rawText, entryContent)
+    const trusted = isTrusted(trustStore, manifest.id, hash)
+    if (!trusted) {
+      results.push({
+        folder,
+        manifest,
+        entryPath,
+        hash,
+        trusted: false,
+        error: 'plugin not approved — review and trust it to enable',
+      })
+      continue
+    }
+
     results.push({
       folder,
       manifest,
       entryPath,
       entryContent,
+      hash,
+      trusted: true,
       error: null,
     })
   }
@@ -181,4 +294,10 @@ module.exports = {
   ensurePluginDir,
   discoverPlugins,
   validateManifest,
+  // Trust / approval gate (driven from the privileged main process only)
+  getTrustStorePath,
+  readTrustStore,
+  approvePlugin,
+  revokePlugin,
+  fingerprint,
 }
