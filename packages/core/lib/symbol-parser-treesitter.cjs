@@ -140,7 +140,7 @@ const NODE_TYPES = {
   php: {
     fn:     ['function_definition', 'method_declaration'],
     cls:    ['class_declaration', 'interface_declaration', 'trait_declaration'],
-    call:   ['function_call_expression', 'method_call_expression', 'object_creation_expression'],
+    call:   ['function_call_expression', 'member_call_expression', 'object_creation_expression'],
   },
   scala: {
     fn:     ['function_definition', 'function_declaration'],
@@ -148,9 +148,11 @@ const NODE_TYPES = {
     call:   ['call_expression', 'generic_function'],
   },
   lua: {
-    fn:     ['function_declaration', 'function_definition', 'local_function'],
+    // Real tree-sitter-lua node names (the previous ones never matched, so
+    // every Lua file produced 0 symbols).
+    fn:     ['function_definition_statement', 'local_function_definition_statement'],
     cls:    [],  // Lua has no classes (table-based OOP)
-    call:   ['function_call'],
+    call:   ['call'],
   },
   bash: {
     fn:     ['function_definition'],
@@ -178,7 +180,10 @@ const NODE_TYPES = {
     call:   ['call_expression'],
   },
   cpp: {
-    fn:     ['function_definition', 'declaration'],
+    // Dropped 'declaration' — `Calculator c;` is a declaration node and was
+    // creating phantom function symbols. Names come via the declarator chain
+    // (see nameOf).
+    fn:     ['function_definition'],
     cls:    ['class_specifier', 'struct_specifier'],
     call:   ['call_expression'],
   },
@@ -218,6 +223,18 @@ function nameOf(node) {
   // (a one-level wrapper around `type_identifier`); we peek through.
   const named = node.childForFieldName?.('name')
   if (named) return named.text
+  // C / C++ function_definition: the name is buried in the declarator chain
+  // (function_definition → function_declarator → identifier), possibly wrapped
+  // in pointer_/reference_declarator or a qualified_identifier (C++ Foo::bar).
+  // Without this every C/C++ function got a null name and was dropped.
+  if (node.type === 'function_definition') {
+    let d = node.childForFieldName?.('declarator'); let guard = 0
+    while (d && guard++ < 8) {
+      if (d.type === 'identifier' || d.type === 'field_identifier') return d.text
+      if (d.type === 'qualified_identifier') return d.childForFieldName?.('name')?.text || lastIdentText(d)
+      d = d.childForFieldName?.('declarator') || null
+    }
+  }
   for (let i = 0; i < node.childCount; i++) {
     const c = node.child(i)
     if (c.type === 'identifier'
@@ -553,6 +570,8 @@ function isExported(node, content) {
 const IDENT_TYPES = new Set([
   'identifier', 'simple_identifier', 'field_identifier', 'type_identifier',
   'property_identifier', 'shorthand_property_identifier',
+  'name',  // PHP function-call callee is a `name` node
+  'word',  // Bash command name is a `word` node
 ])
 const NAV_TYPES = new Set([
   'member_expression', 'selector_expression', 'field_expression',
@@ -562,6 +581,10 @@ const NAV_TYPES = new Set([
   // and was dropped, so only bare `foo()` calls were detected (≈6× under-
   // count on method-heavy code like PyQt apps). See docs/SYMBOL-MODE-PLAN.md.
   'attribute',
+  'scoped_identifier', 'scoped_type_identifier',  // Rust  Engine::new()
+  'member_access_expression',                     // C#    obj.Method()
+  'command_name',                                 // Bash  command name wrapper
+  'variable',                                     // Lua   M.process / self.process
 ])
 
 function lastIdentText(node) {
@@ -765,6 +788,12 @@ function makeResolver(fileId, index) {
   }
 }
 
+// Languages whose parser has already emitted a failure warning — so a broken
+// grammar (wasm ABI mismatch, throw) surfaces ONCE instead of being silently
+// swallowed to [] for every file (which is how Ruby/Dart breakage stayed
+// invisible until an audit caught it).
+const _parserWarned = new Set()
+
 // Public per-extension wrapper used by symbol-graph's parser registry.
 function makeParser(ext) {
   const cfg = LANG_CONFIG[ext]
@@ -786,7 +815,10 @@ function makeParser(ext) {
         walk(tree.rootNode, ctx)
         tree.delete?.()
         return ctx.symbols
-      } catch (e) { return [] }
+      } catch (e) {
+        if (!_parserWarned.has(lang)) { _parserWarned.add(lang); console.error(`[symbol] ${lang} parser failed — L2 disabled for this language: ${e && e.message}`) }
+        return []
+      }
     },
     async extractReferencesAsync(content, fileId, index) {
       try {
@@ -809,7 +841,10 @@ function makeParser(ext) {
         walk(tree.rootNode, ctx)
         tree.delete?.()
         return ctx.edges
-      } catch (e) { return [] }
+      } catch (e) {
+        if (!_parserWarned.has(lang)) { _parserWarned.add(lang); console.error(`[symbol] ${lang} parser failed — L2 disabled for this language: ${e && e.message}`) }
+        return []
+      }
     },
     // Sync stubs — registry expects sync extractSymbols/extractReferences
     // but SymbolGraph.build() can also await them since it's already async.
