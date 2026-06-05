@@ -121,3 +121,6 @@ _backup_*/
 
 # Bundled Node 22 LTS binary (76 MB) for Windows installer — downloaded on demand
 build/bundled-node/
+
+# 미수정 취약점 익스플로잇 포함 — 공개 금지
+docs/REMEDIATION-2026-06-05.md

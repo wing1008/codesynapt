@@ -41,11 +41,11 @@ jobs:
           node --check electron/main.cjs
           node --check electron/preload.cjs
           node --check electron/plugin-loader.cjs
-          node --check scanner.js
-          node --check parser.js
+          node --check packages/core/scanner.js
+          node --check packages/core/parser.js
           node --check server.js
           node --check test.js
-          node --check perf-test.js
+          node --check scripts/perf-test.js
 
       - name: Syntax check (example plugins)
         run: |

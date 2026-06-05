@@ -185,6 +185,12 @@ async function apiReq(method, pathStr, query, body) {
       if (parts.length) qs = '?' + parts.join('&')
     }
     const headers = {}
+    // When the backend is started with CS_AUTH_TOKEN, control-server gates
+    // EVERY request behind `Authorization: Bearer <token>` — including reads.
+    // The in-process backend we auto-start reads the same env var, so without
+    // this header every cs_* tool 401s the moment a user sets the token to
+    // enable edits. (SEC-002)
+    if (process.env.CS_AUTH_TOKEN) headers['Authorization'] = `Bearer ${process.env.CS_AUTH_TOKEN}`
     let payload = null
     if (body !== undefined && body !== null) {
       payload = typeof body === 'string' ? body : JSON.stringify(body)

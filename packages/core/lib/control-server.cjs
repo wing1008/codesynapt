@@ -1342,7 +1342,13 @@ function createControlServer(opts) {
         scanner.getSymbolGraph().then((g) => {
           const params = {
             q: url.searchParams.get('q') || '',
-            id: decodeURIComponent(url.searchParams.get('id') || ''),
+            // Accept the symbol id from EITHER ?id= or the path tail
+            // (/symbol/callers/<id>). The MCP client sends it in the path
+            // (encId), and the desktop server reads it from the path too, but
+            // this branch previously read only ?id=, so callers/callees/node
+            // 404'd for every symbol on the headless server. (ROUTE-018)
+            id: decodeURIComponent(url.searchParams.get('id') || '')
+                || (rest.length > 1 ? decodeURIComponent(rest.slice(1).join('/')) : ''),
             limit: url.searchParams.get('limit'),
             depth: url.searchParams.get('depth'),
             direction: url.searchParams.get('direction'),
