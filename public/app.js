@@ -711,6 +711,7 @@ const state = {
   edges: [],            // {s, t, k}
   symbols: new Map(),   // symbolId → { id, file, name, kind, off, p, shown } — layer-2 function nodes
   symbolCalls: [],      // { s, t } — function-level call edges
+  symbolAdj: new Map(), // symbolId → Set(neighbor symbolIds) — for hover focus
   showSymbols: false,   // toggle the 3D function/symbol layer
   adj: new Map(),       // id → Set(neighbor ids)
   hoverId: null,
@@ -1302,8 +1303,8 @@ symGeo.setAttribute('position', symPosAttr)
 symGeo.setAttribute('color', symColAttr)
 symGeo.setDrawRange(0, 0)
 const symMat = new THREE.PointsMaterial({
-  size: 2.4, sizeAttenuation: true, vertexColors: true,
-  transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
+  size: 3.2, sizeAttenuation: true, vertexColors: true,
+  transparent: true, opacity: 0.9, depthWrite: false,   // normal blending → distinct dots, not a glow blob
 })
 const symPoints = new THREE.Points(symGeo, symMat)
 symPoints.frustumCulled = false
@@ -1319,7 +1320,7 @@ symEdgeGeo.setAttribute('position', symEdgePosAttr)
 symEdgeGeo.setAttribute('color', symEdgeColAttr)
 symEdgeGeo.setDrawRange(0, 0)
 const symEdgeMat = new THREE.LineBasicMaterial({
-  vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexColors: true, transparent: true, opacity: 0.6, depthWrite: false,
 })
 const symEdgeLines = new THREE.LineSegments(symEdgeGeo, symEdgeMat)
 symEdgeLines.frustumCulled = false
@@ -1333,6 +1334,12 @@ const SYM_KIND_COLOR = {
 }
 const _symDefColor = new THREE.Color(0x9fd0ff)
 const _symHiColor  = new THREE.Color(0xffffff)   // hovered/selected symbol point
+
+// Floating tooltip for the hovered function — the dense symbol layer has no
+// per-point labels, so this answers "which function is this?".
+const symTip = document.createElement('div')
+symTip.id='symTip';symTip.style.cssText = 'position:fixed;pointer-events:none;z-index:50;display:none;padding:3px 7px;border-radius:5px;background:rgba(8,12,20,0.92);color:#cfe8ff;font:11px/1.35 ui-monospace,monospace;border:1px solid rgba(120,180,255,0.4);white-space:nowrap;max-width:380px;overflow:hidden;text-overflow:ellipsis'
+document.body.appendChild(symTip)
 
 // ───────────────────────────────────────────────────────────────
 // Folder bubbles — translucent colored spheres that wrap each
@@ -3453,6 +3460,17 @@ function render() {
       state.hoverId = newHover
       canvas.style.cursor = newHover ? 'pointer' : 'default'
     }
+    // Hovered-function name tooltip (symbol layer only).
+    const hs = state.showSymbols && state.hoverId ? state.symbols.get(state.hoverId) : null
+    if (hs) {
+      const nb = state.symbolAdj.get(state.hoverId)?.size || 0
+      symTip.textContent = `${hs.name}  ·  ${hs.kind} · ${nb} call${nb === 1 ? '' : 's'}`
+      symTip.style.left = (state.lastMouseX + 14) + 'px'
+      symTip.style.top = (state.lastMouseY + 12) + 'px'
+      symTip.style.display = 'block'
+    } else if (symTip.style.display !== 'none') {
+      symTip.style.display = 'none'
+    }
   }
 
   const fd = focusDistances()
@@ -3685,6 +3703,7 @@ function render() {
     const hlSym = (state.hoverId && state.symbols.has(state.hoverId)) ? state.hoverId
                 : (state.selectedId && state.symbols.has(state.selectedId)) ? state.selectedId
                 : null
+    const hlNbrs = hlSym ? state.symbolAdj.get(hlSym) : null
     let si = 0
     for (const sym of state.symbols.values()) {
       const fn = state.nodes.get(sym.file)
@@ -3692,8 +3711,18 @@ function render() {
       sym.p.copy(fn.p).add(sym.off)
       sym.shown = true
       symPositions[si*3] = sym.p.x; symPositions[si*3+1] = sym.p.y; symPositions[si*3+2] = sym.p.z
-      const c = (sym.id === hlSym) ? _symHiColor : (SYM_KIND_COLOR[sym.kind] || _symDefColor)
-      symColors[si*3] = c.r; symColors[si*3+1] = c.g; symColors[si*3+2] = c.b
+      let cr, cg, cb
+      if (!hlSym) {
+        // Resting: a FAINT cloud (context, not a bright blob) so a hover pops.
+        const c = SYM_KIND_COLOR[sym.kind] || _symDefColor; cr = c.r*0.5; cg = c.g*0.5; cb = c.b*0.5
+      } else if (sym.id === hlSym) {
+        cr = _symHiColor.r; cg = _symHiColor.g; cb = _symHiColor.b           // hovered = white
+      } else if (hlNbrs && hlNbrs.has(sym.id)) {
+        const c = SYM_KIND_COLOR[sym.kind] || _symDefColor; cr = c.r; cg = c.g; cb = c.b   // its callers/callees = bright
+      } else {
+        cr = 0.09; cg = 0.11; cb = 0.16                                      // unrelated = dim
+      }
+      symColors[si*3] = cr; symColors[si*3+1] = cg; symColors[si*3+2] = cb
       si++
       if (si >= MAX_SYMBOLS) break
     }
@@ -3708,9 +3737,9 @@ function render() {
       symEdgePositions[se*6]   = a.p.x; symEdgePositions[se*6+1] = a.p.y; symEdgePositions[se*6+2] = a.p.z
       symEdgePositions[se*6+3] = b.p.x; symEdgePositions[se*6+4] = b.p.y; symEdgePositions[se*6+5] = b.p.z
       let r, g2, b2
-      if (!hlSym)                                       { r = 0.30; g2 = 0.55; b2 = 0.95 }
-      else if (call.s === hlSym || call.t === hlSym)    { r = 0.55; g2 = 0.95; b2 = 1.00 }
-      else                                              { r = 0.05; g2 = 0.07; b2 = 0.13 }
+      if (!hlSym)                                       { r = 0.11; g2 = 0.20; b2 = 0.38 }   // resting: faint
+      else if (call.s === hlSym || call.t === hlSym)    { r = 0.55; g2 = 0.95; b2 = 1.00 }   // hovered fn's edges: bright
+      else                                              { r = 0.03; g2 = 0.04; b2 = 0.08 }   // unrelated: near-invisible
       symEdgeColors[se*6]   = r; symEdgeColors[se*6+1] = g2; symEdgeColors[se*6+2] = b2
       symEdgeColors[se*6+3] = r; symEdgeColors[se*6+4] = g2; symEdgeColors[se*6+5] = b2
       se++
@@ -6885,10 +6914,19 @@ async function buildSymbolGraph() {
       // so a file's functions cluster on/around it instead of overlapping.
       const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
       const len = off.length() || 1
-      off.multiplyScalar((1.2 + Math.random() * 1.8) / len)
+      off.multiplyScalar((1.8 + Math.random() * 3.4) / len)
       state.symbols.set(s.id, { id: s.id, file: s.file, name: s.name, kind: s.kind, off, p: new THREE.Vector3(), shown: false })
     }
     state.symbolCalls = j.calls || []
+    // Adjacency for hover focus (so hovering a function can highlight only
+    // the functions it actually calls / is called by, and fade the rest).
+    state.symbolAdj = new Map()
+    for (const c of state.symbolCalls) {
+      if (!state.symbolAdj.has(c.s)) state.symbolAdj.set(c.s, new Set())
+      if (!state.symbolAdj.has(c.t)) state.symbolAdj.set(c.t, new Set())
+      state.symbolAdj.get(c.s).add(c.t)
+      state.symbolAdj.get(c.t).add(c.s)
+    }
     symbolModeState.count = state.symbols.size
     symbolModeState.edges = state.symbolCalls.length
     symbolModeState.lastRoot = state.root
