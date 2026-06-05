@@ -229,6 +229,34 @@ function extractSymbols(content, fileId) {
         exported: path.parent?.type?.startsWith('Export') ?? false,
       })
     },
+    // Object-literal functions: `{ foo() {}, bar: () => {} }` — extremely
+    // common in JS/TS (config objects, handler maps, module-export objects)
+    // and the single biggest call-target recall gap (entry.js: ~3.5k missed).
+    // Indexed by key name so `obj.foo()` resolves to them.
+    ObjectMethod(path) {
+      const n = path.node
+      if (!n.key || !n.loc) return
+      const name = String(n.key.name ?? n.key.value ?? '')
+      if (!name) return
+      symbols.push({
+        id: mkId(fileId, name, n.loc.start.line), name, qualifiedName: name,
+        kind: 'method', file: fileId, startLine: n.loc.start.line, endLine: n.loc.end.line,
+        signature: signatureOf(n, content), doc: docOf(n), exported: false,
+      })
+    },
+    ObjectProperty(path) {
+      const n = path.node
+      if (!n.key || !n.value || !n.loc || n.computed) return
+      const t = n.value.type
+      if (t !== 'ArrowFunctionExpression' && t !== 'FunctionExpression') return
+      const name = String(n.key.name ?? n.key.value ?? '')
+      if (!name) return
+      symbols.push({
+        id: mkId(fileId, name, n.loc.start.line), name, qualifiedName: name,
+        kind: 'function', file: fileId, startLine: n.loc.start.line, endLine: n.loc.end.line,
+        signature: signatureOf(n, content), doc: docOf(n), exported: false,
+      })
+    },
   })
 
   return symbols
@@ -403,20 +431,51 @@ function extractReferences(content, fileId, index) {
       },
       exit() { enclosing.pop(); popTypes() },
     },
+    // Object-literal method `{ foo() { … } }` — now an extracted symbol, so its
+    // body's calls must be attributed to it. Without this they fell back to the
+    // outer enclosing (null for the very common module-level config object
+    // `Entry.X = { onLoad() { bar() } }`) and were discarded.
+    ObjectMethod: {
+      enter(path) {
+        const n = path.node
+        const name = n.key && (n.key.name != null || n.key.value != null) ? String(n.key.name ?? n.key.value) : null
+        if (name && n.loc) pushEnclosing(name, n.loc.start.line)
+        else enclosing.push(enclosing.top())
+        pushTypes(); harvestTypesFrom(n)
+      },
+      exit() { enclosing.pop(); popTypes() },
+    },
     ArrowFunctionExpression: {
       enter(path) {
         const parent = path.parentPath?.node
-        if (parent?.type !== 'VariableDeclarator') { enclosing.push(null); return }
-        const name = parent.id?.name
-        if (!name || !path.node.loc) { enclosing.push(null); return }
-        pushEnclosing(name, path.node.loc.start.line)
-        pushTypes(); harvestTypesFrom(path.node)
+        // Named arrow — `const f = () => …` OR object property `{ f: () => … }`.
+        // Both are extracted symbols (same id = parent node's start line), so
+        // attribute their body's calls to them.
+        let name = null
+        if (parent?.type === 'VariableDeclarator') name = parent.id?.name
+        else if (parent?.type === 'ObjectProperty' && !parent.computed) {
+          name = parent.key?.name ?? (parent.key?.value != null ? String(parent.key.value) : null)
+        }
+        if (name && parent.loc) {
+          pushEnclosing(name, parent.loc.start.line)
+          pushTypes(); harvestTypesFrom(path.node)
+          return
+        }
+        // Anonymous arrow used as a callback (`arr.map(x => foo(x))`,
+        // `.then(() => foo())`, event handlers). Not its own symbol, but the
+        // calls inside it belong to the nearest NAMED enclosing function —
+        // inherit that id instead of dropping to null. Pushing null made
+        // `enclosing.top()` null so every call routed through a callback was
+        // discarded: the dominant JS/TS recall leak. At module scope top() is
+        // still null, so nothing is mis-attributed.
+        enclosing.push(enclosing.top())
       },
       exit(path) {
         const parent = path.parentPath?.node
-        if (parent?.type !== 'VariableDeclarator') { enclosing.pop(); return }
-        const name = parent.id?.name
-        if (name && path.node.loc) { enclosing.pop(); popTypes() }
+        let named = false
+        if (parent?.type === 'VariableDeclarator') named = !!parent.id?.name
+        else if (parent?.type === 'ObjectProperty' && !parent.computed) named = parent.key?.name != null || parent.key?.value != null
+        if (named && parent.loc) { enclosing.pop(); popTypes() }
         else enclosing.pop()
       },
     },
