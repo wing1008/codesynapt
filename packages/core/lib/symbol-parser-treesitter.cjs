@@ -282,7 +282,9 @@ function walk(node, ctx) {
         exported: isExported(node, ctx.content),
       }
       ctx.symbols.push(sym)
-      ctx.classStack.push({ name, sym })
+      const propTypes = new Map()
+      if (ctx.passTwo && ctx.lang === 'python') harvestPyClassProps(node, propTypes)
+      ctx.classStack.push({ name, sym, propTypes })
       pushedCls = true
       // Inheritance edges (pass 2 only — we need every symbol indexed
       // first before we can resolve the parent name).
@@ -344,6 +346,11 @@ function walk(node, ctx) {
       }
       ctx.symbols.push(sym)
       ctx.fnStack.push(sym.id)
+      if (ctx.varTypeStack) {
+        const vmap = new Map()
+        if (ctx.passTwo && ctx.lang === 'python') harvestPyFuncTypes(node, vmap)
+        ctx.varTypeStack.push(vmap)
+      }
       pushedFn = true
     }
   }
@@ -354,14 +361,16 @@ function walk(node, ctx) {
       const calleeName = extractCalleeName(node)
       if (calleeName && !ctx.kwSet?.has(calleeName)) {
         let target = null
-        // `self.method()` / `cls.method()` calls the CURRENT class's method.
-        // Resolve `Class.method` first so a method name shared across classes
-        // still links (the bare fallback would decline it as ambiguous). self
-        // is unambiguous → only correct edges added. Inherited methods (not
-        // defined on this class) miss the qualified match and fall through.
-        if (ctx.lang === 'python' && ctx.resolveQualified && isSelfCall(node)) {
-          const cls = ctx.classStack[ctx.classStack.length - 1]
-          if (cls?.name) target = ctx.resolveQualified(`${cls.name}.${calleeName}`)
+        // Type-aware member resolution. When the receiver's class is known —
+        // `self`/`cls` (current class), `self.attr` (class property type), or a
+        // typed/constructed local var — resolve `Class.method` first. This is
+        // exact (qualifiedOnly), so a method name shared across classes still
+        // links and is never mis-guessed; unknown receivers fall through to the
+        // bare fallback. Recovers real `self.repo.save()`-style edges the
+        // untyped path declines.
+        if (ctx.lang === 'python' && ctx.resolveQualified) {
+          const rc = pyReceiverType(node, ctx)
+          if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
         }
         // Else: loose any-file fallback for calls (`foo()` is a strong signal);
         // references below stay strict.
@@ -424,7 +433,7 @@ function walk(node, ctx) {
   // Recurse
   for (let i = 0; i < node.childCount; i++) walk(node.child(i), ctx)
 
-  if (pushedFn) ctx.fnStack.pop()
+  if (pushedFn) { ctx.fnStack.pop(); if (ctx.varTypeStack) ctx.varTypeStack.pop() }
   if (pushedCls || pushedImpl) ctx.classStack.pop()
 }
 
@@ -560,16 +569,114 @@ function lastIdentText(node) {
   return null
 }
 
-// Python `self.method()` / `cls.method()` — the call's `function` field is an
-// `attribute` node whose `object` is the identifier `self`/`cls`. Such a call
-// unambiguously targets the enclosing class's method, so we can resolve the
-// qualified `Class.method` even when the bare method name is shared by several
-// classes (which the loose fallback would decline as ambiguous).
-function isSelfCall(callNode) {
+// ── Python receiver-type inference ───────────────────────────────────────────
+// Mirrors the babel parser's type-aware resolution: track the KNOWN type of a
+// receiver (a local var, a param, or a `self.attr`) so `recv.method()` resolves
+// to `Type.method`. Only types we actually know (a `: Type` annotation or a
+// `Type(...)` construction) are recorded — never a guess — so the qualified
+// resolution this enables stays precision-safe.
+
+// Base type name from a Python type node. Conservative: simple identifier or
+// `module.Class`; containers/generics (`List[Foo]`, `Optional[Foo]`) are NOT
+// unwrapped because `xs.method()` would be the container's method, not Foo's.
+function pyTypeName(typeNode) {
+  if (!typeNode) return null
+  const tt = typeNode.type
+  if (tt === 'type') return pyTypeName(typeNode.namedChild(0))
+  if (tt === 'identifier') return typeNode.text
+  if (tt === 'attribute') { const a = typeNode.childForFieldName?.('attribute'); return a?.text || null }
+  return null
+}
+// `Foo(...)` construction → 'Foo' (a PascalCase identifier callee). `Foo.x()`
+// factories are skipped (could return a different type) to stay precise.
+function pyConstructType(valueNode) {
+  if (!valueNode || valueNode.type !== 'call') return null
+  const fn = valueNode.childForFieldName?.('function')
+  if (fn && fn.type === 'identifier' && /^[A-Z]/.test(fn.text)) return fn.text
+  return null
+}
+// Walk a subtree collecting assignments, without descending into nested
+// function/class/lambda scopes (their locals are not ours).
+function pyScanAssignments(node, onAssign) {
+  if (!node) return
+  const t = node.type
+  if (t === 'function_definition' || t === 'class_definition' || t === 'lambda') return
+  if (t === 'assignment') onAssign(node)
+  for (let i = 0; i < node.childCount; i++) pyScanAssignments(node.child(i), onAssign)
+}
+// Local var types inside a function: typed params + `x = Foo()` / `x: T = …`.
+function harvestPyFuncTypes(fnNode, map) {
+  const params = fnNode.childForFieldName?.('parameters')
+  if (params) for (let i = 0; i < params.namedChildCount; i++) {
+    const p = params.namedChild(i)
+    if (p.type === 'typed_parameter') {
+      const idn = p.namedChild(0)
+      const tn = pyTypeName(p.childForFieldName?.('type'))
+      if (idn && idn.type === 'identifier' && tn) map.set(idn.text, tn)
+    }
+  }
+  pyScanAssignments(fnNode.childForFieldName?.('body'), (a) => {
+    const left = a.childForFieldName?.('left')
+    if (left?.type !== 'identifier') return
+    const tn = pyTypeName(a.childForFieldName?.('type')) || pyConstructType(a.childForFieldName?.('right'))
+    if (tn) map.set(left.text, tn)
+  })
+}
+// Class property types: class-level `x: T` / `x = Foo()` and `__init__`'s
+// `self.x = Foo()` / `self.x: T`.
+function harvestPyClassProps(classNode, map) {
+  const body = classNode.childForFieldName?.('body')
+  if (!body) return
+  for (let i = 0; i < body.namedChildCount; i++) {
+    const stmt = body.namedChild(i)
+    if (stmt.type === 'expression_statement') {
+      const a = stmt.namedChild(0)
+      if (a?.type === 'assignment') {
+        const left = a.childForFieldName?.('left')
+        if (left?.type === 'identifier') {
+          const tn = pyTypeName(a.childForFieldName?.('type')) || pyConstructType(a.childForFieldName?.('right'))
+          if (tn) map.set(left.text, tn)
+        }
+      }
+    } else if (stmt.type === 'function_definition' && nameOf(stmt) === '__init__') {
+      pyScanAssignments(stmt.childForFieldName?.('body'), (a) => {
+        const left = a.childForFieldName?.('left')
+        if (left?.type !== 'attribute') return
+        const o = left.childForFieldName?.('object')
+        const attr = left.childForFieldName?.('attribute')
+        if (o?.type === 'identifier' && (o.text === 'self' || o.text === 'cls') && attr?.type === 'identifier') {
+          const tn = pyTypeName(a.childForFieldName?.('type')) || pyConstructType(a.childForFieldName?.('right'))
+          if (tn) map.set(attr.text, tn)
+        }
+      })
+    }
+  }
+}
+// Resolve a Python call's receiver to a known class name, or null.
+//   self.method()       → enclosing class
+//   self.attr.method()  → class property type
+//   var.method()        → local var / param type
+function pyReceiverType(callNode, ctx) {
   const fn = callNode.childForFieldName?.('function')
-  if (!fn || fn.type !== 'attribute') return false
+  if (!fn || fn.type !== 'attribute') return null
   const obj = fn.childForFieldName?.('object')
-  return !!obj && obj.type === 'identifier' && (obj.text === 'self' || obj.text === 'cls')
+  if (!obj) return null
+  if (obj.type === 'identifier') {
+    if (obj.text === 'self' || obj.text === 'cls') {
+      return ctx.classStack[ctx.classStack.length - 1]?.name || null
+    }
+    const st = ctx.varTypeStack
+    if (st) for (let i = st.length - 1; i >= 0; i--) { const ty = st[i].get(obj.text); if (ty) return ty }
+    return null
+  }
+  if (obj.type === 'attribute') {
+    const oo = obj.childForFieldName?.('object')
+    const attr = obj.childForFieldName?.('attribute')
+    if (oo?.type === 'identifier' && (oo.text === 'self' || oo.text === 'cls') && attr?.type === 'identifier') {
+      return ctx.classStack[ctx.classStack.length - 1]?.propTypes?.get(attr.text) || null
+    }
+  }
+  return null
 }
 
 function extractCalleeName(callNode) {
@@ -653,7 +760,7 @@ function makeParser(ext) {
         const tree = parser.parse(content)
         const ctx = {
           fileId, content, types, lang,
-          symbols: [], classStack: [], fnStack: [],
+          symbols: [], classStack: [], fnStack: [], varTypeStack: [],
           edges: [], seen: new Set(),
           kwSet,
           resolve: makeResolver(fileId, index),
