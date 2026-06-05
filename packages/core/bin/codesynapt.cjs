@@ -1170,8 +1170,11 @@ async function main() {
         })
         child.unref()
 
-        // Stage 3: poll /health until root === abs (timeout 60s)
-        const timeoutMs = 60_000
+        // Stage 3: poll /health until root === abs. Cold electron start + the
+        // first scan of a large repo can take well over a minute on Windows,
+        // so give it room (a too-short window made a *successful* launch look
+        // like a failure — the friction users hit).
+        const timeoutMs = 120_000
         const startedAt = Date.now()
         let last = null
         while (Date.now() - startedAt < timeoutMs) {
@@ -1187,6 +1190,15 @@ async function main() {
               process.exit(0)
             }
           }
+        }
+        // Timed out polling — but distinguish "still scanning" from real
+        // failure. If the desktop is up with the right root (just hasn't
+        // finished its first scan, fileCount 0), that is NOT an error: say so
+        // and exit clean. die()-ing here was the scary false-failure users saw.
+        if (last && last.root && path.resolve(last.root) === abs) {
+          process.stdout.write(`⏳ desktop is up at :${last.port} and still scanning ${abs} — the first scan of a large repo can take a while. It will be ready shortly; just proceed (the MCP connects when the scan finishes) or re-run \`cs ensure\`.\n`)
+          printJson({ ok: true, action: 'loading', port: last.port, root: abs, fileCount: last.fileCount || 0, note: 'scan in progress (not an error)' })
+          process.exit(0)
         }
         die(`desktop did not load ${abs} within ${timeoutMs/1000}s. last health: ${JSON.stringify(last)}`)
       }
