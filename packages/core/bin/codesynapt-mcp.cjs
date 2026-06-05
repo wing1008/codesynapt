@@ -249,7 +249,7 @@ const TOOLS = [
           // Turn the one tool agents reliably read into the gate for the ones they
           // skip: name the next action explicitly, tied to the hub list just shown.
           if (data && typeof data === 'object') {
-            data._guidance = 'Before editing any high-importer (hub) file listed above, call cs_blast({action:"safety", id}) FIRST — editing a hub blind can break its importers. For "who uses X" use cs_query({action:"users", id}) rather than grep.'
+            data._guidance = 'Before editing any high-importer (hub) file listed above, call cs_blast({action:"safety", id}) FIRST — editing a hub blind can break its importers. When you edit a SPECIFIC function/method inside a large or hub file, ALSO call cs_blast({action:"function", id:"<functionName>"}): file-level safety can call a 5000-line hub "low risk" (few importers) while a function inside it is called from everywhere — file-level cannot see that internal coupling, function-level can. For "who uses X" use cs_query({action:"users", id}) rather than grep.'
           }
           return data
         }
