@@ -353,9 +353,19 @@ function walk(node, ctx) {
     if (src) {
       const calleeName = extractCalleeName(node)
       if (calleeName && !ctx.kwSet?.has(calleeName)) {
-        // Use the loose any-file fallback for calls (`foo()` is a
-        // strong signal); references below stay strict.
-        const target = ctx.resolve(calleeName, { forCall: true })
+        let target = null
+        // `self.method()` / `cls.method()` calls the CURRENT class's method.
+        // Resolve `Class.method` first so a method name shared across classes
+        // still links (the bare fallback would decline it as ambiguous). self
+        // is unambiguous → only correct edges added. Inherited methods (not
+        // defined on this class) miss the qualified match and fall through.
+        if (ctx.lang === 'python' && ctx.resolveQualified && isSelfCall(node)) {
+          const cls = ctx.classStack[ctx.classStack.length - 1]
+          if (cls?.name) target = ctx.resolveQualified(`${cls.name}.${calleeName}`)
+        }
+        // Else: loose any-file fallback for calls (`foo()` is a strong signal);
+        // references below stay strict.
+        if (!target) target = ctx.resolve(calleeName, { forCall: true })
         if (target && target.id !== src) {
           const key = src + '|' + target.id + '|call'
           if (!ctx.seen.has(key)) {
@@ -550,6 +560,18 @@ function lastIdentText(node) {
   return null
 }
 
+// Python `self.method()` / `cls.method()` — the call's `function` field is an
+// `attribute` node whose `object` is the identifier `self`/`cls`. Such a call
+// unambiguously targets the enclosing class's method, so we can resolve the
+// qualified `Class.method` even when the bare method name is shared by several
+// classes (which the loose fallback would decline as ambiguous).
+function isSelfCall(callNode) {
+  const fn = callNode.childForFieldName?.('function')
+  if (!fn || fn.type !== 'attribute') return false
+  const obj = fn.childForFieldName?.('object')
+  return !!obj && obj.type === 'identifier' && (obj.text === 'self' || obj.text === 'cls')
+}
+
 function extractCalleeName(callNode) {
   // 1) Try named fields first — Java has `name`, JS has `function`,
   //    Python/Ruby have `function`. These are the cleanest path when
@@ -635,6 +657,12 @@ function makeParser(ext) {
           edges: [], seen: new Set(),
           kwSet,
           resolve: makeResolver(fileId, index),
+          // Qualified resolver for `self.method()` → `Class.method` (exact
+          // qualifiedName match only — no bare-name degrade). Lets an ambiguous
+          // method name still link when the receiver is unambiguously `self`.
+          resolveQualified: (qn) => (index.resolveCall
+            ? index.resolveCall(fileId, qn, { allowAny: true, qualifiedOnly: true })
+            : null),
           passTwo: true,
         }
         walk(tree.rootNode, ctx)
