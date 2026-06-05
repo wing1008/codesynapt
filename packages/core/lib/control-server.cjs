@@ -1113,6 +1113,16 @@ function createControlServer(opts) {
     // implying completeness. Never let an agent read 🟢 as "definitely safe".
     const confidence = (dynamic || blast.caveat) ? 'limited' : 'high'
 
+    // Layer-2 gate (rides the tool agents actually call). File-level safety
+    // counts IMPORTERS, not internal coupling — a large file with few
+    // importers reads 🟢 here while a function inside it may be called from
+    // everywhere (main_window.py: 3 importers, 294 internal call edges). When
+    // the file is big and symbol-covered, point the agent at function-level
+    // blast for the specific function it's about to edit.
+    const functionLevelHint = (f.loc >= 400 && SUPPORTED_EXTS.has(f.ext))
+      ? `This file is ${f.loc} LOC. The verdict above counts importers (${dependents}), NOT internal coupling — a low-importer file can still hold a function called from everywhere. If you are editing a SPECIFIC function here, also call cs_blast({action:"function", id:"<functionName>"}) for its real callers; file-level cannot see that.`
+      : undefined
+
     return {
       id, level, dependents,
       routes: routeCount, apiCalls: apiCallCount, externalUrls: externalUrlCount,
@@ -1120,6 +1130,7 @@ function createControlServer(opts) {
       blastTokenEstimate: blast.tokenEstimate,
       reasons, advice,
       confidence,
+      functionLevelHint,
       caveat: blast.caveat,   // dynamic files in the impact set, if any
       blastFiles: opts.deep ? blast.files.map((bf) => bf.id) : undefined,
     }
