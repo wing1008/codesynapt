@@ -55,6 +55,7 @@ async function loadScannerModule() {
 // first /symbol/* request after a project loads. Reset on every
 // project swap so it never returns stale symbols from a prior repo.
 const { SymbolGraph, registerParser } = require('../packages/core/lib/symbol-graph.cjs')
+const symbolViews = require('../packages/core/lib/symbol-views.cjs')   // shared /symbol/* views (dedup with control-server)
 const jsSymbolParser = require('../packages/core/lib/symbol-parser-js.cjs')
 const pySymbolParser = require('../packages/core/lib/symbol-parser-py.cjs')
 const miscSymbolParsers = require('../packages/core/lib/symbol-parser-misc.cjs')
@@ -2201,21 +2202,8 @@ async function handleControlRequest(req, res) {
         return writeJson(res, 200, withMeta(g.stats()))
       }
       if (req.method === 'GET' && sub === 'graph') {
-        // Render payload for the 3D function layer (symbols + call edges).
-        const limit = Math.min(40000, Math.max(1, parseInt(url.searchParams.get('limit') || '12000', 10)))
-        const symbols = []
-        for (const n of g.nodes.values()) {
-          symbols.push({ id: n.id, file: n.file, name: n.qualifiedName || n.name, kind: n.kind, line: n.startLine })
-          if (symbols.length >= limit) break
-        }
-        const ids = new Set(symbols.map((s) => s.id))
-        const calls = []
-        for (const e of g.edges) {
-          if (e.kind !== 'call') continue
-          if (ids.has(e.source) && ids.has(e.target)) calls.push({ s: e.source, t: e.target })
-          if (calls.length >= limit * 3) break
-        }
-        return writeJson(res, 200, withMeta({ symbols, calls, truncated: g.nodes.size > symbols.length }))
+        // Render payload for the 3D function layer (shared with control-server).
+        return writeJson(res, 200, withMeta(symbolViews.symbolGraphPayload(g, url.searchParams.get('limit'))))
       }
       if (req.method === 'GET' && sub === 'find') {
         const q = url.searchParams.get('q') || ''
@@ -2251,33 +2239,15 @@ async function handleControlRequest(req, res) {
       // control-server / MCP cs_blast{action:'function'} style) so the same
       // tool call works whether it lands on the desktop or the headless server.
       if (req.method === 'GET' && sub === 'blast') {
+        // Shared with control-server. id rides path (/symbol/blast/<id>) or ?id=.
         const id = rest[1] ? decodeURIComponent(rest.slice(1).join('/'))
                            : decodeURIComponent(url.searchParams.get('id') || '')
-        if (!id || !g.nodes.has(id)) return writeJson(res, 404, { error: 'symbol not found', id })
-        const depth = Math.min(6, Math.max(1, parseInt(url.searchParams.get('depth') || '3', 10)))
-        const direction = url.searchParams.get('direction') === 'callees' ? 'callees' : 'callers'
-        const visited = new Set([id]); let frontier = new Set([id]); const byDepth = [{ depth: 0, count: 1 }]
-        for (let d = 1; d <= depth; d++) {
-          const next = new Set()
-          for (const sid of frontier) {
-            const adj = direction === 'callers' ? g.inAdj.get(sid) : g.outAdj.get(sid)
-            if (!adj) continue
-            for (const n of adj) if (!visited.has(n)) { visited.add(n); next.add(n) }
-          }
-          if (!next.size) break
-          byDepth.push({ depth: d, count: next.size }); frontier = next
-        }
-        const impacted = [...visited].filter((x) => x !== id)
-          .map((x) => { const n = g.nodes.get(x); return n ? { name: n.qualifiedName || n.name, kind: n.kind, file: n.file, line: n.startLine } : null })
-          .filter(Boolean)
-        const files = new Set(impacted.map((i) => i.file))
-        const seed = g.nodes.get(id)
-        return writeJson(res, 200, withMeta({
-          seed: { id, name: seed.qualifiedName || seed.name, file: seed.file, line: seed.startLine },
-          direction, depth, totalImpacted: impacted.length, filesTouched: files.size,
-          byDepth, impacted: impacted.slice(0, 200), truncated: impacted.length > 200,
-          caveat: 'Static call graph; dynamic/reflective dispatch (signals/slots, getattr, DI) and ambiguous method names are not resolved — treat as a floor.',
-        }))
+        const r = symbolViews.symbolBlast(
+          g, id,
+          Math.min(6, Math.max(1, parseInt(url.searchParams.get('depth') || '3', 10))),
+          url.searchParams.get('direction') === 'callees' ? 'callees' : 'callers')
+        if (!r) return writeJson(res, 404, { error: 'symbol not found', id })
+        return writeJson(res, 200, withMeta(r))
       }
       if (req.method === 'GET' && sub === 'explore') {
         const q = url.searchParams.get('q') || ''
