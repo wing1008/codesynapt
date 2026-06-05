@@ -201,6 +201,8 @@ const csApi = {
   listPlugins: () => ipcRenderer.invoke('list-plugins'),
   openPluginDir: () => ipcRenderer.invoke('open-plugin-dir'),
   pluginDir: () => ipcRenderer.invoke('plugin-dir'),
+  approvePlugin: (id, opts) => ipcRenderer.invoke('approve-plugin', id, opts),
+  revokePlugin: (id) => ipcRenderer.invoke('revoke-plugin', id),
   // Trust round-trip: the settings UI calls approvePlugin once the user
   // consents; the main process records the content hash + granted permissions
   // into the trust store. (Requires the matching ipcMain handlers — see the

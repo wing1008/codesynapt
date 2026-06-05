@@ -6073,7 +6073,11 @@ window.addEventListener('drop', async (e) => {
     return
   }
   const file = items[0]
-  if (!file.path) {
+  // Electron 32+ removed File.path; the real path is only resolvable from the
+  // preload via webUtils.getPathForFile (exposed as getPathForFile). Fall back
+  // to the legacy file.path for older Electron / non-Electron.
+  const fp = (window.codesynapt.getPathForFile && window.codesynapt.getPathForFile(file)) || file.path
+  if (!fp) {
     toast("Couldn't read the dropped item — try Open Folder…")
     return
   }
@@ -6083,7 +6087,7 @@ window.addEventListener('drop', async (e) => {
   // and reports back. So we just send the path; main.cjs already
   // validates and emits an error if it's not a directory.
   try {
-    await window.codesynapt.loadFolder(file.path)
+    await window.codesynapt.loadFolder(fp)
   } catch (err) {
     console.error('loadFolder failed:', err)
     toast(`Couldn't open: ${err.message || err}`)

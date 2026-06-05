@@ -1063,6 +1063,18 @@ ipcMain.handle('open-plugin-dir', () => {
 
 ipcMain.handle('plugin-dir', () => pluginLoader.getPluginDir())
 
+// Approve / revoke a plugin's trust (the round-trip the permission model needs
+// to be usable from the UI). approve-plugin grants the requested permissions
+// and pins the content hash; revoke-plugin removes trust. Both return {ok,...}.
+ipcMain.handle('approve-plugin', (_e, id, opts) => {
+  try { return pluginLoader.approvePlugin(id, opts || {}) }
+  catch (err) { console.error('[main] approve-plugin failed:', err); return { ok: false, reason: String(err && err.message || err) } }
+})
+ipcMain.handle('revoke-plugin', (_e, id) => {
+  try { return pluginLoader.revokePlugin(id) }
+  catch (err) { console.error('[main] revoke-plugin failed:', err); return { ok: false, reason: String(err && err.message || err) } }
+})
+
 // ─── Auto-updater control (renderer-driven) ────────────────────
 // The updater is wired in app.whenReady() below; these handlers let the
 // renderer toast drive download/install. `_autoUpdater` is null when the
