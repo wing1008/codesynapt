@@ -150,15 +150,37 @@ function createControlServer(opts) {
   if (typeof getCurrentRoot !== 'function') throw new Error('createControlServer: getCurrentRoot fn is required')
 
   // ── Utilities ─────────────────────────────────────────────────
+  // Decide the Access-Control-Allow-Origin value for a request. We must NEVER
+  // emit `*`: with no auth token configured every read endpoint is open, and a
+  // wildcard ACAO would let ANY web page the user visits read /file/.env,
+  // /env, /summary, etc. cross-origin via a CORS simple GET. So we only reflect
+  // an explicitly loopback Origin (the legitimate case is a local tool / the
+  // desktop UI). Cross-origin pages (https://evil.com) get no ACAO header at
+  // all, so the browser blocks their script from reading the response body.
+  // CLI/MCP clients send no Origin and are unaffected either way.
+  function allowedOrigin(req) {
+    const origin = req && req.headers && req.headers.origin
+    if (!origin) return null
+    try {
+      const u = new URL(origin)
+      const h = u.hostname.toLowerCase()
+      if (h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]') return origin
+    } catch { /* malformed Origin → deny */ }
+    return null
+  }
   function writeJson(res, status, data) {
     const body = JSON.stringify(data)
-    res.writeHead(status, {
+    const headers = {
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Length': Buffer.byteLength(body),
-      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    })
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Vary': 'Origin',
+    }
+    // res._acaoOrigin is set once per request in handleControlRequest. Only a
+    // loopback Origin is reflected; cross-origin pages get NO ACAO header.
+    if (res._acaoOrigin) headers['Access-Control-Allow-Origin'] = res._acaoOrigin
+    res.writeHead(status, headers)
     res.end(body)
   }
   function isInsideRoot(root, full) {
@@ -222,6 +244,96 @@ function createControlServer(opts) {
       if (out.length >= 100) break
     }
     return out
+  }
+
+  // ── Full-text CONTENT search ──────────────────────────────────
+  // Headless equivalent of the desktop's worker-isolated /search. Different
+  // from /find (which matches file IDs only). The desktop runs this in a
+  // worker_thread; the headless daemon has no worker plumbing, so we scan
+  // synchronously but bounded: a hard per-file size gate (5MB) skips giant
+  // assets (tokenizer JSONs etc.) that would stall the event loop, and `max`
+  // caps total matches. Result shape mirrors search-worker.cjs so the CLI
+  // (`cs search`) and MCP (cs_query action:'search') consume it unchanged.
+  const SEARCH_MAX_FILE_BYTES = 5 * 1024 * 1024
+  const SEARCH_SNIPPET = 50
+  function searchContent(q, opts = {}) {
+    const regex = !!opts.regex
+    const caseSensitive = !!opts.caseSensitive
+    const max = Math.max(1, Math.min(2000, opts.max || 100))
+    const maxPerFile = Math.max(1, Math.min(100, opts.maxPerFile || 10))
+    const files = [...scanner.files.values()]
+    const t0 = Date.now()
+    const matches = []
+    const skipped = []
+    let filesScanned = 0, filesMatched = 0, truncated = false
+
+    let re = null
+    if (regex) {
+      try { re = new RegExp(q, caseSensitive ? 'g' : 'gi') }
+      catch (e) { return { error: 'invalid regex: ' + e.message } }
+    }
+    const needle = caseSensitive ? q : q.toLowerCase()
+
+    for (const f of files) {
+      if (matches.length >= max) { truncated = true; break }
+      if (!f.absPath) continue
+      let stat
+      try { stat = fs.statSync(f.absPath) } catch { continue }
+      if (!stat.isFile()) continue
+      if (stat.size > SEARCH_MAX_FILE_BYTES) {
+        skipped.push({ id: f.id, reason: 'too-large', size: stat.size }); continue
+      }
+      let text
+      try { text = fs.readFileSync(f.absPath, 'utf8') } catch { continue }
+      filesScanned++
+      const hay = caseSensitive || regex ? text : text.toLowerCase()
+      let fileHit = 0
+      if (regex) {
+        re.lastIndex = 0
+        let m
+        while ((m = re.exec(text)) !== null) {
+          const idx = m.index
+          const line = (text.slice(0, idx).match(/\n/g) || []).length + 1
+          const lineStart = text.lastIndexOf('\n', idx - 1) + 1
+          const sStart = Math.max(0, idx - SEARCH_SNIPPET)
+          const sEnd = Math.min(text.length, idx + m[0].length + SEARCH_SNIPPET)
+          matches.push({ id: f.id, line, col: idx - lineStart + 1, snippet: text.slice(sStart, sEnd).replace(/\r?\n/g, ' '), totalInFile: 0 })
+          fileHit++
+          if (fileHit >= maxPerFile || matches.length >= max) break
+          if (m.index === re.lastIndex) re.lastIndex++
+        }
+      } else {
+        if (hay.indexOf(needle) === -1) continue
+        let from = 0
+        while (fileHit < maxPerFile && matches.length < max) {
+          const idx = hay.indexOf(needle, from)
+          if (idx === -1) break
+          const line = (text.slice(0, idx).match(/\n/g) || []).length + 1
+          const lineStart = text.lastIndexOf('\n', idx - 1) + 1
+          const sStart = Math.max(0, idx - SEARCH_SNIPPET)
+          const sEnd = Math.min(text.length, idx + needle.length + SEARCH_SNIPPET)
+          matches.push({ id: f.id, line, col: idx - lineStart + 1, snippet: text.slice(sStart, sEnd).replace(/\r?\n/g, ' '), totalInFile: 0 })
+          fileHit++
+          from = idx + needle.length
+        }
+      }
+      if (fileHit > 0) {
+        filesMatched++
+        // backfill totalInFile for this file's matches
+        for (let i = matches.length - fileHit; i < matches.length; i++) matches[i].totalInFile = fileHit
+      }
+    }
+    return {
+      query: q,
+      totalFiles: files.length,
+      filesScanned, filesMatched,
+      matches, skipped, truncated,
+      ms: Date.now() - t0,
+      // Headless search re-reads each request (no worker cache). Include a
+      // cacheStats object so the CLI/MCP consumers (which read cacheStats.*)
+      // don't crash; hitRate is null to honestly signal "no cache here".
+      cacheStats: { hits: 0, misses: filesScanned, hitRate: null, cached: false },
+    }
   }
 
   // ── Summary (cached on snapshotVersion) ───────────────────────
@@ -559,6 +671,12 @@ function createControlServer(opts) {
         // rarely so this is acceptable.
         try {
           const fs = require('fs')
+          // Per-file size cap: the scanner indexes (but does not parse) files
+          // over its own 2MB gate, so without a cap a single 50MB asset would
+          // be fully read into memory on EVERY /schema?model= request, stalling
+          // the event loop. Skip oversized files — they aren't model usage.
+          const st = fs.statSync(f.absPath)
+          if (st.size > 2_000_000) continue
           const content = fs.readFileSync(f.absPath, 'utf8')
           if (re.test(content)) usedIn.push(f.id)
         } catch {}
@@ -910,6 +1028,28 @@ function createControlServer(opts) {
     }
   }
 
+  // ── Legacy migration audit (lazy ESM load + snapshot cache) ──
+  // legacy.js is ESM (export function auditLegacy); load it via dynamic
+  // import() once, then cache the audit result per scanner snapshot version
+  // (the audit walks every file, so re-running on every request is wasteful).
+  let _legacyAuditFn = null
+  async function loadLegacyAudit() {
+    if (_legacyAuditFn) return _legacyAuditFn
+    const mod = await import('../legacy.js')
+    _legacyAuditFn = mod.auditLegacy
+    return _legacyAuditFn
+  }
+  let _legacyCache = { version: -1, data: null }
+  async function buildLegacyCached() {
+    if (!scanner.files || scanner.files.size === 0) return null
+    const v = scanner.snapshotVersion || 0
+    if (_legacyCache.version === v && _legacyCache.data) return _legacyCache.data
+    const fn = await loadLegacyAudit()
+    const data = fn(scanner)
+    if ((scanner.snapshotVersion || 0) === v) _legacyCache = { version: v, data }
+    return data
+  }
+
   // ── Vendor candidates (third-party auto-detect) ──────────────
   function buildVendors() {
     return {
@@ -1215,6 +1355,9 @@ function createControlServer(opts) {
   // ── Main router ───────────────────────────────────────────────
   function handleControlRequest(req, res) {
     const startTs = Date.now()
+    // Resolve the CORS origin ONCE per request (loopback-only; never `*`).
+    // Every writeJson() in this request reads res._acaoOrigin.
+    res._acaoOrigin = allowedOrigin(req)
     // ─── DNS-rebinding defense: validate Host header ──────────
     // Browsers can be tricked into resolving attacker.com → 127.0.0.1
     // and firing requests at our localhost port. Rejecting Host headers
@@ -1234,17 +1377,26 @@ function createControlServer(opts) {
           path: req.url,
           status: res.statusCode,
           principal: req._principal || 'anonymous',
+          // Attacker attribution: a cross-origin exfil attempt carries an
+          // Origin/Referer; record it (+ the socket remote address) so an
+          // 'anonymous GET /file/.env 200' line is no longer indistinguishable
+          // from a benign local read.
+          origin: req.headers['origin'] || null,
+          referer: req.headers['referer'] || req.headers['referrer'] || null,
+          remoteAddr: (req.socket && req.socket.remoteAddress) || null,
         })
       })
     }
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        // CORS is intentionally restrictive — only same-origin loopback.
-        // CLI/MCP don't use CORS (no Origin header), so they're unaffected.
-        'Access-Control-Allow-Origin': 'null',
+      // CORS is intentionally restrictive — only a loopback Origin is reflected;
+      // cross-origin pages get no ACAO header. CLI/MCP send no Origin.
+      const optHeaders = {
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      })
+        'Vary': 'Origin',
+      }
+      if (res._acaoOrigin) optHeaders['Access-Control-Allow-Origin'] = res._acaoOrigin
+      res.writeHead(204, optHeaders)
       return res.end()
     }
     // Bearer token validation (only if authToken is configured)
@@ -1269,13 +1421,15 @@ function createControlServer(opts) {
           endpoints: [
             'GET /health', 'GET /summary', 'GET /graph', 'GET /node/:id',
             'GET /file/:id', 'GET /deps/:id', 'GET /users/:id', 'GET /find?q=',
+            'GET /search?q=[&regex=&case=&max=]',
             'GET /external', 'GET /blast/:id', 'GET /packages',
             'GET /package/:name', 'GET /package-graph',
             'GET /safety/:id', 'GET /bundle/:id', 'GET /env [/?var=NAME]',
             'GET /suggest [?top=N]', 'GET /feature/:keyword', 'GET /preflight',
             'GET /schema [?model=Name]', 'GET /url [?path=/...]', 'GET /secrets',
-            'GET /vendors',
+            'GET /vendors', 'GET /legacy [?type=orphan|path|filename|duplicate]',
             'GET /symbol/summary', 'GET /symbol/graph', 'GET /symbol/find?q=', 'GET /symbol/node?id=',
+            'GET /symbol/callers?id=', 'GET /symbol/callees?id=',
             'GET /symbol/blast?id=[&depth=&direction=callers|callees]',
             'POST /write/:id', 'POST /edit/:id',
           ],
@@ -1330,8 +1484,19 @@ function createControlServer(opts) {
         const id = idFromRest()
         const node = findNode(id)
         if (!node) return writeJson(res, 404, { error: 'not found' })
+        // Size cap: a core hub can have thousands of importers; an unbounded
+        // imports/importedBy array blows the token budget (and withMeta's
+        // tokenEstimate). Cap each list and report how many were elided.
+        const NODE_EDGE_CAP = 500
+        const allImports = getDeps(id)
+        const allUsers = getUsers(id)
         return writeJson(res, 200, withMeta({
-          ...node, imports: getDeps(id), importedBy: getUsers(id),
+          ...node,
+          imports: allImports.slice(0, NODE_EDGE_CAP),
+          importedBy: allUsers.slice(0, NODE_EDGE_CAP),
+          importCountTotal: allImports.length,
+          importedByCountTotal: allUsers.length,
+          truncated: allImports.length > NODE_EDGE_CAP || allUsers.length > NODE_EDGE_CAP,
         }))
       }
       // ── Layer-2 symbol endpoints. Symbol ids contain #/@ so they ride a
@@ -1406,6 +1571,29 @@ function createControlServer(opts) {
       if (req.method === 'GET' && seg0 === 'find') {
         return writeJson(res, 200, searchFiles(url.searchParams.get('q') || ''))
       }
+      // Full-text CONTENT search (parity with desktop electron/main.cjs /search).
+      if (req.method === 'GET' && seg0 === 'search' && rest.length === 0) {
+        const q = url.searchParams.get('q')
+        if (!q) return writeJson(res, 400, { error: 'q (query) is required' })
+        // Mirror the desktop's 503 'scan in progress' contract so the CLI's
+        // 503-retry loop and MCP behave identically against either backend.
+        if (scanner.initialScanComplete === false) {
+          return writeJson(res, 503, {
+            error: 'scan in progress',
+            fileCount: scanner.files.size,
+            retryAfterMs: 2000,
+            hint: 'Initial scan still running. Try again in a couple of seconds.',
+          })
+        }
+        const r = searchContent(q, {
+          regex:         url.searchParams.get('regex') === '1' || url.searchParams.get('regex') === 'true',
+          caseSensitive: url.searchParams.get('case')  === '1' || url.searchParams.get('case')  === 'true',
+          max:           parseInt(url.searchParams.get('max') || '100', 10),
+          maxPerFile:    parseInt(url.searchParams.get('maxPerFile') || '10', 10),
+        })
+        if (r.error) return writeJson(res, 400, { error: r.error })
+        return writeJson(res, 200, withMeta(r))
+      }
       if (req.method === 'GET' && seg0 === 'external') {
         return writeJson(res, 200, getExternalUrls())
       }
@@ -1418,6 +1606,25 @@ function createControlServer(opts) {
       }
       if (req.method === 'GET' && seg0 === 'vendors' && rest.length === 0) {
         return writeJson(res, 200, withMeta(buildVendors()))
+      }
+      // Legacy migration audit (parity with desktop electron/main.cjs /legacy).
+      // The audit logic lives in packages/core/legacy.js (ESM); load it lazily.
+      if (req.method === 'GET' && seg0 === 'legacy' && rest.length === 0) {
+        const type = url.searchParams.get('type')
+        buildLegacyCached().then((data) => {
+          if (!data) return writeJson(res, 503, { error: 'no folder loaded' })
+          if (type) {
+            const slice = { summary: data.summary }
+            if (type === 'orphan')         slice.orphans = data.orphans
+            else if (type === 'path')      slice.pathPatterns = data.pathPatterns
+            else if (type === 'filename')  slice.filenamePatterns = data.filenamePatterns
+            else if (type === 'duplicate') slice.duplicates = data.duplicates
+            else return writeJson(res, 400, { error: 'bad type; use orphan|path|filename|duplicate' })
+            return writeJson(res, 200, withMeta(slice))
+          }
+          return writeJson(res, 200, withMeta(data))
+        }).catch((e) => writeJson(res, 500, { error: 'legacy audit failed: ' + (e && e.message) }))
+        return
       }
       if (req.method === 'GET' && seg0 === 'url' && rest.length === 0) {
         const p = url.searchParams.get('path')
