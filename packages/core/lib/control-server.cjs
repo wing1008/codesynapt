@@ -1347,7 +1347,7 @@ function createControlServer(opts) {
             'GET /suggest [?top=N]', 'GET /feature/:keyword', 'GET /preflight',
             'GET /schema [?model=Name]', 'GET /url [?path=/...]', 'GET /secrets',
             'GET /vendors',
-            'GET /symbol/summary', 'GET /symbol/find?q=', 'GET /symbol/node?id=',
+            'GET /symbol/summary', 'GET /symbol/graph', 'GET /symbol/find?q=', 'GET /symbol/node?id=',
             'GET /symbol/blast?id=[&depth=&direction=callers|callees]',
             'POST /write/:id', 'POST /edit/:id',
           ],
@@ -1413,6 +1413,31 @@ function createControlServer(opts) {
         const sub = rest[0] || 'summary'
         scanner.getSymbolGraph().then((g) => {
           if (sub === 'summary') return writeJson(res, 200, withMeta(symbolSummary(g)))
+          if (sub === 'graph') {
+            // Render payload for the 3D function layer: symbols (positioned by
+            // the client near their parent file node) + call edges. Capped for
+            // GPU/transport; the desktop renderer batches these into Points +
+            // LineSegments alongside the file graph.
+            const limit = Math.min(40000, Math.max(1, parseInt(url.searchParams.get('limit') || '12000', 10)))
+            const symbols = []
+            for (const n of g.nodes.values()) {
+              symbols.push({ id: n.id, file: n.file, name: n.qualifiedName || n.name, kind: n.kind, line: n.startLine })
+              if (symbols.length >= limit) break
+            }
+            const ids = new Set(symbols.map((s) => s.id))
+            const calls = []
+            const maxCalls = limit * 3
+            for (const e of g.edges) {
+              if (e.kind !== 'call') continue
+              if (ids.has(e.source) && ids.has(e.target)) calls.push({ s: e.source, t: e.target })
+              if (calls.length >= maxCalls) break
+            }
+            return writeJson(res, 200, withMeta({
+              symbols, calls,
+              truncated: g.nodes.size > symbols.length,
+              total: { symbols: g.nodes.size, calls: g.edges.filter((e) => e.kind === 'call').length },
+            }))
+          }
           if (sub === 'find') {
             const q = url.searchParams.get('q') || ''
             return writeJson(res, 200, withMeta({
