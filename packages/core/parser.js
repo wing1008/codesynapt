@@ -331,6 +331,13 @@ function parseComponentFile(content) {
   const scriptRe = /<script[^>]*>([\s\S]*?)<\/script>/g
   let m
   while ((m = scriptRe.exec(content))) scripts.push(m[1])
+  // Astro component-script lives in a leading `---`-fenced frontmatter block,
+  // not in <script> (which Astro reserves for client-side JS). The frontmatter
+  // is the file's real import surface, so extract it too. We only match a fence
+  // anchored at the very start of the file so we don't mistake a `---` inside a
+  // Vue/Svelte template or a markdown horizontal rule for frontmatter.
+  const fm = /^\s*---\r?\n([\s\S]*?)\r?\n---/.exec(content)
+  if (fm) scripts.unshift(fm[1])
   const combined = scripts.join('\n')
   return parseJS(combined)
 }
@@ -466,6 +473,25 @@ function parseCSS(content) {
     let m
     while ((m = re.exec(content))) imports.push({ spec: m[1], kind: 'import' })
   }
+  // Unquoted forms — the quoted patterns above require literal ['"], so
+  // `@import url(theme.css);` and `background:url(bg.png)` are otherwise
+  // dropped. Capture the unquoted target up to the closing `)`, trimmed.
+  // Quoted hits are still handled above and would be picked up here too, so
+  // we explicitly reject anything that starts with a quote to avoid dupes.
+  const unqRe = /url\(\s*([^'")][^)]*?)\s*\)/gi
+  let u
+  while ((u = unqRe.exec(content))) {
+    const spec = u[1].trim()
+    // Skip external / inline targets — not local file edges (mirrors parseHTML).
+    if (!spec || spec.startsWith('http://') || spec.startsWith('https://')
+        || spec.startsWith('//') || spec.startsWith('data:')
+        || spec.startsWith('#')) continue
+    imports.push({ spec, kind: 'asset' })
+  }
+  // Unquoted `@import url(...)` without quotes inside (e.g. `@import url(theme.css)`)
+  // — the @import-specific pattern above also requires quotes. The bare-url
+  // pass right above already captured the url(theme.css) part, so no extra
+  // pattern is needed here.
   return { imports }
 }
 
@@ -1420,6 +1446,33 @@ export function normalizeUrlPath(u) {
   // Trim trailing slash (except root)
   if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1)
   return s
+}
+
+// True when `u` is an absolute http(s) URL pointing at a real EXTERNAL host
+// (i.e. NOT same-origin localhost). Such URLs are third-party API calls
+// (Sentry, Stripe, GitHub, …) and must NOT be matched against this project's
+// local server routes — normalizeUrlPath() strips the host, so without this
+// guard `https://stripe.com/users/42` would falsely match a local
+// `/users/:id` route and emit a bogus full-stack edge.
+//
+// Relative URLs ("/users/42") and absolute-localhost URLs
+// ("http://localhost:3000/users/42", "http://127.0.0.1/…", "[::1]") are NOT
+// external — those legitimately target this project's own server.
+export function isExternalApiUrl(u) {
+  if (!u) return false
+  const m = /^https?:\/\/([^/?#]+)/i.exec(u.trim())
+  if (!m) return false   // relative path → same-origin, not external
+  // Strip userinfo (user:pass@) and port, lowercase the host.
+  let host = m[1].replace(/^[^@]*@/, '').toLowerCase()
+  // Bracketed IPv6 (e.g. [::1]:3000) → unwrap to ::1
+  const v6 = host.match(/^\[([^\]]+)\]/)
+  if (v6) host = v6[1]
+  else host = host.replace(/:\d+$/, '')   // strip :port for hostnames/IPv4
+  const LOCAL = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '::'])
+  if (LOCAL.has(host)) return false
+  if (host.endsWith('.localhost')) return false   // *.localhost (RFC 6761)
+  if (host === '[::1]') return false
+  return true   // a real external host
 }
 
 // Build a regex from a route path with dynamic segments.

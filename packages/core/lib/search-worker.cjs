@@ -63,19 +63,24 @@ function evictUntilFits(needed) {
 }
 
 async function getText(id, absPath) {
-  // Fast path: cache hit, no stat call. Chokidar invalidation messages
-  // from main keep us honest. Skipping stat saves ~0.5ms × N files.
+  // stat first — ~0.1ms — so a cache hit can be mtime-validated. The main
+  // thread also forwards chokidar add/change/remove as 'invalidate'
+  // messages, but that pipeline can miss/drop/debounce an event; the mtime
+  // recheck is the belt-and-suspenders guard that keeps a hit from ever
+  // serving content that no longer matches the file on disk.
+  let stat
+  try { stat = await fs.promises.stat(absPath) }
+  catch (e) { invalidate(id); throw e }
+
+  // Fast path: cache hit AND mtime unchanged → serve cached text.
   const cached = cache.get(id)
-  if (cached) {
+  if (cached && cached.mtime === stat.mtimeMs) {
     cacheStats.hits++
     cache.delete(id); cache.set(id, cached)   // LRU touch
     if (!cached.text) cached.text = cached.buf.toString('utf8')
     return cached.text
   }
-
-  let stat
-  try { stat = await fs.promises.stat(absPath) }
-  catch (e) { invalidate(id); throw e }
+  if (cached) cacheStats.stales++   // present but mtime differed → re-read
 
   // Hard size gate — prevents tokenizer.json (50+ MB) from stalling pool.
   if (stat.size > MAX_SEARCH_BYTES) {
@@ -87,8 +92,13 @@ async function getText(id, absPath) {
   catch (e) { invalidate(id); throw e }
   cacheStats.misses++
 
+  if (cached) {
+    // Drop the now-stale entry regardless of whether we re-cache below,
+    // so its bytes are accounted for and it can never be served again.
+    bytesUsed -= cached.buf.length
+    cache.delete(id)
+  }
   if (buf.length <= MAX_FILE_BYTES) {
-    if (cached) { bytesUsed -= cached.buf.length; cache.delete(id) }
     evictUntilFits(buf.length)
     cache.set(id, { mtime: stat.mtimeMs, buf, text: null })
     bytesUsed += buf.length

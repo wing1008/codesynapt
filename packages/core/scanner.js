@@ -3,6 +3,7 @@ import path from 'path'
 import chokidar from 'chokidar'
 import { EventEmitter } from 'events'
 import { parseFile, resolveImport, resolveImportAll, clearParserCaches, normalizeUrlPath, routePathToRegex,
+         isExternalApiUrl,
          extractNextApiRoutes, extractNuxtServerRoutes, extractSvelteKitServerRoutes } from './parser.js'
 import { detectMonorepo, packageForFile } from './monorepo.js'
 import { registerAll as registerSymbolParsers, SymbolGraph } from './lib/symbol-parsers.cjs'
@@ -373,7 +374,8 @@ export class Scanner extends EventEmitter {
         if (this._initialDrain) { try { await this._initialDrain } catch {} }
         while (this._initialQueue && this._initialQueue.length) {
           const p = this._initialQueue.shift()
-          try { const f = this.parseOne(p); if (f) this.files.set(f.id, f) } catch {}
+          try { const f = this.parseOne(p); if (f) this.files.set(f.id, f) }
+          catch (e) { process.stderr.write(`[scanner] parse ${p}: ${e && e.message}\n`) }
         }
         this.initialScanComplete = true
         this.emit('scan-progress', { count: scanCount, done: true })
@@ -524,8 +526,21 @@ export class Scanner extends EventEmitter {
     // slip past the extension filter) would stall or OOM the parser's regex
     // passes. Index them as nodes (size known) but don't parse their content.
     const MAX_PARSE_BYTES = 2 * 1024 * 1024  // 2 MB
+    let readError = false
     if (stat.size <= MAX_PARSE_BYTES) {
-      try { content = fs.readFileSync(absPath, 'utf8') } catch {}
+      // Distinguish a genuine read failure (EACCES, transient lock, encoding
+      // fault) from a deliberately-skipped huge/binary file. A swallowed read
+      // error used to leave content='' and produce a FULL node (loc:0,
+      // imports:[], confidence:high) — its real outgoing edges vanished, so its
+      // import targets were falsely reclassified as high-confidence orphans, and
+      // the file itself looked like a clean dependency-less node. We now log the
+      // failure and mark the node so the orphan/legacy audit doesn't trust it.
+      try {
+        content = fs.readFileSync(absPath, 'utf8')
+      } catch (e) {
+        readError = true
+        process.stderr.write(`[scanner] read ${absPath}: ${e && e.message}\n`)
+      }
       if (content.indexOf('\u0000') !== -1) content = ''   // binary → skip parsing
     }
     const loc = content ? content.split('\n').length : 0
@@ -547,15 +562,24 @@ export class Scanner extends EventEmitter {
     const pkg = this.monorepo?.packages?.length
       ? packageForFile(id, this.monorepo.packages)
       : null
+    // On a genuine read failure we have NO real import info for this file, so we
+    // must not present it as a clean high-confidence node. Force confidence low
+    // and inject a 'read-error' dynamic-pattern marker so the orphan/legacy
+    // audit (which keys off dynamicPatterns) does not treat its (unknown) edges
+    // as definitively absent. `readError` is surfaced for callers/UI.
+    const finalDynamic = readError
+      ? [...(dynamicPatterns || []), 'read-error']
+      : (dynamicPatterns || [])
     return {
       id, ext, loc, size: stat.size, imports, absPath,
       routes:           finalRoutes,
       apiCalls:         apiCalls         || [],
       externalUrls:     externalUrls     || [],
-      dynamicPatterns:  dynamicPatterns  || [],
+      dynamicPatterns:  finalDynamic,
       envUsage:         envUsage         || [],
       dbModels:         dbModels         || [],
-      confidence:       confidence       || 'high',
+      confidence:       readError ? 'low' : (confidence || 'high'),
+      readError:        readError || undefined,
       pkg,
       lastSeenAt:       Date.now(),
     }
@@ -622,6 +646,11 @@ export class Scanner extends EventEmitter {
     if (routeIndex.length > 0) {
       for (const file of this.files.values()) {
         for (const call of file.apiCalls) {
+          // Third-party (external-host) calls — e.g. https://stripe.com/users/42
+          // — must NOT be matched to local routes. normalizeUrlPath strips the
+          // host, so without this guard a remote URL whose path shape happens to
+          // match a local route would emit a bogus full-stack edge.
+          if (isExternalApiUrl(call.url)) continue
           const p = normalizeUrlPath(call.url)
           if (!p) continue
           for (const route of routeIndex) {

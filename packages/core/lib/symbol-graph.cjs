@@ -91,6 +91,16 @@ class SymbolGraph {
     // (builtin/common name, or ambiguous across >1 production file). Surfaced
     // in stats() so "unresolved" reads as data, not a silent drop.
     this.unresolvedAmbiguous = 0
+    // Honest signal #2: parser outcomes per file, so a broken-language /
+    // crashed-parser file is distinguishable from a legitimately symbol-less
+    // one. parseFailures = files whose parser THREW (extractSymbols or
+    // extractReferences raised) — those are swallowed to [] and would
+    // otherwise be invisible. emptyFiles = files a parser handled without
+    // throwing but that produced 0 symbols (tree-sitter is error-tolerant and
+    // rarely throws, so a silently-degraded grammar shows up here, not in
+    // parseFailures). Surfaced in stats().
+    this.parseFailures = 0
+    this.emptyFiles = 0
   }
 
   clear() {
@@ -105,6 +115,8 @@ class SymbolGraph {
     this.fileCount = 0
     this.scanMs = 0
     this.unresolvedAmbiguous = 0
+    this.parseFailures = 0
+    this.emptyFiles = 0
   }
 
   // Best symbol match for `name` called from `fromFileId`. Preference:
@@ -203,6 +215,18 @@ class SymbolGraph {
 
   addEdge(edge) {
     this.edges.push(edge)
+    // Caller/callee adjacency is the CALL graph only. extends / implements /
+    // ref / jsx-ref / type-ref are real relationships kept in `this.edges`
+    // (and surfaced via byEdgeKind), but they are NOT calls — letting them
+    // into inAdj/outAdj inflated callers/callees/blast/internalHubs and the
+    // symbolNodeView counts (a subclass counted as a "caller" of its base, a
+    // type annotation as a "callee"). Likewise synthetic sources that were
+    // never addNode'd — e.g. the desktop's `route:GET /x` route→handler
+    // edges (source is a route string, not a symbol) — must not inflate a
+    // handler's caller count past what callersOf() (which drops non-nodes)
+    // can return. So: only call edges between two real nodes build adjacency.
+    if (edge.kind !== 'call') return
+    if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target)) return
     if (!this.outAdj.has(edge.source)) this.outAdj.set(edge.source, new Set())
     this.outAdj.get(edge.source).add(edge.target)
     if (!this.inAdj.has(edge.target)) this.inAdj.set(edge.target, new Set())
@@ -353,10 +377,16 @@ class SymbolGraph {
       } catch { continue }
       fileContents.set(entry.id, content)
       let symbols
+      let parseThrew = false
       try {
         const ret = parser.extractSymbols(content, entry.id)
         symbols = (await ret) || []
-      } catch (e) { symbols = [] }
+      } catch (e) { symbols = []; parseThrew = true; this.parseFailures++ }
+      // A file the parser handled but that yielded nothing is tracked
+      // separately — see constructor. Distinguishes "no symbols" (legit
+      // data) from "parser crashed" (parseFailures) AND from a silently
+      // degraded tree-sitter grammar (emptyFiles, no throw).
+      if (!parseThrew && symbols.length === 0) this.emptyFiles++
       // Lazy split per file — used by the deprecated probe below.
       // Most files have no deprecated marker, so the .test() short-
       // circuits and we never pay the split cost.
@@ -412,7 +442,7 @@ class SymbolGraph {
       try {
         const ret = parser.extractReferences(content, fileId, this)
         refs = (await ret) || []
-      } catch (e) { refs = [] }
+      } catch (e) { refs = []; this.parseFailures++ }
       for (const r of refs) {
         if (this.edges.length >= MAX_EDGES) { abortedAt = abortedAt || 'edges'; break }
         if (this.nodes.has(r.source) && this.nodes.has(r.target)) {
@@ -446,6 +476,8 @@ class SymbolGraph {
       builtAt: this.builtAt,
       abortedAt: this.abortedAt || null,   // null | 'symbols' | 'edges'
       unresolvedAmbiguous: this.unresolvedAmbiguous,  // calls we declined to guess
+      parseFailures: this.parseFailures,   // files whose parser threw (swallowed to [])
+      emptyFiles: this.emptyFiles,         // files parsed OK but with 0 symbols
     }
   }
 }

@@ -23,12 +23,38 @@ function parsePnpmWorkspace(text) {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/#.*$/, '').trimEnd()
     if (!line.trim()) continue
-    if (/^packages\s*:/i.test(line)) { inPackages = true; continue }
+    const head = line.match(/^packages\s*:(.*)$/i)
+    if (head) {
+      inPackages = true
+      // Flow-style inline array on the same line, e.g.
+      //   packages: ["packages/*", "apps/*"]
+      const rest = head[1].trim()
+      if (rest.startsWith('[')) {
+        for (const item of parseFlowArray(rest)) out.push(item)
+        inPackages = false  // a flow array is self-contained
+      }
+      continue
+    }
     if (inPackages) {
       const m = line.match(/^\s*-\s*['"]?([^'"]+)['"]?\s*$/)
       if (m) out.push(m[1])
       else if (/^\S/.test(line)) inPackages = false  // new top-level key
     }
+  }
+  return out
+}
+
+// Extract quoted string items from a flow-style YAML/JSON array such as
+// `["packages/*", 'apps/*']`. Tolerates single or double quotes and
+// surrounding whitespace. Unquoted scalars are accepted too.
+function parseFlowArray(text) {
+  const inner = text.replace(/^\s*\[/, '').replace(/\]\s*$/, '')
+  const out = []
+  for (const piece of inner.split(',')) {
+    const t = piece.trim()
+    if (!t) continue
+    const q = t.match(/^['"]([^'"]*)['"]$/)
+    out.push(q ? q[1] : t)
   }
   return out
 }
@@ -106,16 +132,22 @@ function findManifests(root, manifestNames, maxDepth = MAX_DEPTH) {
     if (depth > maxDepth) return
     let entries
     try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
-    // First check for manifest at this level (don't include root itself
-    // in caller logic — caller decides separately).
+    // Record a manifest at this level (caller decides separately whether
+    // to include the root itself).
+    let hasManifest = false
     for (const name of manifestNames) {
       if (entries.some((e) => e.isFile() && e.name === name)) {
         found.push({ dir, manifest: name })
-        // Don't recurse into a package's subdirectories — packages are
-        // leaves in the workspace tree.
-        return
+        hasManifest = true
+        break
       }
     }
+    // A manifest in a NON-root directory marks a package — packages are
+    // leaves in the workspace tree, so don't descend further. But the
+    // scan root almost always has a package.json/pyproject.toml of its
+    // own (the umbrella), and stopping there would hide every nested
+    // sub-package. So at the root we always keep recursing.
+    if (hasManifest && depth > 0) return
     for (const e of entries) {
       if (!e.isDirectory()) continue
       if (skip.has(e.name) || e.name.startsWith('.')) continue
@@ -150,6 +182,28 @@ function packageNameFromManifest(absPath, manifestFile, fallbackDir) {
 function relativePosix(root, abs) {
   const r = path.relative(root, abs).split(path.sep).join('/')
   return r === '' ? '.' : r
+}
+
+// Classify a Python project's tooling from its root manifest so the
+// reported `kind` isn't a hardcoded 'python-uv' lie. Recognizes uv,
+// poetry, pdm, hatch, setuptools (PEP 621 / setup.py). Falls back to a
+// generic 'python' label when nothing specific is declared.
+function detectPythonKind(root) {
+  const pp = path.join(root, 'pyproject.toml')
+  let text = ''
+  try { text = fs.readFileSync(pp, 'utf8') } catch {}
+  if (text) {
+    if (/^\s*\[tool\.uv\b/m.test(text) || /^\s*\[tool\.uv\.workspace\]/m.test(text)) return 'python-uv'
+    if (/^\s*\[tool\.poetry\b/m.test(text)) return 'python-poetry'
+    if (/^\s*\[tool\.pdm\b/m.test(text)) return 'python-pdm'
+    if (/^\s*\[tool\.hatch\b/m.test(text)) return 'python-hatch'
+    // PEP 621 [project] table without a specific tool → setuptools/generic
+    if (/^\s*\[project\]/m.test(text)) return 'python'
+    return 'python'
+  }
+  // No pyproject.toml → setup.py-based project
+  if (fs.existsSync(path.join(root, 'setup.py'))) return 'python'
+  return 'python'
 }
 
 export function detectMonorepo(root) {
@@ -210,29 +264,50 @@ export function detectMonorepo(root) {
     packageDirs = expandWorkspacePatterns(root, patterns, 'package.json')
   }
 
-  // ⑥ Python pyproject.toml multi-package: detect if multiple
-  // pyproject.toml files exist at depth > 0.
-  let pythonDirs = []
+  // ⑥ Python pyproject.toml / setup.py packages anywhere below root.
+  // (findManifests now keeps recursing past the root umbrella, so a
+  // root pyproject.toml no longer hides nested Python packages.)
   const pyManifests = findManifests(root, ['pyproject.toml', 'setup.py'])
-  // Exclude root from python list — it's the umbrella, not a package
-  pythonDirs = pyManifests.filter((m) => m.dir !== root)
+  // Exclude root from the python list — it's the umbrella, not a package.
+  const pythonDirs = pyManifests.filter((m) => m.dir !== root).map((m) => m.dir)
+  const rootHasPython = names.has('pyproject.toml') || names.has('setup.py')
+
   if (kind === 'none' && pythonDirs.length >= 2) {
-    kind = 'python-uv'
-    packageDirs = pythonDirs.map((m) => m.dir)
+    // A pure-Python monorepo with no JS workspace marker. Report the
+    // actual tooling (poetry/uv/pdm/…) rather than a hardcoded label.
+    kind = detectPythonKind(root)
+    packageDirs = pythonDirs.slice()
+  } else if (kind !== 'none' && pythonDirs.length > 0) {
+    // Mixed-language monorepo: a JS workspace was detected first, but
+    // there are also real Python sub-packages. Merge them in so they
+    // get their own package node / grouping instead of being dropped or
+    // mis-attributed to the root umbrella.
+    for (const d of pythonDirs) if (!packageDirs.includes(d)) packageDirs.push(d)
   }
 
   // ⑦ Generic multi-package fallback: multiple package.json files at
   // depth > 0 with no explicit workspace declaration. This catches
-  // bespoke monorepos that don't use any standard tool.
+  // bespoke monorepos that don't use any standard tool — including the
+  // common case where the scan root itself is a package.json but has no
+  // `workspaces` field, yet contains real sub-packages.
+  let jsSubManifests = []
+  if (kind === 'none' || (kind !== 'none' && patterns.length === 0)) {
+    jsSubManifests = findManifests(root, ['package.json']).filter((m) => m.dir !== root)
+  }
   if (kind === 'none') {
-    const jsManifests = findManifests(root, ['package.json']).filter((m) => m.dir !== root)
-    if (jsManifests.length >= 2) {
+    // A named root with even a single nested package, OR ≥2 bespoke
+    // sub-packages, is a multi-package repo. We still want the root to
+    // appear as its own package (handled below via rootIsPackage).
+    if (jsSubManifests.length >= 2 ||
+        (result.rootIsPackage && jsSubManifests.length >= 1)) {
       kind = 'multi-package'
-      packageDirs = jsManifests.map((m) => m.dir)
+      packageDirs = jsSubManifests.map((m) => m.dir)
+      // Fold in any Python sub-packages discovered above.
+      for (const d of pythonDirs) if (!packageDirs.includes(d)) packageDirs.push(d)
     }
   }
 
-  // No monorepo signal at all
+  // No JS/Python workspace signal at all
   if (kind === 'none') {
     if (result.rootIsPackage) {
       result.kind = 'single'
@@ -240,6 +315,19 @@ export function detectMonorepo(root) {
         name: rootPkgJson?.name || path.basename(root),
         root, relRoot: '.', manifest: 'package.json',
         kind: 'single', language: 'js',
+      }]
+    } else if (rootHasPython) {
+      // Symmetric with the single-JS case: a lone Python project (root
+      // pyproject.toml / setup.py with a name) should also yield one
+      // package entry, not kind='none'/n=0.
+      const manifestName = names.has('pyproject.toml') ? 'pyproject.toml' : 'setup.py'
+      const manifestPath = path.join(root, manifestName)
+      result.kind = 'single'
+      result.rootIsPackage = true
+      result.packages = [{
+        name: packageNameFromManifest(manifestPath, manifestName, path.basename(root)),
+        root, relRoot: '.', manifest: manifestName,
+        kind: 'single', language: 'python',
       }]
     }
     return result
@@ -268,6 +356,22 @@ export function detectMonorepo(root) {
       root, relRoot: '.', manifest: 'package.json',
       kind, language: 'js',
     })
+  }
+
+  // Disambiguate duplicate package names. Two distinct directories can
+  // legitimately declare the same `name` (copy-paste, scaffolding, a
+  // private + public variant). Downstream grouping keys files by the
+  // string returned from packageForFile (the name), so collapsing them
+  // would merge two packages into one group and silently drop their
+  // cross-package edges. Suffix the relRoot to keep them distinct while
+  // preserving the original declared name in `declaredName`.
+  const nameCounts = new Map()
+  for (const p of packages) nameCounts.set(p.name, (nameCounts.get(p.name) || 0) + 1)
+  for (const p of packages) {
+    if (nameCounts.get(p.name) > 1 && p.relRoot !== '.') {
+      p.declaredName = p.name
+      p.name = `${p.name} (${p.relRoot})`
+    }
   }
 
   result.kind = kind
