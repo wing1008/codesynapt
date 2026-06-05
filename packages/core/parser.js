@@ -20,7 +20,7 @@ export function parseFile(absPath, content, ext) {
       case 'ts': case 'tsx':
         r = parseJS(content); break
       case 'vue': case 'svelte': case 'astro':
-        r = parseComponentFile(content); break
+        r = parseComponentFile(content, ext); break
       case 'py': case 'pyw': case 'pyi':
         r = parsePython(content); break
       case 'ipynb': {
@@ -31,13 +31,24 @@ export function parseFile(absPath, content, ext) {
         // hundreds of registry URLs from `metadata` that drown out
         // real API hosts.
         const ipy = parseIpynb(content)
+        // Drive every downstream signal off the EXTRACTED code language
+        // (Python for the vast majority of notebooks) so that confidence /
+        // dbModels / dynamicPatterns are computed exactly as they would be for
+        // a plain .py file. Previously this branch omitted `confidence` and
+        // `dbModels` entirely, so every notebook was served at the scanner's
+        // default confidence:'high' (even with eval/importlib present) and
+        // never surfaced its DB models — a silent gap vs. equivalent .py code.
+        const codeExt = ipy.lang.startsWith('python') ? 'py' : ipy.lang
+        const dynamicPatterns = detectDynamicPatterns(ipy.codeContent, codeExt)
         return {
           imports: ipy.imports,
           routes:        extractPyRoutes(ipy.codeContent),
           apiCalls:      extractPyApiCalls(ipy.codeContent),
           externalUrls:  extractExternalUrls(ipy.codeContent),
-          dynamicPatterns: detectDynamicPatterns(ipy.codeContent, 'py'),
-          envUsage:      extractEnvUsage(ipy.codeContent, 'py'),
+          dynamicPatterns,
+          envUsage:      extractEnvUsage(ipy.codeContent, codeExt),
+          dbModels:      extractDbModels(ipy.codeContent, codeExt),
+          confidence:    confidenceFor(dynamicPatterns, ipy.codeContent, codeExt),
         }
       }
       case 'lsp': case 'dcl': case 'lisp': case 'el':
@@ -325,21 +336,39 @@ function parseJSRegex(content) {
 }
 
 // ─── Vue / Svelte / Astro (extract <script> + parse) ──────────
-function parseComponentFile(content) {
+function parseComponentFile(content, ext) {
   // Pull out <script>...</script> blocks (approximate)
   const scripts = []
   const scriptRe = /<script[^>]*>([\s\S]*?)<\/script>/g
   let m
   while ((m = scriptRe.exec(content))) scripts.push(m[1])
-  // Astro component-script lives in a leading `---`-fenced frontmatter block,
-  // not in <script> (which Astro reserves for client-side JS). The frontmatter
-  // is the file's real import surface, so extract it too. We only match a fence
-  // anchored at the very start of the file so we don't mistake a `---` inside a
-  // Vue/Svelte template or a markdown horizontal rule for frontmatter.
-  const fm = /^\s*---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  if (fm) scripts.unshift(fm[1])
+  // Astro: the component's imports live in the `---` frontmatter fence at
+  // the top of the file (a JS/TS code block), NOT inside <script> (which is
+  // for client-side runtime JS only). Extract that fence and parse it as JS
+  // too, otherwise every Astro layout/component import is invisible to the
+  // graph. The fence must open at the very start of the file (after optional
+  // BOM / whitespace) and close on its own `---` line — that delimiter shape
+  // is unique to Astro frontmatter, so this is safe to scope to astro only.
+  if (ext === 'astro') {
+    const fence = extractAstroFrontmatter(content)
+    if (fence != null) scripts.unshift(fence)
+  }
   const combined = scripts.join('\n')
   return parseJS(combined)
+}
+
+// Return the body of an Astro `---` frontmatter fence, or null if absent.
+// The opening `---` must be the first non-whitespace content of the file
+// (Astro requires this); the closing fence is the next line that is exactly
+// `---`. Mirrors Astro's own compiler contract.
+function extractAstroFrontmatter(content) {
+  // Strip a leading BOM so the open-fence anchor still matches.
+  let s = content
+  if (s.charCodeAt(0) === 0xFEFF) s = s.slice(1)
+  // Opening fence: `---` on its own line, with only blank lines before it.
+  // Closing fence: the next line that is exactly `---`.
+  const m = s.match(/^(?:[ \t]*\r?\n)*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/)
+  return m ? m[1] : null
 }
 
 // ─── Python ───────────────────────────────────────────────────
@@ -423,8 +452,8 @@ function parsePython(content) {
 // JSON metadata doesn't pollute those signals.
 function parseIpynb(content) {
   let nb
-  try { nb = JSON.parse(content) } catch { return { imports: [], codeContent: '' } }
-  if (!nb || !Array.isArray(nb.cells)) return { imports: [], codeContent: '' }
+  try { nb = JSON.parse(content) } catch { return { imports: [], codeContent: '', lang: 'python' } }
+  if (!nb || !Array.isArray(nb.cells)) return { imports: [], codeContent: '', lang: 'python' }
   const lang = (nb.metadata?.kernelspec?.language || 'python').toLowerCase()
   const parts = []
   for (const cell of nb.cells) {
@@ -441,7 +470,7 @@ function parseIpynb(content) {
     .join('\n')
   // Most notebooks are Python; R/Julia fall back to generic (URL only).
   const r = lang.startsWith('python') ? parsePython(cleaned) : parseGeneric(cleaned)
-  return { imports: r.imports || [], codeContent: cleaned }
+  return { imports: r.imports || [], codeContent: cleaned, lang }
 }
 
 // ─── Lisp / AutoLISP ──────────────────────────────────────────
@@ -463,35 +492,30 @@ function parseLisp(content) {
 // ─── CSS family ───────────────────────────────────────────────
 function parseCSS(content) {
   const imports = []
-  const patterns = [
-    /@import\s+(?:url\()?['"]([^'")]+)['"]/g,
-    /@use\s+['"]([^'"]+)['"]/g,       // SCSS
-    /@forward\s+['"]([^'"]+)['"]/g,
-    /url\(\s*['"]([^'")]+)['"]\s*\)/g,
-  ]
-  for (const re of patterns) {
-    let m
-    while ((m = re.exec(content))) imports.push({ spec: m[1], kind: 'import' })
+  const push = (spec) => {
+    spec = (spec || '').trim()
+    if (!spec) return
+    // Skip absolute/protocol-relative/data URIs — they're external, not files.
+    if (/^(?:[a-z]+:)?\/\//i.test(spec) || spec.startsWith('data:')) return
+    imports.push({ spec, kind: 'import' })
   }
-  // Unquoted forms — the quoted patterns above require literal ['"], so
-  // `@import url(theme.css);` and `background:url(bg.png)` are otherwise
-  // dropped. Capture the unquoted target up to the closing `)`, trimmed.
-  // Quoted hits are still handled above and would be picked up here too, so
-  // we explicitly reject anything that starts with a quote to avoid dupes.
-  const unqRe = /url\(\s*([^'")][^)]*?)\s*\)/gi
-  let u
-  while ((u = unqRe.exec(content))) {
-    const spec = u[1].trim()
-    // Skip external / inline targets — not local file edges (mirrors parseHTML).
-    if (!spec || spec.startsWith('http://') || spec.startsWith('https://')
-        || spec.startsWith('//') || spec.startsWith('data:')
-        || spec.startsWith('#')) continue
-    imports.push({ spec, kind: 'asset' })
-  }
-  // Unquoted `@import url(...)` without quotes inside (e.g. `@import url(theme.css)`)
-  // — the @import-specific pattern above also requires quotes. The bare-url
-  // pass right above already captured the url(theme.css) part, so no extra
-  // pattern is needed here.
+  // url(...) — quoted OR unquoted. The CSS grammar permits a bare token inside
+  // url() (e.g. `url(images/bg.png)`); the previous pattern required quotes, so
+  // every unquoted asset/import reference was silently dropped. Unquoted tokens
+  // may not contain whitespace/quotes/parens unescaped, so `[^'")\s]` is the
+  // correct token shape. Quoted form keeps anything except the closing quote.
+  const urlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^'")\s]+))\s*\)/g
+  let m
+  while ((m = urlRe.exec(content))) push(m[1] ?? m[2] ?? m[3])
+  // @import — three accepted forms:
+  //   @import url(foo.css);   @import url("foo.css");   @import "foo.css";
+  // The url(...) forms are already captured by urlRe above; this catches the
+  // bare-string form `@import "foo.css"` / `@import 'foo.css'`.
+  const importStrRe = /@import\s+['"]([^'"]+)['"]/g
+  while ((m = importStrRe.exec(content))) push(m[1])
+  // SCSS module system — @use / @forward take a quoted module path only.
+  const moduleRe = /@(?:use|forward)\s+['"]([^'"]+)['"]/g
+  while ((m = moduleRe.exec(content))) push(m[1])
   return { imports }
 }
 
@@ -1534,14 +1558,19 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
     return resolvePythonRelative(fromAbsPath, spec, rootAbs, validIds)
   }
 
-  // Python dotted module (a.b.c) → search from the import root. Try flat
-  // layout (package at repo root) AND src-layout (`src/<pkg>/`), which is the
-  // modern standard and would otherwise be missed. (Only these two known
-  // layouts — a broad suffix match would create false edges for stdlib/3rd-
-  // party imports that happen to share an internal filename.)
+  // Python dotted module (a.b.c) → search from the import root. Real projects
+  // place the top-level package under varied roots — repo root (flat), `src/`
+  // (modern standard), or an app/service dir like `backend/` or a monorepo
+  // package dir. Rather than hard-code a fixed prefix list (which missed every
+  // non-root, non-src layout), we discover the set of import roots from the
+  // project's OWN package anchors (`<pkg>/__init__.py`) and only resolve under
+  // those — so stdlib/3rd-party imports that merely share an internal filename
+  // still resolve to nothing (no false edges), while `app.db` inside
+  // `backend/app/` correctly maps to `backend/app/db.py`.
   if ((fromExt === 'py' || fromExt === 'ipynb') && !spec.startsWith('.') && !spec.startsWith('/')) {
     const subPath = spec.replace(/\./g, '/')
-    for (const pfx of ['', 'src/']) {
+    const top = spec.split('.')[0]
+    for (const pfx of pythonImportRoots(rootAbs, validIds, top)) {
       for (const tail of [subPath + '.py', subPath + '/__init__.py']) {
         if (validIds.has(pfx + tail)) return pfx + tail
       }
@@ -1917,6 +1946,43 @@ function tryResolve(basePath, rootAbs, validIds) {
   return null
 }
 
+// Discover Python import roots: directory prefixes (relative to scanRoot, each
+// '' or ending in '/') under which a top-level package/module is importable.
+// A prefix P qualifies for top-level name `top` when the repo itself anchors it:
+//   - P + top/__init__.py   (regular package)   OR
+//   - P + top.py            (single-module package)
+// We derive these from the file set so any layout works (root, src/, backend/,
+// services/api/, monorepo package dirs) WITHOUT matching stdlib/3rd-party
+// imports — those have no in-repo anchor, so they yield no root and resolve to
+// null. Per-(root) cache keyed by top-level name; results are tiny.
+const _pyRootsCache = new Map()  // rootAbs → Map<top, string[] prefixes>
+function pythonImportRoots(rootAbs, validIds, top) {
+  let byTop = _pyRootsCache.get(rootAbs)
+  if (!byTop) { byTop = new Map(); _pyRootsCache.set(rootAbs, byTop) }
+  let roots = byTop.get(top)
+  if (roots) return roots
+  const set = new Set()
+  const initSuffix = '/' + top + '/__init__.py'
+  const modSuffix = '/' + top + '.py'
+  for (const id of validIds) {
+    // Package anchor: `…/<top>/__init__.py` → prefix is everything before `<top>/`.
+    if (id === top + '/__init__.py') set.add('')
+    else if (id.endsWith(initSuffix)) set.add(id.slice(0, id.length - initSuffix.length) + '/')
+    // Single-module anchor: `…/<top>.py` → prefix is everything before `<top>.py`.
+    else if (id === top + '.py') set.add('')
+    else if (id.endsWith(modSuffix)) set.add(id.slice(0, id.length - modSuffix.length) + '/')
+  }
+  // Always include the two conventional roots as a fallback so behaviour is a
+  // strict superset of the old (root + src/) logic even when no anchor is found
+  // (e.g. namespace packages without __init__.py).
+  set.add(''); set.add('src/')
+  // Prefer the most specific (longest) prefix first to avoid a shallower root
+  // accidentally shadowing a nested package of the same top-level name.
+  roots = [...set].sort((a, b) => b.length - a.length)
+  byTop.set(top, roots)
+  return roots
+}
+
 function resolvePythonRelative(fromAbsPath, spec, rootAbs, validIds) {
   // spec like ".module", "..pkg.sub", "."
   const dots = spec.match(/^\.+/)[0].length
@@ -2218,7 +2284,7 @@ function loadCargoWorkspace(rootAbs, validIds) {
 // opened leaks its cache entry. Pass a root to clear just that project, or
 // nothing to clear everything.
 export function clearParserCaches(rootAbs) {
-  const caches = [_tsconfigCache, _csNsCache, _composerCache, _pubspecCache, _goModCache, _goModsCache, _cargoCache, _jsWsCache]
+  const caches = [_tsconfigCache, _csNsCache, _composerCache, _pubspecCache, _goModCache, _goModsCache, _cargoCache, _jsWsCache, _pyRootsCache]
   if (rootAbs == null) { for (const c of caches) c.clear(); return }
   for (const c of caches) c.delete(rootAbs)
 }

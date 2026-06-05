@@ -374,6 +374,10 @@ export class Scanner extends EventEmitter {
         if (this._initialDrain) { try { await this._initialDrain } catch {} }
         while (this._initialQueue && this._initialQueue.length) {
           const p = this._initialQueue.shift()
+          // Log parse failures (consistent with the batched drain in
+          // _ensureInitialDrain) instead of swallowing them — a silently
+          // dropped file here is an invisible hole in the graph, which is
+          // exactly the kind of gap that erodes trust in the tool's output.
           try { const f = this.parseOne(p); if (f) this.files.set(f.id, f) }
           catch (e) { process.stderr.write(`[scanner] parse ${p}: ${e && e.message}\n`) }
         }

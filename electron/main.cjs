@@ -2057,24 +2057,54 @@ async function handleControlRequest(req, res) {
             const cacheDir = path.join(os.homedir(), '.codesynapt', 'symbol-cache')
             const cacheKey = require('crypto').createHash('sha1').update(currentRoot || '').digest('hex')
             const cachePath = path.join(cacheDir, cacheKey + '.json')
+            // Fingerprint the WHOLE file set's identity — not just the
+            // newest mtime. Newest-mtime alone is blind to deletes and
+            // renames: removing or renaming a file leaves every remaining
+            // file's mtime unchanged, so a newest-mtime check considers
+            // the stale cache (which still lists the deleted file's
+            // symbols, or lacks the renamed file) valid. Hashing sorted
+            // id+mtime+size of every current file makes add/delete/rename/
+            // edit all flip the fingerprint and force a rebuild.
+            const fileSetFingerprint = () => {
+              const h = require('crypto').createHash('sha1')
+              const ids = [...scanner.files.values()].filter((f) => f.absPath && f.ext)
+              ids.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+              for (const f of ids) {
+                let mt = 0, sz = 0
+                try { const st = fs.statSync(f.absPath); mt = st.mtimeMs; sz = st.size } catch {}
+                h.update(f.id); h.update('\0'); h.update(String(mt)); h.update('\0'); h.update(String(sz)); h.update('\n')
+              }
+              return h.digest('hex')
+            }
             if (cacheEnabled) {
               try {
                 if (fs.existsSync(cachePath)) {
                   const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8'))
-                  // Newest mtime in the file set must be older than the
-                  // cache mtime for it to be valid.
+                  // Two independent invalidation guards, both required:
+                  //
+                  // (1) Newest-mtime sanity check (pass-1): the cache file's
+                  //     own mtime must be at least as new as the newest source
+                  //     file. Cheap freshness floor.
+                  // (2) File-set fingerprint (pass-2, stronger): the current
+                  //     file set's identity must exactly match the one stored
+                  //     when the cache was written. mtime alone is blind to
+                  //     deletions/renames (removing/renaming a file never
+                  //     lowers a surviving file's mtime, so a newest-mtime
+                  //     check considers a stale cache valid). The fingerprint
+                  //     hashes sorted id+mtime+size of every current file, so
+                  //     add/delete/rename/edit all flip it and force a rebuild.
+                  //     Legacy caches without a fingerprint are treated as
+                  //     stale.
                   let newest = 0
                   for (const f of scanner.files.values()) {
                     try { const t = fs.statSync(f.absPath).mtimeMs; if (t > newest) newest = t } catch {}
                   }
                   const cacheMtime = fs.statSync(cachePath).mtimeMs
-                  // mtime alone can't detect deletions/renames: removing or
-                  // renaming a file never lowers a surviving file's mtime, so
-                  // `cacheMtime >= newest` stayed true and the cache served
-                  // symbols for files that no longer exist. Add a file-set
-                  // fingerprint (sorted id+mtime hash) that must also match.
-                  const fileSetHash = symbolFileSetHash(scanner)
-                  if (newest > 0 && cacheMtime >= newest && cached.fileSetHash === fileSetHash) {
+                  const fingerprint = fileSetFingerprint()
+                  if (
+                    newest > 0 && cacheMtime >= newest &&
+                    cached.fingerprint && cached.fingerprint === fingerprint
+                  ) {
                     const g = new SymbolGraph()
                     for (const n of cached.nodes) g.addNode(n)
                     for (const e of cached.edges) g.addEdge(e)
@@ -2253,10 +2283,15 @@ async function handleControlRequest(req, res) {
                   edges: g.edges,
                   fileCount: g.fileCount,
                   builtAt: g.builtAt,
-                  // Fingerprint of the exact file set this graph was built
+                  // Identity of the exact file set this graph was built
                   // from. Read-side validation rejects the cache if the live
-                  // file set differs (deletion/rename/addition), which the
-                  // mtime check alone cannot detect.
+                  // file set differs (deletion/rename/addition/edit), which
+                  // the mtime check alone cannot detect.
+                  //   fingerprint (pass-2): id+mtime+size hash — the value the
+                  //     load path actually checks.
+                  //   fileSetHash (pass-1): id+mtime hash — kept for
+                  //     back-compat / diagnostics.
+                  fingerprint: fileSetFingerprint(),
                   fileSetHash: symbolFileSetHash(scanner),
                 }
                 fs.writeFileSync(cachePath, JSON.stringify(payload))
@@ -2959,57 +2994,79 @@ app.whenReady().then(() => {
     if (!HEADLESS && BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 
-  // Auto-updater (GitHub Releases). Disabled by env var for users who
-  // want zero outbound network calls. Silently no-ops if no published
-  // releases yet (404 from update feed → updater logs and does nothing).
+  // ─── Auto-updater (GitHub Releases) — OPT-IN, offline by default ──
+  // HARD RULE: the app is offline by design (AGENTS.md / CLAUDE.md —
+  // "No network calls in the app itself"). So the updater makes ZERO
+  // outbound calls unless the user explicitly opts in with
+  // CS_ENABLE_UPDATER=1. Default (env unset) = no GitHub check ever.
   //
-  // Full flow (previously detect-only, which left an available update
-  // permanently un-installable):
-  //   1. checkForUpdates() ~10s after boot.
-  //   2. on 'update-available' → notify renderer (toast: download / dismiss).
-  //   3. renderer calls updater:download → autoUpdater.downloadUpdate();
-  //      download-progress is streamed back so the toast can show %.
-  //   4. on 'update-downloaded' → notify renderer (toast: restart / later).
-  //   5. renderer calls updater:install → autoUpdater.quitAndInstall().
-  // autoInstallOnAppQuit is left ON (electron-updater default) so a
-  // downloaded update that the user dismissed still applies on next quit.
-  if (process.env.CS_DISABLE_UPDATER !== '1') {
-    try {
-      const { autoUpdater } = require('electron-updater')
-      _autoUpdater = autoUpdater
-      autoUpdater.autoDownload = false   // ask user before downloading
-      autoUpdater.on('error', (e) => {
-        log.error('updater error', { message: e.message })
-        mainWindow?.webContents.send('updater:error', { message: e.message })
-      })
-      autoUpdater.on('update-available', (info) => {
-        log.info('update available', { version: info.version })
-        _updateAvailableInfo = info
-        // Notify renderer; renderer shows a toast with "download / dismiss".
-        mainWindow?.webContents.send('updater:available', { version: info.version, releaseNotes: info.releaseNotes })
-      })
-      autoUpdater.on('update-not-available', () => {
-        _updateAvailableInfo = null
-      })
-      autoUpdater.on('download-progress', (p) => {
-        // p: { percent, bytesPerSecond, transferred, total }
-        mainWindow?.webContents.send('updater:progress', {
-          percent: p.percent, transferred: p.transferred, total: p.total,
-          bytesPerSecond: p.bytesPerSecond,
-        })
-      })
-      autoUpdater.on('update-downloaded', (info) => {
-        _updateDownloaded = true
-        mainWindow?.webContents.send('updater:downloaded', { version: info.version })
-      })
-      // Check ~10s after boot so the scanner gets the network priority.
-      setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}) }, 10_000)
-    } catch (e) {
-      // electron-updater is optional at runtime; CLI/MCP-only installs skip it
-      log.warn('updater not loaded', { error: e.message })
-    }
-  }
+  // When opted in, it is end-to-end: it finds the release, DOWNLOADS it,
+  // shows a native OS notification, and installs on the next quit. The
+  // renderer toast can also drive an explicit download/install via the
+  // updater:* IPC channels declared above (which read the
+  // _updateAvailableInfo / _updateDownloaded state this wiring sets).
+  setupAutoUpdater()
 })
+
+// `_autoUpdater`, `_updateAvailableInfo`, `_updateDownloaded` and the
+// updater:* control IPC handlers are declared once near the top of the
+// file (renderer-driven download/install/check). This function only wires
+// the electron-updater event lifecycle into that shared state.
+function setupAutoUpdater() {
+  // Opt-in only (pass-2 hardening). Anything other than an explicit '1'
+  // keeps the app fully offline — no require(), no feed resolution, no
+  // network. This satisfies the HARD RULE "No network calls in the app
+  // itself"; the previous CS_DISABLE_UPDATER (on-by-default) gate is
+  // intentionally superseded by this opt-in gate.
+  if (process.env.CS_ENABLE_UPDATER !== '1') {
+    log.info('auto-updater disabled (offline by design); set CS_ENABLE_UPDATER=1 to opt in')
+    return
+  }
+  try {
+    const { autoUpdater } = require('electron-updater')
+    _autoUpdater = autoUpdater
+    // Download automatically once an update is found, then notify +
+    // install on quit. This is the "actually works end-to-end" path.
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.on('error', (e) => {
+      log.error('updater error', { message: e.message })
+      mainWindow?.webContents.send('updater:error', { message: e.message })
+    })
+    autoUpdater.on('update-available', (info) => {
+      log.info('update available', { version: info.version })
+      _updateAvailableInfo = info
+      // Notify renderer; renderer shows a toast with "download / dismiss".
+      mainWindow?.webContents.send('updater:available', { version: info.version, releaseNotes: info.releaseNotes })
+    })
+    autoUpdater.on('update-not-available', () => {
+      _updateAvailableInfo = null
+    })
+    autoUpdater.on('download-progress', (p) => {
+      // p: { percent, bytesPerSecond, transferred, total }
+      mainWindow?.webContents.send('updater:progress', {
+        percent: p.percent, transferred: p.transferred, total: p.total,
+        bytesPerSecond: p.bytesPerSecond,
+      })
+    })
+    autoUpdater.on('update-downloaded', (info) => {
+      log.info('update downloaded', { version: info.version })
+      _updateDownloaded = true
+      mainWindow?.webContents.send('updater:downloaded', { version: info.version })
+    })
+    // Check ~10s after boot so the scanner gets network priority.
+    // checkForUpdatesAndNotify downloads + shows a native notification
+    // and arms install-on-quit — i.e. the full update lifecycle. The
+    // renderer-driven updater:check / updater:download / updater:install
+    // handlers (declared near the top of the file) drive the explicit
+    // toast-based path on top of this.
+    setTimeout(() => { autoUpdater.checkForUpdatesAndNotify().catch((e) => log.warn('update check failed', { error: e.message })) }, 10_000)
+  } catch (e) {
+    // Should not happen now that electron-updater is a production
+    // dependency, but keep CLI/MCP-only installs resilient.
+    log.warn('updater not loaded', { error: e.message })
+  }
+}
 
 app.on('window-all-closed', () => {
   // Headless mode never opens a window, so this would fire as soon
@@ -3035,9 +3092,12 @@ app.on('web-contents-created', (_e, contents) => {
   // NOT file:// — file:// was abandoned during migration because ESM +
   // importmap are blocked there by CORS. The old guard hard-coded
   // 'file://', so any legitimate same-origin app:// navigation would have
-  // been wrongly preventDefault()'d. Allow app:// (and file:// as a
-  // belt-and-braces fallback for any dev/unpackaged run); block the rest,
-  // forwarding external http(s) links to the user's browser.
+  // been wrongly preventDefault()'d. The allow-list must include app:// or
+  // every in-app reload / internal navigation gets preventDefault()-ed and
+  // the app appears to hang; file:// stays allowed as a belt-and-braces
+  // fallback for dev/unpackaged/headless runs. CSP still blocks remote
+  // loads — this is one more layer. Block the rest, forwarding external
+  // http(s) links to the user's browser.
   contents.on('will-navigate', (event, url) => {
     if (!url.startsWith('app://') && !url.startsWith('file://')) {
       event.preventDefault()

@@ -28,23 +28,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Software Bill of Materials (CycloneDX). Helps enterprise consumers
-      # track every dependency + license + known-CVE status. Generated once
-      # per release (Linux runner only — output is platform-independent).
-      - name: Generate SBOM (CycloneDX)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
-        shell: bash
-        run: |
-          npm sbom --sbom-format=cyclonedx --sbom-type=application > sbom.cyclonedx.json
-          echo "=== SBOM size: $(wc -c < sbom.cyclonedx.json) bytes ==="
-          # Move into dist/ so the release-attach step picks it up.
-          # dist/ is gitignored and not created until electron-builder
-          # runs in the later "Build app" step, so create it first —
-          # otherwise the mv fails ("No such file or directory") and,
-          # under set -eo pipefail, aborts the whole Linux release job.
-          mkdir -p dist
-          mv sbom.cyclonedx.json dist/sbom.cyclonedx.json
-
       - name: Build app
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -57,6 +40,27 @@ jobs:
             npm run dist:linux
           fi
         shell: bash
+
+      # Software Bill of Materials (CycloneDX). Helps enterprise consumers
+      # track every dependency + license + known-CVE status. Generated once
+      # per release (Linux runner only — output is platform-independent).
+      #
+      # Runs AFTER "Build app" so that dist/ already exists: electron-builder
+      # creates dist/ during the build, and this step moves the SBOM into it
+      # for the release-attach step. (Previously this ran before the build,
+      # so `mv … dist/…` failed with "No such file or directory" and the
+      # Linux release job errored out, dropping the SBOM from the release.)
+      # The `mkdir -p dist` guard makes the move order-independent and robust
+      # even if a future build target leaves dist/ absent.
+      - name: Generate SBOM (CycloneDX)
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
+        shell: bash
+        run: |
+          npm sbom --sbom-format=cyclonedx --sbom-type=application > sbom.cyclonedx.json
+          echo "=== SBOM size: $(wc -c < sbom.cyclonedx.json) bytes ==="
+          # Move into dist/ so the release-attach step picks it up.
+          mkdir -p dist
+          mv sbom.cyclonedx.json dist/sbom.cyclonedx.json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

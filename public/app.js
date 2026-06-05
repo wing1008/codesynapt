@@ -295,6 +295,7 @@ const T = {
     // Changes panel
     'changes.empty':             '아직 수정된 파일 없음.<br>AI(Claude Code/Cursor)나 에디터로 파일을 저장하면 여기 표시됩니다.',
     'changes.requires_electron': 'Changes 패널은 데스크탑 앱에서만 사용 가능',
+    'symbols.requires_electron': '심볼(함수) 레이어는 데스크탑 앱에서만 사용 가능',
     // Tour / Time-lapse
     'timelapse.requires_electron':  '타임랩스는 데스크탑 앱에서만 사용 가능',
     // Hints bar
@@ -540,6 +541,7 @@ const T = {
     'editor.diff.skip_next':    'Save without prompting (this session)',
     'changes.empty':             'No files modified yet.<br>Edits by AI (Claude Code / Cursor) or your editor will appear here.',
     'changes.requires_electron': 'Changes panel requires the desktop app',
+    'symbols.requires_electron': 'Symbol (function) layer requires the desktop app',
     'timelapse.requires_electron':  'Time-lapse requires the desktop app',
     'hints.drag':    'drag',
     'hints.orbit':   'orbit',
@@ -6890,6 +6892,17 @@ function refreshThemePicker() {
 // + state.symbolCalls; the render loop then draws them as Points + call edges.
 async function buildSymbolGraph() {
   const cell = document.getElementById('sb_symbols')
+  // The symbol graph is built on demand by the headless/Electron backend
+  // (GET /symbol/graph on the control server). The plain web dev server
+  // (server.js) is static + WebSocket only and has no such endpoint, so in
+  // web mode this control would silently toggle on an empty layer — or, worse,
+  // fetch an unrelated project's symbols from whatever cs-serve happens to be
+  // on 127.0.0.1:7707. Guard it like every other backend-dependent control
+  // (changes / packages / legacy / trace / timelapse) instead of half-running.
+  if (!isElectron) {
+    toast(t('symbols.requires_electron'))
+    return
+  }
   state.showSymbols = !state.showSymbols
   symPoints.visible = state.showSymbols
   symEdgeLines.visible = state.showSymbols

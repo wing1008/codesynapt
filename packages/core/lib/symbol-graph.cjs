@@ -77,9 +77,22 @@ class SymbolGraph {
     this.edges = []             // SymbolEdge[]
     this.byFile = new Map()     // fileId → Set<symbolId>
     this.byName = new Map()     // lowercased name → Set<symbolId>
-    // Adjacency for fast callers/callees lookup.
+    // Adjacency for fast callers/callees lookup. Holds EVERY edge kind
+    // (call / extends / implements / ref / type-ref / jsx-ref) — used by
+    // callersOf/calleesOf and the structural blast radius.
     this.outAdj = new Map()     // symbolId → Set<targetId>
     this.inAdj  = new Map()     // symbolId → Set<sourceId>
+    // Call-ONLY adjacency. Reachability (dead-code detection) must walk the
+    // *call* graph, not structural edges: a `type-ref`/`extends`/`ref` to a
+    // symbol does not mean it is invoked, so it must not keep dead code alive.
+    // Kept as a separate index so callersOf/calleesOf semantics are unchanged.
+    this.callOut = new Map()    // symbolId → Set<calleeId>   (kind === 'call')
+    this.callIn  = new Map()    // symbolId → Set<callerId>   (kind === 'call')
+    // Dedup guard for the raw edge log: (source␞target␞kind) seen-set so a
+    // symbol called from two sites (foo() on line 5 AND line 9) yields ONE
+    // edge, matching the deduped adjacency. Without this edgeCount over-counts
+    // call sites while the Set-based adjacency collapses them — divergence.
+    this._edgeKeys = new Set()
     // File-mode imports — fed in from the host (scanner.edges). Lets
     // call resolution disambiguate same-name symbols across files
     // by preferring targets in files the caller actually imports.
@@ -110,6 +123,9 @@ class SymbolGraph {
     this.byName.clear()
     this.outAdj.clear()
     this.inAdj.clear()
+    this.callOut.clear()
+    this.callIn.clear()
+    this._edgeKeys.clear()
     this.fileImports.clear()
     this.builtAt = 0
     this.fileCount = 0
@@ -213,7 +229,28 @@ class SymbolGraph {
     }
   }
 
+  // Record one symbol→symbol relationship. Returns true if the edge was
+  // newly added, false if it was a duplicate or referenced an unknown symbol.
+  //
+  // Integrity contract (relied on by stats/blast/reachability):
+  //   • Endpoint guard — both source and target must be real nodes. A
+  //     synthetic/foreign id (e.g. a `route:GET /x` handler the parser emitted
+  //     before its node existed, or a stale id) must NOT leak into adjacency;
+  //     otherwise blast counts a phantom (byDepth inflates past totalImpacted)
+  //     and reachability walks into nowhere.
+  //   • Dedup — the same (source, target, kind) triple is recorded once. The
+  //     adjacency Sets already collapse duplicate pairs; we collapse the raw
+  //     `edges` log to match so edgeCount === unique adjacency relationships
+  //     (a function called from two lines is ONE call edge, not two).
   addEdge(edge) {
+    const { source, target, kind } = edge
+    // Endpoint guard: never index an edge that dangles off a non-existent
+    // symbol. (build() already pre-filters, but addEdge is public API and the
+    // guard is what makes the phantom-id class of bug structurally impossible.)
+    if (!this.nodes.has(source) || !this.nodes.has(target)) return false
+    const key = `${source}␞${target}␞${kind}`
+    if (this._edgeKeys.has(key)) return false
+    this._edgeKeys.add(key)
     this.edges.push(edge)
     // Caller/callee adjacency is the CALL graph only. extends / implements /
     // ref / jsx-ref / type-ref are real relationships kept in `this.edges`
@@ -225,12 +262,29 @@ class SymbolGraph {
     // edges (source is a route string, not a symbol) — must not inflate a
     // handler's caller count past what callersOf() (which drops non-nodes)
     // can return. So: only call edges between two real nodes build adjacency.
-    if (edge.kind !== 'call') return
-    if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target)) return
-    if (!this.outAdj.has(edge.source)) this.outAdj.set(edge.source, new Set())
-    this.outAdj.get(edge.source).add(edge.target)
-    if (!this.inAdj.has(edge.target)) this.inAdj.set(edge.target, new Set())
-    this.inAdj.get(edge.target).add(edge.source)
+    //
+    // A structural (non-call) edge is still a real, newly-recorded
+    // relationship (it lives in `this.edges`/`_edgeKeys` and is surfaced via
+    // byEdgeKind) — we just don't let it inflate the call adjacency. Per the
+    // method contract we report it as newly added (return true) but build no
+    // adjacency for it.
+    if (kind !== 'call') return true
+    if (!this.nodes.has(source) || !this.nodes.has(target)) return true
+    // inAdj/outAdj back callersOf()/calleesOf() (call graph only, per above).
+    if (!this.outAdj.has(source)) this.outAdj.set(source, new Set())
+    this.outAdj.get(source).add(target)
+    if (!this.inAdj.has(target)) this.inAdj.set(target, new Set())
+    this.inAdj.get(target).add(source)
+    // callOut/callIn are the dedicated call-only adjacency feeding
+    // reachability (call graph, not structural). With the kind === 'call'
+    // guard above these now mirror inAdj/outAdj, but they are kept as a
+    // distinct pair so reachability stays correct even if inAdj/outAdj are
+    // ever widened to structural edges again.
+    if (!this.callOut.has(source)) this.callOut.set(source, new Set())
+    this.callOut.get(source).add(target)
+    if (!this.callIn.has(target)) this.callIn.set(target, new Set())
+    this.callIn.get(target).add(source)
+    return true
   }
 
   // Index every symbol as a 384-d MiniLM embedding so /symbol/explore
@@ -302,9 +356,18 @@ class SymbolGraph {
         if (isEntry(node)) { reachable.add(node.id); queue.push(node.id) }
       } catch {}
     }
-    while (queue.length) {
-      const id = queue.shift()
-      const callees = this.outAdj.get(id)
+    // BFS over the CALL graph only. A symbol reached solely by a structural
+    // edge (extends/implements/ref/type-ref/jsx-ref) is referenced, not
+    // *invoked* — counting those as reachable would mask genuinely dead code
+    // (the whole point of this pass). callOut is the call-only adjacency.
+    //
+    // Use a head pointer instead of Array.shift(): shift() is O(n) (it
+    // re-indexes the whole array), so the old loop was O(V²) on a long call
+    // chain. Advancing `head` is O(1); we never mutate the array length until
+    // the end, so the walk is O(V+E).
+    for (let head = 0; head < queue.length; head++) {
+      const id = queue[head]
+      const callees = this.callOut.get(id)
       if (!callees) continue
       for (const c of callees) {
         if (!reachable.has(c)) { reachable.add(c); queue.push(c) }

@@ -5,9 +5,15 @@
 //
 // Returns: { kind, packages: [{ name, root, relRoot, manifest, kind, language }], rootIsPackage }
 //   kind         : 'pnpm' | 'npm-workspaces' | 'yarn-workspaces' | 'lerna' |
-//                  'turbo' | 'nx' | 'rush' | 'python-uv' | 'multi-package' | 'single' | 'none'
+//                  'turbo' | 'nx' | 'rush' | 'python-uv' | 'python-poetry' |
+//                  'python-pdm' | 'python-hatch' | 'python-pep621' |
+//                  'python-setuptools' | 'python-multi' | 'multi-package' |
+//                  'single' | 'none'
 //   packages     : [] when 'single' or 'none'; otherwise one entry per package
+//                  (a 'single' result carries exactly one package entry — for
+//                  both JS and Python single-package projects, symmetrically)
 //   rootIsPackage: true when the scan root itself is also a publishable package
+//                  (a JS package.json with a name, or a Python project manifest)
 
 import fs from 'fs'
 import path from 'path'
@@ -123,11 +129,13 @@ function readJsonSafe(p) {
 // Find package.json / pyproject.toml files via a bounded BFS. Stops at
 // node_modules, .git, etc. Used as a fallback when no workspace marker
 // is present.
+const PKG_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out',
+  '.next', '.nuxt', '.turbo', '.vercel', 'venv', '.venv', '__pycache__',
+  '.cache', '.parcel-cache', 'target', '.codesynapt', '.filegraph3d', 'coverage'])
+
 function findManifests(root, manifestNames, maxDepth = MAX_DEPTH) {
   const found = []
-  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'out',
-    '.next', '.nuxt', '.turbo', '.vercel', 'venv', '.venv', '__pycache__',
-    '.cache', '.parcel-cache', 'target', '.codesynapt', '.filegraph3d', 'coverage'])
+  const skip = PKG_SKIP_DIRS
   const walk = (dir, depth) => {
     if (depth > maxDepth) return
     let entries
@@ -184,26 +192,93 @@ function relativePosix(root, abs) {
   return r === '' ? '.' : r
 }
 
-// Classify a Python project's tooling from its root manifest so the
-// reported `kind` isn't a hardcoded 'python-uv' lie. Recognizes uv,
-// poetry, pdm, hatch, setuptools (PEP 621 / setup.py). Falls back to a
-// generic 'python' label when nothing specific is declared.
-function detectPythonKind(root) {
-  const pp = path.join(root, 'pyproject.toml')
-  let text = ''
-  try { text = fs.readFileSync(pp, 'utf8') } catch {}
-  if (text) {
-    if (/^\s*\[tool\.uv\b/m.test(text) || /^\s*\[tool\.uv\.workspace\]/m.test(text)) return 'python-uv'
-    if (/^\s*\[tool\.poetry\b/m.test(text)) return 'python-poetry'
-    if (/^\s*\[tool\.pdm\b/m.test(text)) return 'python-pdm'
-    if (/^\s*\[tool\.hatch\b/m.test(text)) return 'python-hatch'
-    // PEP 621 [project] table without a specific tool → setuptools/generic
-    if (/^\s*\[project\]/m.test(text)) return 'python'
-    return 'python'
+// ── Python build-tool classification ──────────────────────────────────
+// The original code hardcoded every Python multi-package repo to
+// 'python-uv', which is wrong for the overwhelming majority of Python
+// projects (Poetry, PDM, Hatch, plain setuptools, bare PEP 621). We
+// classify by reading the actual evidence: lockfiles at the repo root
+// and the build-backend / tool tables declared inside each pyproject.toml.
+
+// Specificity order: a more specific signal wins. uv/poetry/pdm/hatch
+// are concrete tools; pep621 is the generic standardized metadata; a
+// lone setup.py is legacy setuptools; otherwise 'python-multi' for a
+// bespoke collection we can't pin to a tool.
+const PY_TOOL_RANK = {
+  'python-uv': 6,
+  'python-poetry': 6,
+  'python-pdm': 6,
+  'python-hatch': 5,
+  'python-setuptools': 4,
+  'python-pep621': 3,
+  'python-multi': 2,
+}
+
+function moreSpecificPyKind(a, b) {
+  if (!a) return b
+  if (!b) return a
+  return (PY_TOOL_RANK[a] || 0) >= (PY_TOOL_RANK[b] || 0) ? a : b
+}
+
+// Inspect a single pyproject.toml's text for tool-specific tables and the
+// build backend. Returns a kind string or null if nothing recognizable.
+function classifyPyproject(text) {
+  if (!text) return null
+  // Tool-specific tables are the strongest signal.
+  if (/^\s*\[tool\.uv(\.|\])/m.test(text)) return 'python-uv'
+  if (/^\s*\[tool\.poetry(\.|\])/m.test(text)) return 'python-poetry'
+  if (/^\s*\[tool\.pdm(\.|\])/m.test(text)) return 'python-pdm'
+  if (/^\s*\[tool\.hatch(\.|\])/m.test(text)) return 'python-hatch'
+
+  // Otherwise infer from the declared build backend.
+  const bb = text.match(/^\s*build-backend\s*=\s*["']([^"']+)["']/m)
+  if (bb) {
+    const backend = bb[1].toLowerCase()
+    if (backend.includes('hatchling')) return 'python-hatch'
+    if (backend.includes('poetry')) return 'python-poetry'
+    if (backend.includes('pdm')) return 'python-pdm'
+    if (backend.includes('uv')) return 'python-uv'
+    if (backend.includes('setuptools')) return 'python-setuptools'
+    if (backend.includes('flit')) return 'python-pep621'
   }
-  // No pyproject.toml → setup.py-based project
-  if (fs.existsSync(path.join(root, 'setup.py'))) return 'python'
-  return 'python'
+  // A bare PEP 621 [project] table with no recognizable backend/tool.
+  if (/^\s*\[project\]/m.test(text)) return 'python-pep621'
+  return null
+}
+
+// Determine the Python ecosystem kind for a set of package dirs, using
+// root-level lockfiles plus each package's manifest. `manifests` is the
+// list from findManifests ({ dir, manifest }).
+function classifyPythonKind(root, manifests, names) {
+  // Root lockfiles are an unambiguous, repo-wide signal.
+  let kind = null
+  if (names) {
+    if (names.has('uv.lock')) kind = moreSpecificPyKind(kind, 'python-uv')
+    if (names.has('poetry.lock')) kind = moreSpecificPyKind(kind, 'python-poetry')
+    if (names.has('pdm.lock')) kind = moreSpecificPyKind(kind, 'python-pdm')
+    // A root-level pyproject.toml (the umbrella in an umbrella+members
+    // layout) often carries the tool table that pins the whole repo.
+    if (names.has('pyproject.toml')) {
+      let rootText = ''
+      try { rootText = fs.readFileSync(path.join(root, 'pyproject.toml'), 'utf8') } catch {}
+      const k = classifyPyproject(rootText)
+      if (k) kind = moreSpecificPyKind(kind, k)
+    }
+  }
+  let sawSetupPyOnly = false
+  for (const m of manifests) {
+    if (m.manifest === 'pyproject.toml') {
+      let text = ''
+      try { text = fs.readFileSync(path.join(m.dir, 'pyproject.toml'), 'utf8') } catch {}
+      const k = classifyPyproject(text)
+      if (k) kind = moreSpecificPyKind(kind, k)
+    } else if (m.manifest === 'setup.py') {
+      // Only counts as setuptools if there's no pyproject backing it.
+      if (!fs.existsSync(path.join(m.dir, 'pyproject.toml'))) sawSetupPyOnly = true
+    }
+  }
+  if (!kind && sawSetupPyOnly) kind = 'python-setuptools'
+  // Could not pin a tool from any manifest — still a real Python repo.
+  return kind || 'python-multi'
 }
 
 export function detectMonorepo(root) {
@@ -217,6 +292,14 @@ export function detectMonorepo(root) {
   // pnpm > yarn/npm workspaces > lerna > turbo > nx > rush
   const rootPkgJson = names.has('package.json') ? readJsonSafe(path.join(root, 'package.json')) : null
   if (rootPkgJson?.name) result.rootIsPackage = true
+
+  // A Python project rooted at the scan dir (single-package, mirror of
+  // the JS package.json-at-root case). pyproject.toml is preferred over a
+  // bare setup.py. This makes rootIsPackage and the 'single' result
+  // symmetric across languages instead of only firing for JS.
+  const rootPyManifest = names.has('pyproject.toml') ? 'pyproject.toml'
+    : names.has('setup.py') ? 'setup.py' : null
+  if (rootPyManifest && !rootPkgJson?.name) result.rootIsPackage = true
 
   let kind = 'none'
   let patterns = []
@@ -264,18 +347,40 @@ export function detectMonorepo(root) {
     packageDirs = expandWorkspacePatterns(root, patterns, 'package.json')
   }
 
-  // ⑥ Python pyproject.toml / setup.py packages anywhere below root.
-  // (findManifests now keeps recursing past the root umbrella, so a
-  // root pyproject.toml no longer hides nested Python packages.)
-  const pyManifests = findManifests(root, ['pyproject.toml', 'setup.py'])
+  // ⑥ Python pyproject.toml / setup.py multi-package: detect if multiple
+  // Python manifests exist at depth > 0. The ecosystem kind is derived
+  // from the actual build tool (uv / poetry / pdm / hatch / setuptools /
+  // bare PEP 621), not hardcoded.
+  // findManifests stops descending as soon as it finds a manifest in a
+  // directory (packages are leaves). That means a root-level pyproject.toml
+  // would hide member packages in subdirectories. To find members we must
+  // search each child subtree of root independently rather than root itself
+  // (pass-2 fix), so a root pyproject.toml no longer hides nested members.
+  let pyManifests
+  if (rootPyManifest) {
+    pyManifests = []
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      if (e.name.startsWith('.') || PKG_SKIP_DIRS.has(e.name)) continue
+      const sub = path.join(root, e.name)
+      for (const m of findManifests(sub, ['pyproject.toml', 'setup.py'])) pyManifests.push(m)
+    }
+  } else {
+    pyManifests = findManifests(root, ['pyproject.toml', 'setup.py'])
+  }
   // Exclude root from the python list — it's the umbrella, not a package.
-  const pythonDirs = pyManifests.filter((m) => m.dir !== root).map((m) => m.dir)
+  // `pythonManifests` keeps the { dir, manifest } shape for classification;
+  // `pythonDirs` is the flat dir-string list used by the merge/fallback
+  // branches below.
+  const pythonManifests = pyManifests.filter((m) => m.dir !== root)
+  const pythonDirs = pythonManifests.map((m) => m.dir)
   const rootHasPython = names.has('pyproject.toml') || names.has('setup.py')
 
   if (kind === 'none' && pythonDirs.length >= 2) {
     // A pure-Python monorepo with no JS workspace marker. Report the
-    // actual tooling (poetry/uv/pdm/…) rather than a hardcoded label.
-    kind = detectPythonKind(root)
+    // actual tooling (poetry/uv/pdm/hatch/setuptools/…) by reading the
+    // real build-tool evidence rather than a hardcoded label.
+    kind = classifyPythonKind(root, pythonManifests, names)
     packageDirs = pythonDirs.slice()
   } else if (kind !== 'none' && pythonDirs.length > 0) {
     // Mixed-language monorepo: a JS workspace was detected first, but
@@ -307,20 +412,30 @@ export function detectMonorepo(root) {
     }
   }
 
-  // No JS/Python workspace signal at all
+  // No multi-package signal — check for a single-package project. This
+  // path is language-symmetric: a lone JS package (package.json at root)
+  // and a lone Python package (pyproject.toml / setup.py at root, or a
+  // single nested Python manifest) both yield kind:'single' with exactly
+  // one package entry. Previously only JS produced a 'single' result;
+  // Python fell through to 'none' with an empty packages list.
   if (kind === 'none') {
-    if (result.rootIsPackage) {
+    // ⓐ JS package.json at root takes precedence (matches historical
+    // behavior and the rootIsPackage signal).
+    if (rootPkgJson?.name) {
       result.kind = 'single'
       result.packages = [{
-        name: rootPkgJson?.name || path.basename(root),
+        name: rootPkgJson.name || path.basename(root),
         root, relRoot: '.', manifest: 'package.json',
         kind: 'single', language: 'js',
       }]
-    } else if (rootHasPython) {
-      // Symmetric with the single-JS case: a lone Python project (root
-      // pyproject.toml / setup.py with a name) should also yield one
-      // package entry, not kind='none'/n=0.
-      const manifestName = names.has('pyproject.toml') ? 'pyproject.toml' : 'setup.py'
+      return result
+    }
+    // ⓑ Python project rooted at the scan dir. Symmetric with the
+    // single-JS case: a lone Python project (root pyproject.toml /
+    // setup.py) yields one package entry, not kind='none'/n=0.
+    if (rootPyManifest || rootHasPython) {
+      const manifestName = rootPyManifest
+        || (names.has('pyproject.toml') ? 'pyproject.toml' : 'setup.py')
       const manifestPath = path.join(root, manifestName)
       result.kind = 'single'
       result.rootIsPackage = true
@@ -329,6 +444,21 @@ export function detectMonorepo(root) {
         root, relRoot: '.', manifest: manifestName,
         kind: 'single', language: 'python',
       }]
+      return result
+    }
+    // ⓒ Exactly one nested Python manifest (no root manifest, only one
+    // package) — still a single Python project, just not at the root.
+    if (pythonManifests.length === 1) {
+      const dir = pythonManifests[0].dir
+      const manifestName = pythonManifests[0].manifest
+      const manifestPath = path.join(dir, manifestName)
+      result.kind = 'single'
+      result.packages = [{
+        name: packageNameFromManifest(manifestPath, manifestName, path.basename(dir)),
+        root: dir, relRoot: relativePosix(root, dir),
+        manifest: manifestName, kind: 'single', language: 'python',
+      }]
+      return result
     }
     return result
   }
@@ -349,13 +479,23 @@ export function detectMonorepo(root) {
     })
   }
   // Optionally include root if it's also a publishable package (npm
-  // workspaces with a root package).
+  // workspaces with a root package, or a Python repo whose root carries
+  // its own pyproject.toml / setup.py alongside member packages).
   if (result.rootIsPackage && !packages.some((p) => p.root === root)) {
-    packages.unshift({
-      name: rootPkgJson?.name || path.basename(root),
-      root, relRoot: '.', manifest: 'package.json',
-      kind, language: 'js',
-    })
+    if (rootPkgJson?.name) {
+      packages.unshift({
+        name: rootPkgJson.name || path.basename(root),
+        root, relRoot: '.', manifest: 'package.json',
+        kind, language: 'js',
+      })
+    } else if (rootPyManifest) {
+      const manifestPath = path.join(root, rootPyManifest)
+      packages.unshift({
+        name: packageNameFromManifest(manifestPath, rootPyManifest, path.basename(root)),
+        root, relRoot: '.', manifest: rootPyManifest,
+        kind, language: 'python',
+      })
+    }
   }
 
   // Disambiguate duplicate package names. Two distinct directories can

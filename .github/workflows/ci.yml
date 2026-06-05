@@ -89,6 +89,46 @@ jobs:
       - name: Run vitest suite
         run: npx vitest run
 
+  # ─── Blast-radius PR comment ────────────────────────────
+  # Wires in the composite Action at .github/actions/blast-radius,
+  # which was previously shipped but never invoked by any workflow —
+  # a dead CI path, so regressions in the ci-diff / ci-gate pipeline
+  # went undetected. This job exercises it on every PR: it diffs
+  # base..head, computes the dependency blast radius of the changed
+  # files, and posts/updates a single Markdown comment on the PR.
+  #
+  # Non-blocking by design (max-blast/max-changed left at the Action's
+  # default of 0 = no gate) so it informs reviewers without failing
+  # the PR. Flip those inputs to a positive number to turn it into a
+  # hard gate later.
+  blast-radius:
+    name: Blast radius
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only meaningful on PRs (needs base/head + a PR to comment on).
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the base..head diff can resolve both refs.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Compute blast radius and comment
+        uses: ./.github/actions/blast-radius
+        with:
+          depth: '3'
+          comment: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
   # ─── Markdown link check ────────────────────────────────
   docs:
     name: Documentation links

@@ -51,75 +51,128 @@ const isInside = (base, target) => {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
 }
 
-// ─── Origin / Host hardening (cross-origin + DNS-rebinding defense) ──
-// This dev server binds to loopback, but loopback binding does NOT protect
-// against a malicious web page the developer visits: browser fetch()/WebSocket
-// run in the victim's browser and can target ws://127.0.0.1 / http://127.0.0.1
-// regardless of the page's own origin. We therefore enforce:
-//   1. Host header must be loopback (blocks DNS-rebinding: attacker.com→127.0.0.1)
-//   2. Origin header (when present) must be loopback or file:// (blocks any
-//      cross-origin browser page from connecting / reading files)
-// CLI / non-browser clients send no Origin header and are unaffected.
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', ''])
+// ─── Security posture (loopback dev server) ───────────────────
+// This server binds 127.0.0.1 and is meant to be opened by the local
+// user's browser only. Loopback binding alone does NOT protect against a
+// malicious web page the developer visits: browser fetch()/WebSocket run
+// in the victim's browser and can target http://127.0.0.1 / ws://127.0.0.1
+// regardless of the page's own origin. The realistic threats are:
+//   1. DNS-rebinding / cross-origin: a malicious public site the user
+//      visits makes their browser hit 127.0.0.1:PORT and read served
+//      files or open the WS to exfiltrate the scanned source tree.
+//   2. Exposure of sensitive dotfiles (.env, .git/…) that may sit inside
+//      the served directory.
+//   3. Resource exhaustion from streaming arbitrarily large files.
+// The controls below address each. There is intentionally NO password
+// auth: the only credential a loopback dev tool could check is one the
+// same local user already possesses, so the trust boundary is "processes
+// running as this user", enforced by the loopback bind + Host allowlist.
 
-const hostIsLoopback = (req) => {
-  const host = (req.headers.host || '').split(':')[0].toLowerCase()
-  return LOOPBACK_HOSTS.has(host)
+// Host-header allowlist — the canonical DNS-rebinding defense. A rebound
+// attacker page reaches us over IP but its Host header is the attacker
+// domain, so we reject anything that isn't a recognized loopback name.
+// (Mirrors control-server.cjs's "forbidden host" 403.)
+const hostAllowed = (hostHeader) => {
+  if (!hostHeader) return false                  // HTTP/1.1 requires Host; absent ⇒ suspicious
+  const host = String(hostHeader).split(':')[0].trim().toLowerCase()
+  // strip IPv6 brackets, e.g. [::1]:7777 → ::1
+  const bare = host.replace(/^\[|\]$/g, '')
+  return bare === 'localhost' || bare === '127.0.0.1' || bare === '::1' || bare === '::ffff:127.0.0.1'
 }
 
-const originIsAllowed = (req) => {
-  const origin = req.headers.origin
-  // No Origin header → not a browser cross-origin request (CLI, curl, ws tools).
-  if (origin === undefined || origin === null || origin === '') return true
-  if (origin === 'null') return true // file:// pages and some sandboxes send "null"
-  let parsed
-  try { parsed = new URL(origin) } catch { return false }
-  if (parsed.protocol === 'file:') return true
-  return LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())
+// Origin allowlist (browsers send Origin on WS handshakes and CORS/fetch).
+// Same-origin requests from our own page carry our loopback Origin; a
+// rebound or third-party page carries its own. Absent Origin (curl, the
+// CLI, EventSource-less direct nav) is allowed — those aren't attacker JS.
+// file:// pages and some sandboxes send the literal "null" Origin; allow it.
+const originAllowed = (originHeader) => {
+  if (!originHeader) return true
+  if (originHeader === 'null') return true
+  try {
+    const u = new URL(originHeader)
+    if (u.protocol === 'file:') return true
+    const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '::ffff:127.0.0.1'
+  } catch { return false }
 }
 
-// Dotfile / secret allowlist for read_file. Source-tree visualization never
-// needs to display .env/.git internals/credentials, and a cross-origin or
-// compromised client must not be able to exfiltrate them even within ROOT.
-// Block any path segment that begins with a dot (covers .env, .env.local,
-// .git/*, .npmrc, .ssh, .aws, etc.).
-const isDotfilePath = (relId) => {
-  const norm = String(relId).replace(/\\/g, '/')
-  return norm.split('/').some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..')
-}
+// Dotfile policy — deny any path whose components start with '.', which
+// covers .env, .env.local, .git/*, .htpasswd, .npmrc, .ssh, .aws, etc.
+// Applies to HTTP serving and the WS read_file channel alike, so a
+// cross-origin or compromised client cannot exfiltrate secrets within ROOT.
+const hasDotSegment = (rel) =>
+  String(rel).split(/[\\/]/).some((seg) => seg.startsWith('.') && seg !== '' && seg !== '.' && seg !== '..')
+
+// Cap on bytes streamed for any single static HTTP asset. The bundled UI
+// assets are well under this; an attacker-planted or symlinked huge file
+// must not be streamed unbounded.
+const MAX_STATIC_BYTES = 25 * 1024 * 1024   // 25 MB
 
 const server = http.createServer((req, res) => {
-  // DNS-rebinding defense: reject non-loopback Host headers.
-  if (!hostIsLoopback(req)) {
-    res.writeHead(403, { 'Content-Type': 'text/plain' })
-    res.end('forbidden host')
-    return
+  // (1) Host-header defense (anti DNS-rebinding) — applies to every request.
+  if (!hostAllowed(req.headers.host)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' }); res.end('forbidden host'); return
   }
+  // (1b) Reject cross-origin browser requests outright.
+  if (!originAllowed(req.headers.origin)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' }); res.end('forbidden origin'); return
+  }
+  // (2) Method gate — a static server only answers GET/HEAD.
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { 'Allow': 'GET, HEAD', 'Content-Type': 'text/plain' })
+    res.end('method not allowed'); return
+  }
+
   let rel = req.url.split('?')[0]
   try { rel = decodeURIComponent(rel) } catch {}   // normalize %2e%2e etc.
   if (rel === '/') rel = '/index.html'
+
+  // (3) Dotfile policy — never serve .env / .git/* / dotfiles.
+  if (hasDotSegment(rel)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' }); res.end('forbidden'); return
+  }
+
   const filePath = path.join(PUBLIC, rel)
   if (!isInside(PUBLIC, filePath)) {
     res.writeHead(403); res.end(); return
   }
-  fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); res.end('Not found'); return }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'text/plain' })
-    res.end(data)
+
+  fs.stat(filePath, (statErr, stat) => {
+    if (statErr || !stat.isFile()) { res.writeHead(404); res.end('Not found'); return }
+    // (4) Size gate.
+    if (stat.size > MAX_STATIC_BYTES) {
+      res.writeHead(413, { 'Content-Type': 'text/plain' }); res.end('file too large'); return
+    }
+    const headers = {
+      'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream',
+      'Content-Length': stat.size,
+      // Defense-in-depth: forbid embedding by a foreign page and MIME sniffing.
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+    }
+    if (req.method === 'HEAD') { res.writeHead(200, headers); res.end(); return }
+    res.writeHead(200, headers)
+    const stream = fs.createReadStream(filePath)
+    stream.on('error', () => { try { res.destroy() } catch {} })
+    stream.pipe(res)
   })
 })
 
 // ─── WebSocket ────────────────────────────────────────────────
-// verifyClient runs during the HTTP Upgrade handshake. Reject any connection
-// whose Origin is cross-origin (a malicious page in the victim's browser) or
-// whose Host header isn't loopback (DNS-rebinding). Same-origin localhost UI
-// use sends Origin: http://localhost:<port> (or 127.0.0.1) and is allowed.
+// verifyClient runs during the HTTP Upgrade handshake. The WS carries the
+// full scanned source tree (snapshots) and answers read_file, so an attacker
+// who can open it can exfiltrate the project. Reject any connection whose
+// Host header isn't loopback (DNS-rebinding) or whose Origin is cross-origin
+// (a malicious page in the victim's browser), applying the same Host + Origin
+// allowlist as HTTP so a rebound/cross-origin handshake is refused at upgrade.
+// Same-origin localhost UI use sends Origin: http://localhost:<port> (or
+// 127.0.0.1) and is allowed.
 const wss = new WebSocketServer({
   server,
-  verifyClient: (info) => {
-    if (!hostIsLoopback(info.req)) return false
-    if (!originIsAllowed(info.req)) return false
-    return true
+  verifyClient: ({ req }, done) => {
+    if (!hostAllowed(req.headers.host)) return done(false, 403, 'forbidden host')
+    if (!originAllowed(req.headers.origin)) return done(false, 403, 'forbidden origin')
+    done(true)
   },
 })
 const scanner = new Scanner(ROOT)
@@ -143,9 +196,11 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'read_file') {
       try {
-        // Defense-in-depth: never serve dotfiles / secrets (.env, .git, …),
-        // even to a connection that passed the Origin/Host handshake.
-        if (isDotfilePath(msg.id)) {
+        if (typeof msg.id !== 'string') return
+        // Defense-in-depth: same dotfile policy as HTTP — never serve
+        // dotfiles / secrets (.env, .git/*, …), even to a connection that
+        // passed the Origin/Host handshake.
+        if (hasDotSegment(msg.id)) {
           ws.send(JSON.stringify({ type: 'file_content', id: msg.id,
             content: '[blocked: dotfiles and secrets are not viewable]', error: true }))
           return

@@ -2,15 +2,32 @@
 // quantized ONNX model). Runs entirely locally — no network call at
 // query time, no telemetry.
 //
-// OFFLINE BY DESIGN: by default this module NEVER reaches the network.
-// @xenova/transformers ships with allowRemoteModels:true and a
-// huggingface.co remote host, which would silently download the model
-// on first use — a violation of the project's offline-by-design hard
-// rule (AGENTS.md / CLAUDE.md). We pin env.allowRemoteModels=false so a
-// cold-cache machine resolves the model strictly from disk, and if it
-// is absent we cleanly fall back to keyword-only scoring instead of
-// fetching. Users who explicitly want the one-time download must opt in
-// with CS_EMBEDDING_DOWNLOAD=1 (off by default).
+// OFFLINE BY DESIGN / OFFLINE BY DEFAULT (hard rule — see CLAUDE.md
+// "No network calls", AGENTS.md). By default this module NEVER reaches
+// the network. @xenova/transformers ships with `allowRemoteModels:true`
+// and a huggingface.co remote host, which means the very first call to
+// loadPipeline() would silently fetch the model from
+// https://huggingface.co/ at runtime. CodeSynapt fires the embedding
+// pass automatically during symbol-mode build (electron/main.cjs), so on
+// a machine that has never downloaded the model that default would turn a
+// normal `cs`/desktop session into a network call. That is forbidden.
+//
+// Therefore we force `env.allowRemoteModels = false` unless the user has
+// EXPLICITLY opted into a one-time download. With remote models disabled,
+// a cold-cache machine resolves the model strictly from disk; if it is
+// absent the pipeline fails fast and the caller cleanly falls back to
+// keyword-only scoring instead of fetching — no network, no hang.
+//
+// Opt-in download (either env var is accepted, for backwards compat):
+//   CS_EMBED_DOWNLOAD=1     (preferred)
+//   CS_EMBEDDING_DOWNLOAD=1 (alias)
+// To download the model once (opt-in, build-time / first-run setup):
+//   CS_EMBED_DOWNLOAD=1 node -e "require('codesynapt/lib/embedding.cjs').loadPipeline()"
+// after which every subsequent run is fully offline from the cache.
+//
+// The cache lives under env.cacheDir (the package's .cache dir by
+// default); override with CS_EMBED_CACHE_DIR to point at a vendored
+// model directory shipped with the app.
 //
 // Used by /symbol/explore to give "auth" ↔ "login" / "signIn" /
 // "verifyJWT" the synonym match that keyword-only scoring misses.
@@ -20,6 +37,14 @@
 // hits processes that actually opt into embedding mode.
 
 'use strict'
+
+// Opt-in switch for the one-time remote model download. Default OFF so
+// the offline-by-design guarantee holds for every normal invocation.
+const ALLOW_DOWNLOAD =
+  process.env.CS_EMBED_DOWNLOAD === '1' ||
+  process.env.CS_EMBED_DOWNLOAD === 'true' ||
+  process.env.CS_EMBEDDING_DOWNLOAD === '1' ||
+  process.env.CS_EMBEDDING_DOWNLOAD === 'true'
 
 let _pipelinePromise = null
 let _ready = false
@@ -31,11 +56,19 @@ async function loadPipeline() {
   _pipelinePromise = (async () => {
     try {
       const mod = await import('@xenova/transformers')
+
       // Offline by default: forbid any outbound fetch to huggingface.co.
-      // Only enable remote downloads when the user explicitly opts in.
-      const allowDownload = process.env.CS_EMBEDDING_DOWNLOAD === '1'
-      mod.env.allowRemoteModels = allowDownload
-      mod.env.allowLocalModels = true
+      // Only an explicit opt-in (CS_EMBED_DOWNLOAD=1 / CS_EMBEDDING_DOWNLOAD=1,
+      // captured in ALLOW_DOWNLOAD) re-enables the remote Hugging Face fetch.
+      if (mod.env) {
+        mod.env.allowRemoteModels = ALLOW_DOWNLOAD
+        // Always keep local lookup on so a cached / vendored model is
+        // found even when remote is disabled.
+        mod.env.allowLocalModels = true
+        const cacheOverride = process.env.CS_EMBED_CACHE_DIR
+        if (cacheOverride) mod.env.cacheDir = cacheOverride
+      }
+
       const p = await mod.pipeline(
         'feature-extraction',
         'Xenova/all-MiniLM-L6-v2',
@@ -44,7 +77,14 @@ async function loadPipeline() {
       _ready = true
       return p
     } catch (e) {
-      console.warn('[embedding] pipeline init failed — falling back to keyword-only:', e.message)
+      const offlineHint = ALLOW_DOWNLOAD
+        ? ''
+        : ' (offline default: model not cached — run once with CS_EMBED_DOWNLOAD=1 to fetch it, then it works offline)'
+      console.warn(
+        '[embedding] pipeline init failed — falling back to keyword-only:' +
+          offlineHint,
+        e.message
+      )
       _failed = true
       _pipelinePromise = null
       return null

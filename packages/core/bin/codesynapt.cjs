@@ -465,15 +465,67 @@ async function runCiAnalysis(args) {
   }
   const changed = diff.out.split('\n').map((l) => l.trim().replace(/\\/g, '/')).filter(Boolean)
 
-  // 2. Scan HEAD with Scanner (headless)
+  // 2. Scan the graph for the SAME tree we diffed against.
+  //
+  // The diff range ends at `head` (a committed ref). The blast radius must
+  // be computed from THAT committed tree — not from whatever happens to be in
+  // the working directory. If we scanned `abs` directly, uncommitted edits
+  // (new files that import a changed file, staged deletions, WIP refactors)
+  // would silently inflate or deflate every dependent count, making the PR
+  // report disagree with the diff it claims to describe.
+  //
+  // Design: materialise `head` into a throw-away detached git worktree, scan
+  // that, then remove it. This guarantees graph ⇄ diff consistency for any
+  // ref. If the repo cannot support a linked worktree (rare: very old git,
+  // bare/odd setups), fall back to scanning `abs` and flag it loudly so the
+  // numbers are never silently wrong.
   const { Scanner } = await import('../scanner.js')
-  const s = new Scanner(abs)
-  const snap = await new Promise((resolve) => {
-    s.once('snapshot', resolve)
-    s.start()
-  })
-  // We only need the snapshot; stop watching.
-  try { s.stop() } catch {}
+
+  // Resolve `head` to a concrete commit so the worktree is deterministic and
+  // the report can show exactly what tree it scanned.
+  const headRev = execCapture('git', ['rev-parse', '--verify', '--quiet', `${range.head}^{commit}`], { cwd: abs })
+  const headCommit = headRev.ok ? headRev.out.trim() : null
+
+  let scanRoot = abs            // directory the Scanner reads
+  let worktreeDir = null        // temp linked worktree to clean up
+  let scanWarning = null        // surfaced in output when we could not isolate `head`
+  let scannedTree = 'working-tree'
+
+  if (headCommit) {
+    const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-cidiff-'))
+    const wt = path.join(tmpBase, 'head')
+    const add = execCapture('git', ['worktree', 'add', '--detach', '--quiet', wt, headCommit], { cwd: abs })
+    if (add.ok) {
+      worktreeDir = wt
+      scanRoot = wt
+      scannedTree = headCommit.slice(0, 12)
+    } else {
+      // Could not isolate the committed tree — scan the working dir but be honest.
+      try { fs.rmSync(tmpBase, { recursive: true, force: true }) } catch {}
+      scanWarning = `could not check out ${range.head} into an isolated worktree (${(add.stderr || add.error || '').split('\n')[0]}); blast radius reflects the WORKING TREE at ${abs}, which may differ from ${range.head}.`
+    }
+  } else {
+    scanWarning = `'${range.head}' did not resolve to a commit; blast radius reflects the WORKING TREE at ${abs}, which may differ from the diff.`
+  }
+
+  let snap
+  try {
+    const s = new Scanner(scanRoot)
+    snap = await new Promise((resolve) => {
+      s.once('snapshot', resolve)
+      s.start()
+    })
+    // We only need the snapshot; stop watching.
+    try { s.stop() } catch {}
+  } finally {
+    if (worktreeDir) {
+      // Remove the linked worktree, then the temp parent dir.
+      execCapture('git', ['worktree', 'remove', '--force', worktreeDir], { cwd: abs })
+      try { fs.rmSync(path.dirname(worktreeDir), { recursive: true, force: true }) } catch {}
+      // Prune any dangling administrative entry just in case.
+      execCapture('git', ['worktree', 'prune'], { cwd: abs })
+    }
+  }
 
   // Build incoming-edge index for blast BFS
   const fileSet = new Set(snap.files.map((f) => f.id))
@@ -518,8 +570,11 @@ async function runCiAnalysis(args) {
       perFile.push({ id, status: 'changed', dependents: r.dependents, tests: r.tests })
       trackedCount++
     } else {
-      // Either deleted (gone from HEAD entirely) or untracked extension.
-      const full = path.join(abs, id)
+      // Either deleted (gone from `head` entirely) or present-but-unscanned
+      // (e.g. an extension the Scanner does not graph). Check against the SAME
+      // tree we scanned (scanRoot), not the working dir, so the status matches
+      // the diff range.
+      const full = path.join(scanRoot, id)
       if (fs.existsSync(full)) {
         perFile.push({ id, status: 'untracked-ext', dependents: 0, tests: 0 })
         untrackedCount++
@@ -539,6 +594,7 @@ async function runCiAnalysis(args) {
     perFile, maxBlast, totalTests, depth,
     snapshotFileCount: snap.files.length,
     snapshotEdgeCount: snap.edges.length,
+    scannedTree, scanWarning,
     flags,
   }
 }
@@ -547,6 +603,8 @@ function fmtCiPlain(r) {
   const lines = []
   lines.push(`cs ci-diff — ${r.range.base}${r.range.op}${r.range.head}`)
   lines.push(`root: ${r.root}`)
+  lines.push(`scanned tree: ${r.scannedTree}`)
+  if (r.scanWarning) lines.push(`WARNING: ${r.scanWarning}`)
   lines.push(`scan: ${r.snapshotFileCount} files, ${r.snapshotEdgeCount} edges`)
   lines.push(`changed: ${r.changedCount} (tracked ${r.trackedCount}, ext-untracked ${r.untrackedCount}, deleted ${r.deletedCount})`)
   lines.push(`max blast (depth ${r.depth}): ${r.maxBlast}   tests touched: ${r.totalTests}`)
@@ -564,8 +622,12 @@ function fmtCiMarkdown(r) {
   const lines = []
   lines.push(`## 📦 cs impact — \`${r.range.base}${r.range.op}${r.range.head}\``)
   lines.push('')
-  lines.push(`Scanned ${r.snapshotFileCount} files / ${r.snapshotEdgeCount} edges. Changed ${r.changedCount} files (tracked ${r.trackedCount}, ext-untracked ${r.untrackedCount}, deleted ${r.deletedCount}).`)
+  lines.push(`Scanned ${r.snapshotFileCount} files / ${r.snapshotEdgeCount} edges at \`${r.scannedTree}\`. Changed ${r.changedCount} files (tracked ${r.trackedCount}, ext-untracked ${r.untrackedCount}, deleted ${r.deletedCount}).`)
   lines.push('')
+  if (r.scanWarning) {
+    lines.push(`> ⚠️ ${r.scanWarning}`)
+    lines.push('')
+  }
   lines.push(`**Largest single-file blast (depth ${r.depth}):** ${r.maxBlast} dependents  ·  **Tests touched:** ${r.totalTests}`)
   lines.push('')
   const tracked = r.perFile.filter((f) => f.status === 'changed')
@@ -626,7 +688,8 @@ async function runCiGate(args) {
   }
   // Always print a one-line summary, then thresholds
   process.stderr.write(`cs ci-gate — ${r.range.base}${r.range.op}${r.range.head}\n`)
-  process.stderr.write(`changed: ${r.trackedCount} tracked  ·  max blast (depth ${r.depth}): ${r.maxBlast}  ·  tests touched: ${r.totalTests}\n`)
+  if (r.scanWarning) process.stderr.write(`WARNING: ${r.scanWarning}\n`)
+  process.stderr.write(`scanned tree: ${r.scannedTree}  ·  changed: ${r.trackedCount} tracked  ·  max blast (depth ${r.depth}): ${r.maxBlast}  ·  tests touched: ${r.totalTests}\n`)
   if (fails.length === 0) {
     process.stderr.write(`OK — all thresholds within limits.\n`)
     process.exit(0)

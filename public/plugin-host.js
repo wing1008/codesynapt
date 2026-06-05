@@ -33,14 +33,29 @@ const activations = new Map()  // pluginId -> { deactivate, disposables }
  * Build a per-plugin context object. This is what plugins see via
  * the `ctx` argument to their activate() function.
  */
-function makeContext(manifest, hostHelpers) {
+function makeContext(manifest, hostHelpers, grantedPermissions) {
   const disposables = []
-  const perms = new Set(manifest.permissions || [])
+  // The authoritative permission set is what the TRUST STORE granted, not
+  // what the manifest self-declares. A plugin cannot widen its own scope by
+  // editing its manifest after approval. Fall back to the manifest list only
+  // when no grant is supplied (e.g. theme plugins / dev mode).
+  const perms = new Set(
+    Array.isArray(grantedPermissions) ? grantedPermissions : (manifest.permissions || [])
+  )
 
   const requirePerm = (perm, action) => {
     if (!perms.has(perm)) {
-      throw new Error(`Plugin "${manifest.id}" attempted "${action}" but does not declare permission "${perm}"`)
+      throw new Error(`Plugin "${manifest.id}" attempted "${action}" but does not have permission "${perm}"`)
     }
+  }
+
+  // Wrap a plugin-supplied callback so any privileged IPC it triggers later
+  // (e.g. from an event handler or command) is attributed to this plugin by
+  // the preload guard. Without this, async escapes would run unattributed.
+  const guard = (typeof window !== 'undefined' && window.__pluginGuard) || null
+  const wrapCallback = (fn) => {
+    if (typeof fn !== 'function' || !guard) return fn
+    return (...args) => guard.runInScope(manifest.id, () => fn(...args))
   }
 
   // Storage scoped to this plugin id
@@ -132,7 +147,13 @@ function makeContext(manifest, hostHelpers) {
       }}
     },
     registerCommand(opts) {
-      pluginRegistry.commands.set(opts.id, { plugin: manifest.id, opts })
+      requirePerm('command', 'registerCommand')
+      // Attribute the command's run handler to this plugin so privileged IPC
+      // it invokes is permission-checked even though it fires later.
+      const safeOpts = (opts && typeof opts.run === 'function')
+        ? { ...opts, run: wrapCallback(opts.run) }
+        : opts
+      pluginRegistry.commands.set(opts.id, { plugin: manifest.id, opts: safeOpts })
       disposables.push(() => pluginRegistry.commands.delete(opts.id))
       return { dispose() { pluginRegistry.commands.delete(opts.id) } }
     },
@@ -161,6 +182,7 @@ function makeContext(manifest, hostHelpers) {
   // Layout registry
   const layouts = {
     register(opts) {
+      requirePerm('layout', 'register layout')
       pluginRegistry.layouts.set(opts.id, { manifest, opts })
       disposables.push(() => pluginRegistry.layouts.delete(opts.id))
       return { dispose() { pluginRegistry.layouts.delete(opts.id) } }
@@ -170,7 +192,10 @@ function makeContext(manifest, hostHelpers) {
   // Event bus — proxy to the app's bus but restrict to read-only events
   const events = {
     on(name, handler) {
-      const off = hostHelpers.busOn(name, handler)
+      // Attribute the handler to this plugin so any privileged IPC it fires
+      // asynchronously is permission-checked by the preload guard.
+      const wrapped = wrapCallback(handler)
+      const off = hostHelpers.busOn(name, wrapped)
       disposables.push(off)
       return off
     },
@@ -204,6 +229,20 @@ async function activatePlugin(record, hostHelpers) {
     console.warn(`[plugin] skipping ${manifest.id}: ${error}`)
     return
   }
+
+  // Trust gate: never execute code the loader did not vouch for. The loader
+  // withholds entryContent (and sets needsApproval) for untrusted/tampered
+  // code plugins, so a missing source for a non-theme plugin means "not yet
+  // approved" — skip it rather than run an empty/blob module.
+  if (manifest.type !== 'theme' && (record.needsApproval || entryContent == null)) {
+    console.warn(`[plugin] ${manifest.id} requires approval before it can run`)
+    return
+  }
+
+  // The permissions actually granted by the trust store (authoritative).
+  const grantedPermissions = Array.isArray(record.grantedPermissions)
+    ? record.grantedPermissions
+    : (manifest.permissions || [])
 
   // Theme — inject CSS, register in the theme registry, done
   if (manifest.type === 'theme') {
@@ -245,9 +284,18 @@ async function activatePlugin(record, hostHelpers) {
     return
   }
 
-  const { ctx, disposables } = makeContext(manifest, hostHelpers)
+  // Register the granted permissions with the preload guard (the hard,
+  // non-bypassable boundary) BEFORE any plugin code runs.
+  const guard = (typeof window !== 'undefined' && window.__pluginGuard) || null
+  if (guard) guard.register(manifest.id, grantedPermissions)
+
+  const { ctx, disposables } = makeContext(manifest, hostHelpers, grantedPermissions)
+  // Run activate() inside the plugin's attributed scope so privileged IPC it
+  // calls is permission-checked even if it reaches window.codesynapt directly.
+  const runActivate = () =>
+    guard ? guard.runInScope(manifest.id, () => plugin.activate(ctx)) : plugin.activate(ctx)
   try {
-    await plugin.activate(ctx)
+    await runActivate()
   } catch (err) {
     console.error(`[plugin] ${manifest.id} activate() threw:`, err)
     hostHelpers.toast(`Plugin "${manifest.name}" crashed during activation`)
@@ -255,19 +303,23 @@ async function activatePlugin(record, hostHelpers) {
     for (const fn of disposables) {
       try { fn() } catch {}
     }
+    if (guard) guard.unregister(manifest.id)
     return
   }
 
   activations.set(manifest.id, {
     deactivate: async () => {
       try {
-        if (typeof plugin.deactivate === 'function') await plugin.deactivate()
+        if (typeof plugin.deactivate === 'function') {
+          await (guard ? guard.runInScope(manifest.id, () => plugin.deactivate()) : plugin.deactivate())
+        }
       } catch (err) {
         console.error(`[plugin] ${manifest.id} deactivate() threw:`, err)
       }
       for (const fn of disposables) {
         try { fn() } catch {}
       }
+      if (guard) guard.unregister(manifest.id)
     },
     disposables,
   })

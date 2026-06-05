@@ -20,6 +20,14 @@ const crypto = require('crypto')
 const { SUPPORTED_EXTS } = require('./symbol-parsers.cjs')
 const sv = require('./symbol-views.cjs')
 
+// Distinguishes "the client sent a bad path/param" (→ 400) from a genuine
+// server fault (→ 500). Thrown by safeDecode() on malformed %-encoding so the
+// router's outer catch can map it to the correct status instead of leaking a
+// 500 (which wrongly signals the daemon is broken and pollutes the audit log).
+class BadRequestError extends Error {
+  constructor(message) { super(message); this.name = 'BadRequestError'; this.httpStatus = 400 }
+}
+
 // ─── i18n strings (en + ko) ──────────────────────────────────
 // Keys are stable identifiers; values are functions so we can
 // interpolate variables. `t(key, locale, ...args)` is the single entry
@@ -145,7 +153,11 @@ function createControlServer(opts) {
     onOpen,                  // optional (id) => void        IPC: open in editor
     authToken,               // optional string. If set, require `Authorization: Bearer <token>` on every request.
     auditLogDir,             // optional absolute path. If set, every request is appended to <dir>/YYYY-MM-DD.jsonl
+    requestTimeoutMs,        // optional number (ms). Per-request wall-clock cap; <=0 disables. Default 30000.
   } = opts
+  // Per-request timeout. A long-lived daemon must not let one pathological
+  // request (e.g. a giant symbol build) pin the event loop indefinitely.
+  const REQUEST_TIMEOUT_MS = Number.isFinite(requestTimeoutMs) ? requestTimeoutMs : 30_000
   if (!scanner) throw new Error('createControlServer: scanner is required')
   if (typeof getCurrentRoot !== 'function') throw new Error('createControlServer: getCurrentRoot fn is required')
 
@@ -169,6 +181,11 @@ function createControlServer(opts) {
     return null
   }
   function writeJson(res, status, data) {
+    // If the client already went away (abort/disconnect) or another branch
+    // already responded, writing again throws ERR_STREAM_WRITE_AFTER_END /
+    // emits on a destroyed socket. For a long-lived daemon an agent cancels
+    // requests against, that must be a quiet no-op, not a crash.
+    if (res.writableEnded || res.destroyed || (res.req && res.req._csClientGone)) return
     const body = JSON.stringify(data)
     const headers = {
       'Content-Type': 'application/json; charset=utf-8',
@@ -180,8 +197,10 @@ function createControlServer(opts) {
     // res._acaoOrigin is set once per request in handleControlRequest. Only a
     // loopback Origin is reflected; cross-origin pages get NO ACAO header.
     if (res._acaoOrigin) headers['Access-Control-Allow-Origin'] = res._acaoOrigin
-    res.writeHead(status, headers)
-    res.end(body)
+    try {
+      res.writeHead(status, headers)
+      res.end(body)
+    } catch { /* socket died between the guard check and the write */ }
   }
   function isInsideRoot(root, full) {
     const r = path.resolve(root)
@@ -1367,6 +1386,33 @@ function createControlServer(opts) {
       writeJson(res, 403, { error: 'forbidden host: ' + hostHeader })
       return
     }
+
+    // ─── Request lifecycle: client-disconnect + per-request timeout ───
+    // The daemon outlives any single request and serves agents that abort
+    // tool calls mid-flight. Track disconnect so async handlers (the symbol
+    // endpoints do a tree-sitter build) can SKIP work / skip writing to a dead
+    // socket, and cap any single request so a pathological build can't pin the
+    // event loop forever. Handlers consult req._csClientGone before/after await.
+    req._csClientGone = false
+    const markGone = () => { req._csClientGone = true }
+    // Real http req/res are EventEmitters; tolerate minimal mocks that omit
+    // .on() by treating the lifecycle wiring as best-effort.
+    const on = (emitter, ev, fn) => { if (emitter && typeof emitter.on === 'function') emitter.on(ev, fn) }
+    // 'aborted'/'close' on the *request* fire when the client hangs up early.
+    on(req, 'aborted', markGone)
+    on(req, 'close', () => { if (!res.writableEnded) markGone() })
+    let timeoutTimer = null
+    if (REQUEST_TIMEOUT_MS > 0) {
+      timeoutTimer = setTimeout(() => {
+        if (!res.writableEnded && !req._csClientGone) {
+          writeJson(res, 503, { error: 'request timed out', timeoutMs: REQUEST_TIMEOUT_MS })
+        }
+      }, REQUEST_TIMEOUT_MS)
+      if (timeoutTimer.unref) timeoutTimer.unref()   // don't keep the process alive for it
+      on(res, 'close', () => clearTimeout(timeoutTimer))
+      on(res, 'finish', () => clearTimeout(timeoutTimer))
+    }
+
     // Audit on response finish (status code captured by then)
     if (auditLogDir) {
       res.on('finish', () => {
@@ -1411,7 +1457,14 @@ function createControlServer(opts) {
     const url = new URL(req.url, `http://${req.headers.host}`)
     const parts = url.pathname.split('/').filter(Boolean)
     const [seg0, ...rest] = parts
-    const idFromRest = () => decodeURIComponent(rest.join('/'))
+    // Malformed %-encoding (e.g. `%E0%A4%A`) makes decodeURIComponent throw a
+    // URIError. That's a CLIENT mistake (bad request), so surface it as 400 —
+    // not the generic 500 the bare decode used to produce.
+    const safeDecode = (s) => {
+      try { return decodeURIComponent(s) }
+      catch { throw new BadRequestError('malformed URI escape in path') }
+    }
+    const idFromRest = () => safeDecode(rest.join('/'))
 
     try {
       if (req.method === 'GET' && parts.length === 0) {
@@ -1504,7 +1557,16 @@ function createControlServer(opts) {
       //    (tree-sitter WASM init + parse), so we resolve then write. ──
       if (req.method === 'GET' && seg0 === 'symbol') {
         const sub = rest[0] || 'summary'
+        // Decode the symbol id BEFORE kicking off the (expensive) graph build:
+        // a malformed ?id= is a client error (400), and there's no point doing
+        // a tree-sitter build for a request we'll reject anyway.
+        const symbolId = safeDecode(url.searchParams.get('id') || '')
+        // If the client already hung up, don't even start the build.
+        if (req._csClientGone) return
         scanner.getSymbolGraph().then((g) => {
+          // Client disconnected while the graph was building — drop the result
+          // instead of doing projection work and writing to a dead socket.
+          if (req._csClientGone || res.writableEnded) return
           const params = {
             q: url.searchParams.get('q') || '',
             // Accept the symbol id from EITHER ?id= or the path tail
@@ -1512,8 +1574,15 @@ function createControlServer(opts) {
             // (encId), and the desktop server reads it from the path too, but
             // this branch previously read only ?id=, so callers/callees/node
             // 404'd for every symbol on the headless server. (ROUTE-018)
-            id: decodeURIComponent(url.searchParams.get('id') || '')
-                || (rest.length > 1 ? decodeURIComponent(rest.slice(1).join('/')) : ''),
+            //
+            // symbolId is the safe-decoded ?id= computed before the build
+            // (a malformed escape already produced a 400). The path-tail
+            // fallback is decoded defensively here: a throw inside this async
+            // .then() can't reach the request-level try/catch, so we swallow a
+            // malformed tail to '' rather than turning it into a 500.
+            id: symbolId || (rest.length > 1
+              ? (() => { try { return decodeURIComponent(rest.slice(1).join('/')) } catch { return '' } })()
+              : ''),
             limit: url.searchParams.get('limit'),
             depth: url.searchParams.get('depth'),
             direction: url.searchParams.get('direction'),
@@ -1533,7 +1602,10 @@ function createControlServer(opts) {
             }))
           }
           return writeJson(res, 404, { error: 'unknown symbol endpoint', sub, valid: ['summary', 'graph', 'find?q=', 'node?id=', 'callers?id=', 'callees?id=', 'blast?id=[&depth=&direction=callers|callees]'] })
-        }).catch((e) => writeJson(res, 500, { error: 'symbol graph build failed', message: e && e.message }))
+        }).catch((e) => {
+          if (req._csClientGone || res.writableEnded) return
+          writeJson(res, 500, { error: 'symbol graph build failed', message: e && e.message })
+        })
         return
       }
       if (req.method === 'GET' && seg0 === 'file' && rest.length > 0) {
@@ -1663,12 +1735,29 @@ function createControlServer(opts) {
         // functions (most callers) here. The agent sees internal coupling that
         // file-level safety structurally cannot, without a second call.
         if (r.functionLevelHint) {
+          if (req._csClientGone) return
           scanner.getSymbolGraph().then((g) => {
+            if (req._csClientGone || res.writableEnded) return
+            const fileSymbols = g.byFile.get(id)
+            // CALL-only in-degree. g.inAdj mixes every edge kind (call, extends,
+            // implements, ref, type-ref, jsx-ref), so `inAdj.size` over-counts a
+            // class's subclasses / a type's annotations as "callers". This panel
+            // is explicitly "ranked by caller count … ripples internally", so a
+            // phantom extends/type-ref must NOT inflate it. Count incoming
+            // edges whose kind === 'call' only, scoped to this file's symbols.
+            const callIn = new Map()
+            if (fileSymbols && Array.isArray(g.edges)) {
+              for (const e of g.edges) {
+                if (e.kind !== 'call') continue
+                if (!fileSymbols.has(e.target)) continue
+                callIn.set(e.target, (callIn.get(e.target) || 0) + 1)
+              }
+            }
             const hubs = []
-            for (const sid of (g.byFile.get(id) || [])) {
+            for (const sid of (fileSymbols || [])) {
               const n = g.nodes.get(sid)
               if (!n || (n.kind !== 'function' && n.kind !== 'method')) continue
-              const callers = g.inAdj.get(sid)?.size || 0
+              const callers = callIn.get(sid) || 0
               if (callers > 0) hubs.push({ name: n.qualifiedName || n.name, line: n.startLine, callers })
             }
             hubs.sort((a, b) => b.callers - a.callers)
@@ -1796,7 +1885,10 @@ function createControlServer(opts) {
       }
       return writeJson(res, 404, { error: 'unknown endpoint', path: url.pathname })
     } catch (e) {
-      return writeJson(res, 500, { error: e.message })
+      // BadRequestError (and anything else that sets httpStatus) carries its
+      // own intended status — typically 400 for malformed client input. Only
+      // unexpected faults fall through to 500.
+      return writeJson(res, e && e.httpStatus ? e.httpStatus : 500, { error: e.message })
     }
   }
 
@@ -1804,13 +1896,24 @@ function createControlServer(opts) {
   let server = null
   function startControlServer(port, host = '127.0.0.1') {
     return new Promise((resolve, reject) => {
-      if (server) return resolve({ port, alreadyRunning: true })
+      if (server) {
+        const addr = server.address()
+        return resolve({ port: (addr && addr.port) || port, host, alreadyRunning: true })
+      }
       server = http.createServer(handleControlRequest)
       server.on('error', (err) => {
         server = null
         reject(err)
       })
-      server.listen(port, host, () => resolve({ port, host }))
+      server.listen(port, host, () => {
+        // Report the ACTUAL bound port, not the literal arg. With port 0 the
+        // OS assigns a free port; callers (CLI port-lock + MCP auto-discovery)
+        // write this to ~/.codesynapt/port, so returning the literal 0 would
+        // make the running daemon undiscoverable.
+        const addr = server.address()
+        const boundPort = (addr && typeof addr === 'object' && addr.port) ? addr.port : port
+        resolve({ port: boundPort, host })
+      })
     })
   }
   function stopControlServer() {

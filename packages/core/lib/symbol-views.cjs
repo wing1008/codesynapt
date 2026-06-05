@@ -57,7 +57,15 @@ function symbolBlast(g, id, depth = 3, direction = 'callers') {
     for (const sid of frontier) {
       const adj = direction === 'callers' ? g.inAdj.get(sid) : g.outAdj.get(sid)
       if (!adj) continue
-      for (const n of adj) if (!visited.has(n)) { visited.add(n); next.add(n) }
+      // Only admit neighbours that resolve to a REAL symbol node. Adjacency
+      // can hold a foreign/synthetic id (e.g. a `route:GET /x` handler whose
+      // node was never materialised) — counting it here inflated byDepth so
+      // sum(byDepth[d>0]) drifted ABOVE totalImpacted (totalImpacted is built
+      // from g.nodes.get(x), which silently drops phantoms). Filtering at
+      // frontier expansion keeps the per-hop counts and the impacted list in
+      // exact agreement. The endpoint guard in addEdge now prevents phantoms
+      // upstream too; this is the defence-in-depth at the consumer.
+      for (const n of adj) if (!visited.has(n) && g.nodes.has(n)) { visited.add(n); next.add(n) }
     }
     if (!next.size) break
     byDepth.push({ depth: d, count: next.size }); frontier = next

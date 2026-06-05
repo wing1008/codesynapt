@@ -20,8 +20,18 @@
 //   CS_COMPETITOR_WATCH=1 node scripts/competitor-watch.mjs --since 14d   # last 14 days only
 //   CS_COMPETITOR_WATCH=1 node scripts/competitor-watch.mjs --repo codegraph
 
+// OFFLINE BY DEFAULT (hard rule — see CLAUDE.md "No network calls").
+// This is a manual, opt-in maintainer tool: it hits the public GitHub
+// API and is NOT part of the app, CLI, MCP server, or any npm script.
+// It must therefore only reach the network when invoked DIRECTLY
+// (`node scripts/competitor-watch.mjs`). Previously main() ran at the
+// top level, so merely importing this module fired GitHub API calls.
+// The main() invocation is now gated on an import.meta.url ===
+// argv[1] check, so importing the module is side-effect-free.
+
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 if (process.env.CS_COMPETITOR_WATCH !== '1') {
   console.error(
@@ -159,4 +169,13 @@ async function main() {
   console.log(`\nWrote ${logPath}`)
 }
 
-main().catch((e) => { console.error(e); process.exit(1) })
+// Only run when invoked directly as a script — never on import.
+// import.meta.url is this module; argv[1] is the entry file Node ran.
+const invokedDirectly =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (invokedDirectly) {
+  main().catch((e) => { console.error(e); process.exit(1) })
+}
+
+export { main, REPOS, fetchRepo, repoSection }

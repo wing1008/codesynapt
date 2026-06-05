@@ -30,7 +30,16 @@ const VALID_PERMISSIONS = new Set([
   // the permission the renderer requires (keep this whitelist in sync
   // with the requirePerm() calls in public/plugin-host.js).
   'command', 'layout',
+  // Privileged host IPC. A plugin that wants to mutate files on disk via the
+  // app's write/edit bridge MUST declare this. It is enforced in preload.cjs
+  // (the IPC boundary the plugin's renderer realm cannot reach), NOT here.
+  'write-files',
 ])
+
+// Permissions whose grant is *dangerous* — these require an explicit,
+// per-plugin trust entry (user approval) before the plugin's code is allowed
+// to load and before the permission is honored by the IPC boundary.
+const DANGEROUS_PERMISSIONS = new Set(['write-files', 'modify-graph'])
 
 // Resolve the per-OS plugin folder. We pin it under userData so the
 // app handles cross-platform paths for us.
@@ -46,32 +55,35 @@ function getPluginDir() {
 // bypassing the per-plugin permission model entirely (the renderer-side
 // `ctx` gate only constrains well-behaved plugins).
 //
-// The only real boundary is the main process: we must NOT hand a
-// plugin's executable source to the renderer unless the user has
-// explicitly approved that exact code. We pin approval to a content
-// hash so that silently editing/replacing an approved plugin (e.g. a
-// supply-chain swap on disk) revokes trust until re-approved.
+// The only real boundary is the main process: we must NOT hand a code
+// plugin's executable source to the renderer unless the user has explicitly
+// approved that exact code. Approval is pinned to a content hash so that
+// silently editing/replacing an approved plugin (e.g. a supply-chain swap on
+// disk) revokes trust until re-approved (TOFU: trust on first use, re-prompt
+// on change). The record also pins which permissions the user granted, so a
+// plugin cannot silently widen its own scope.
 //
-// The trust store lives in userData root (NOT inside plugins/, so it
-// can't be shadowed by a plugin folder) as a simple JSON map:
-//   { "<pluginId>": "<sha256-of-manifest+entry>" }
-function getTrustStorePath() {
+// The trust store lives in userData ROOT (NOT inside plugins/, so it can't be
+// shadowed by a plugin folder of the same name) as a versioned JSON document:
+//   { version: 1, plugins: { "<id>": { hash, permissions:[...], approvedAt } } }
+function getTrustPath() {
   return path.join(app.getPath('userData'), 'plugins-trust.json')
 }
 
 function readTrustStore() {
   try {
-    const raw = fs.readFileSync(getTrustStorePath(), 'utf8')
-    const obj = JSON.parse(raw)
-    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {}
-  } catch {
-    return {}
-  }
+    const raw = fs.readFileSync(getTrustPath(), 'utf8')
+    const data = JSON.parse(raw)
+    if (data && typeof data === 'object' && data.plugins && typeof data.plugins === 'object') {
+      return data
+    }
+  } catch { /* missing or corrupt — start fresh */ }
+  return { version: 1, plugins: {} }
 }
 
 function writeTrustStore(store) {
   try {
-    fs.writeFileSync(getTrustStorePath(), JSON.stringify(store, null, 2), 'utf8')
+    fs.writeFileSync(getTrustPath(), JSON.stringify(store, null, 2), 'utf8')
     return true
   } catch (err) {
     console.warn('[plugin-loader] could not persist trust store:', err.message)
@@ -79,41 +91,67 @@ function writeTrustStore(store) {
   }
 }
 
-// Stable fingerprint of the exact bytes the renderer would execute,
-// bound to the plugin id so a renamed/relocated copy still needs its
-// own approval.
-function fingerprint(id, manifestRaw, entryContent) {
+// Identity hash for a plugin = sha256 over the bits that decide what code
+// runs and what it may do: the entry source plus the manifest fields that
+// govern execution. The plugin id is folded in so a renamed/relocated copy
+// still needs its own approval. Author/description churn does not invalidate
+// trust; changing the code, type, entry path, or requested permissions does.
+function computePluginHash(manifest, entryContent) {
   const h = crypto.createHash('sha256')
-  h.update(String(id))
-  h.update('\0')
-  h.update(manifestRaw || '')
-  h.update('\0')
+  h.update('v1\n')
+  h.update(`id:${manifest.id}\n`)
+  h.update(`type:${manifest.type}\n`)
+  h.update(`main:${manifest.main}\n`)
+  h.update(`perms:${[...(manifest.permissions || [])].sort().join(',')}\n`)
+  h.update('src:\n')
   h.update(entryContent || '')
   return h.digest('hex')
 }
 
-// Mark a plugin (by id, at its current on-disk hash) as approved.
-// Returns true on success. Called from the privileged main process in
-// response to an explicit user action (e.g. a "Trust this plugin"
-// button), never from a plugin.
-function approvePlugin(id, hash) {
-  if (!id || !hash) return false
+// Is this plugin currently approved for exactly this content+permission set?
+// Called from the privileged main process; takes the live manifest + on-disk
+// source and compares against the user-approved record.
+function isTrusted(manifest, entryContent) {
   const store = readTrustStore()
-  store[id] = hash
-  return writeTrustStore(store)
+  const rec = store.plugins[manifest.id]
+  if (!rec) return false
+  if (rec.hash !== computePluginHash(manifest, entryContent)) return false
+  // Granted permissions must be a superset of what the manifest now requests
+  // for any dangerous permission; otherwise the plugin grew its scope.
+  const granted = new Set(rec.permissions || [])
+  for (const p of manifest.permissions || []) {
+    if (DANGEROUS_PERMISSIONS.has(p) && !granted.has(p)) return false
+  }
+  return true
 }
 
-// Withdraw trust for a plugin id.
+// Record approval for a plugin as it currently exists on disk. Called by the
+// approval round-trip (renderer → IPC → here) in response to an explicit user
+// action (e.g. a "Trust this plugin" button), never from a plugin itself.
+// Returns { ok } or { ok:false, reason }.
+function approvePlugin(id, opts = {}) {
+  const results = discoverPlugins({ includeUntrustedSource: true })
+  const rec = results.find((r) => r.manifest && r.manifest.id === id)
+  if (!rec) return { ok: false, reason: `plugin "${id}" not found` }
+  if (rec.error && rec.entryContent == null) return { ok: false, reason: rec.error }
+  const store = readTrustStore()
+  store.plugins[id] = {
+    hash: computePluginHash(rec.manifest, rec.entryContent),
+    permissions: Array.isArray(opts.permissions)
+      ? opts.permissions.filter((p) => VALID_PERMISSIONS.has(p))
+      : [...(rec.manifest.permissions || [])],
+    approvedAt: new Date().toISOString(),
+  }
+  if (!writeTrustStore(store)) return { ok: false, reason: 'could not persist trust store' }
+  return { ok: true }
+}
+
+// Revoke trust for a plugin (user disables / uninstalls).
 function revokePlugin(id) {
-  if (!id) return false
   const store = readTrustStore()
-  if (!(id in store)) return true
-  delete store[id]
-  return writeTrustStore(store)
-}
-
-function isTrusted(store, id, hash) {
-  return Boolean(id) && store[id] === hash
+  if (!store.plugins[id]) return { ok: true }
+  delete store.plugins[id]
+  return { ok: writeTrustStore(store) }
 }
 
 // Make sure the directory exists so users can drop plugins into it
@@ -185,9 +223,13 @@ function validateManifest(raw) {
 // Trust gate: a plugin is only handed its executable `entryContent` once
 // the user has approved that exact code (see the trust store above).
 // Un-approved plugins are still *listed* (so the settings UI can show a
-// "Trust" prompt) but with entryContent withheld and an explanatory
-// error, so the renderer's activatePlugin() skips them.
-function discoverPlugins() {
+// "Trust" prompt) but with entryContent withheld and needsApproval set,
+// so the renderer's activatePlugin() skips them.
+function discoverPlugins(opts = {}) {
+  // includeUntrustedSource is used ONLY by the approval round-trip, which
+  // needs to hash the pending code. The normal renderer-facing call never
+  // sets it, so untrusted code source is never handed out for execution.
+  const includeUntrustedSource = opts.includeUntrustedSource === true
   const dir = ensurePluginDir()
   let entries
   try {
@@ -258,19 +300,32 @@ function discoverPlugins() {
       continue
     }
 
-    // Trust gate: fingerprint the exact bytes the renderer would run and
-    // compare against the user-approved hash. Withhold entryContent
-    // until approved so the renderer cannot import()/activate untrusted
-    // code (which would otherwise reach window.codesynapt directly).
-    const hash = fingerprint(manifest.id, rawText, entryContent)
-    const trusted = isTrusted(trustStore, manifest.id, hash)
-    if (!trusted) {
+    // ── Trust gate ──────────────────────────────────────────────
+    // Theme plugins are CSS-only: they never execute JS and cannot hold
+    // permissions, so they are low-risk and auto-trusted. Code plugins must
+    // have a matching approval record (content hash + granted permissions)
+    // before their source is exposed to the renderer for execution. Without
+    // one we still report the plugin (so the settings UI can offer an
+    // "Approve" button) but we WITHHOLD the source (entryContent: null) and
+    // set needsApproval, so the renderer cannot import()/activate unapproved
+    // or tampered code (which would otherwise reach window.codesynapt).
+    const isTheme = manifest.type === 'theme'
+    const hash = computePluginHash(manifest, entryContent)
+    const trusted = isTheme || isTrusted(manifest, entryContent)
+    const grantedPermissions = trusted
+      ? (isTheme ? [] : (trustStore.plugins[manifest.id] || {}).permissions || [])
+      : []
+
+    if (!trusted && !includeUntrustedSource) {
       results.push({
         folder,
         manifest,
         entryPath,
         hash,
+        entryContent: null,        // never hand untrusted code to the renderer
         trusted: false,
+        needsApproval: true,
+        grantedPermissions: [],
         error: 'plugin not approved — review and trust it to enable',
       })
       continue
@@ -282,7 +337,9 @@ function discoverPlugins() {
       entryPath,
       entryContent,
       hash,
-      trusted: true,
+      trusted,
+      needsApproval: !trusted,
+      grantedPermissions,
       error: null,
     })
   }
@@ -295,9 +352,12 @@ module.exports = {
   discoverPlugins,
   validateManifest,
   // Trust / approval gate (driven from the privileged main process only)
-  getTrustStorePath,
-  readTrustStore,
+  getTrustPath,
+  computePluginHash,
+  isTrusted,
   approvePlugin,
   revokePlugin,
-  fingerprint,
+  readTrustStore,
+  DANGEROUS_PERMISSIONS,
+  VALID_PERMISSIONS,
 }

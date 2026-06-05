@@ -6,6 +6,16 @@
 // just relies on the user's system Node.
 //
 // Usage: node scripts/download-bundled-node.cjs
+//
+// OFFLINE BY DEFAULT (hard rule — see CLAUDE.md "No network calls").
+// This is a BUILD-TIME-ONLY helper: it must only ever fetch from
+// nodejs.org when invoked DIRECTLY as a script (i.e. as part of
+// `npm run dist:win`). It must never perform a network call merely
+// because some other module `require()`d it. Previously the download
+// ran at top level on import, so requiring this file from anywhere
+// (a test, a tool, an accidental import) would immediately hit the
+// network and even call process.exit() on failure. The work is now
+// wrapped in main() and gated on `require.main === module`.
 const fs = require('fs')
 const path = require('path')
 const https = require('https')
@@ -37,26 +47,13 @@ function verifyOrDie(file) {
   console.log(`[bundled-node] sha256 verified: ${actual}`)
 }
 
-if (fs.existsSync(OUT_FILE)) {
-  const size = fs.statSync(OUT_FILE).size
-  if (size > 50 * 1024 * 1024) {
-    // Already downloaded — still verify integrity before trusting/skipping.
-    verifyOrDie(OUT_FILE)
-    console.log(`[bundled-node] already present (${(size/1024/1024).toFixed(1)} MB) — skipping`)
-    process.exit(0)
-  }
-}
-
-fs.mkdirSync(OUT_DIR, { recursive: true })
-
-console.log(`[bundled-node] downloading ${URL}`)
-const file = fs.createWriteStream(OUT_FILE)
-function fetch(url) {
+function download(url, file) {
   https.get(url, (res) => {
     if (res.statusCode === 301 || res.statusCode === 302) {
       file.close()
       fs.unlinkSync(OUT_FILE)
-      return fetch(res.headers.location)
+      const next = fs.createWriteStream(OUT_FILE)
+      return download(res.headers.location, next)
     }
     if (res.statusCode !== 200) {
       console.error(`[bundled-node] HTTP ${res.statusCode}`)
@@ -74,8 +71,33 @@ function fetch(url) {
     })
   }).on('error', (e) => {
     console.error(`[bundled-node] error: ${e.message}`)
-    fs.unlinkSync(OUT_FILE)
+    try { fs.unlinkSync(OUT_FILE) } catch {}
     process.exit(1)
   })
 }
-fetch(URL)
+
+function main() {
+  if (fs.existsSync(OUT_FILE)) {
+    const size = fs.statSync(OUT_FILE).size
+    if (size > 50 * 1024 * 1024) {
+      // Already downloaded — still verify integrity before trusting/skipping.
+      verifyOrDie(OUT_FILE)
+      console.log(`[bundled-node] already present (${(size/1024/1024).toFixed(1)} MB) — skipping`)
+      process.exit(0)
+    }
+  }
+
+  fs.mkdirSync(OUT_DIR, { recursive: true })
+
+  console.log(`[bundled-node] downloading ${URL}`)
+  const file = fs.createWriteStream(OUT_FILE)
+  download(URL, file)
+}
+
+// Only fetch when run directly (`node scripts/download-bundled-node.cjs`,
+// i.e. the dist:win build step). Importing this module is a no-op.
+if (require.main === module) {
+  main()
+}
+
+module.exports = { main, NODE_VERSION, URL, OUT_FILE }

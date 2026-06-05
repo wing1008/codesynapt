@@ -1,6 +1,68 @@
 // Preload — safe IPC bridge between renderer (untrusted) and main (privileged)
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
+// ─── Plugin permission boundary ─────────────────────────────────
+//
+// Plugin code executes in the renderer's MAIN world, the same realm as the
+// app — so it can reach window.codesynapt directly and call privileged IPC
+// (writeFile/editFile) regardless of the advisory ctx.* gate in
+// plugin-host.js. The only place we can enforce permissions in a way plugin
+// code cannot tamper with is HERE, in the preload's ISOLATED world: the maps
+// below are closure-private. We expose only functions via contextBridge;
+// plugin code can call them but cannot read or replace the backing state.
+//
+// Model:
+//   - The host (trusted app code) registers each plugin's GRANTED permissions
+//     (as approved in the trust store) before activating it.
+//   - The host runs plugin code (activate + any plugin-supplied callback)
+//     inside runInPluginScope(id, fn), which marks "a plugin is the current
+//     caller". Privileged IPC consults that marker.
+//   - Defense in depth: if a privileged call's synchronous stack originates
+//     from a blob: URL (how plugin modules are loaded) we treat it as
+//     plugin-originated even if the host forgot to mark a scope.
+//
+// Default-deny: a privileged call attributed to a plugin without the matching
+// permission is rejected; non-plugin (app) calls are unaffected.
+const PRIVILEGED = {
+  'write-file': 'write-files',
+  'restore-history': 'write-files',
+}
+
+const _pluginPerms = new Map()   // pluginId -> Set<permission>
+const _scopeStack = []           // active plugin ids (supports re-entrancy)
+
+function _currentPluginId() {
+  if (_scopeStack.length) return _scopeStack[_scopeStack.length - 1]
+  // Defense in depth: detect plugin-origin async calls via stack inspection.
+  // Plugin modules are imported from blob: URLs (see plugin-host.js); any
+  // frame referencing one means a plugin is on the call path.
+  try {
+    const stack = new Error().stack || ''
+    if (/blob:/.test(stack)) return '__plugin_blob_origin__'
+  } catch { /* ignore */ }
+  return null
+}
+
+function _enforce(channel) {
+  const need = PRIVILEGED[channel]
+  if (!need) return                       // not a gated channel
+  const pid = _currentPluginId()
+  if (pid == null) return                 // app-originated call: allowed
+  const perms = _pluginPerms.get(pid)
+  if (perms && perms.has(need)) return    // plugin holds the permission
+  const who = pid === '__plugin_blob_origin__' ? 'a plugin' : `plugin "${pid}"`
+  throw new Error(
+    `Permission denied: ${who} attempted "${channel}" without the "${need}" permission. ` +
+    `Declare it in manifest.json and have the user approve the plugin.`
+  )
+}
+
+// A privileged ipcRenderer.invoke wrapper: enforce, then forward.
+function guardedInvoke(channel, ...args) {
+  _enforce(channel)
+  return ipcRenderer.invoke(channel, ...args)
+}
+
 const csApi = {
   // Imperative
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
@@ -8,10 +70,10 @@ const csApi = {
   closeFolder: () => ipcRenderer.invoke('close-folder'),
   getState: () => ipcRenderer.invoke('get-state'),
   readFile: (id) => ipcRenderer.invoke('read-file', id),
-  writeFile: (id, content) => ipcRenderer.invoke('write-file', id, content),
+  writeFile: (id, content) => guardedInvoke('write-file', id, content),
   listHistory: (id) => ipcRenderer.invoke('list-history', id),
   readHistory: (id, ts) => ipcRenderer.invoke('read-history', id, ts),
-  restoreHistory: (id, ts) => ipcRenderer.invoke('restore-history', id, ts),
+  restoreHistory: (id, ts) => guardedInvoke('restore-history', id, ts),
   setHistoryEnabled: (enabled) => ipcRenderer.invoke('set-history-enabled', enabled),
   getHistoryEnabled: () => ipcRenderer.invoke('get-history-enabled'),
   controlPort: () => ipcRenderer.invoke('control-port'),
@@ -139,6 +201,12 @@ const csApi = {
   listPlugins: () => ipcRenderer.invoke('list-plugins'),
   openPluginDir: () => ipcRenderer.invoke('open-plugin-dir'),
   pluginDir: () => ipcRenderer.invoke('plugin-dir'),
+  // Trust round-trip: the settings UI calls approvePlugin once the user
+  // consents; the main process records the content hash + granted permissions
+  // into the trust store. (Requires the matching ipcMain handlers — see the
+  // couldNotFix note in this theme's report.)
+  approvePlugin: (id, permissions) => ipcRenderer.invoke('approve-plugin', { id, permissions }),
+  revokePlugin: (id) => ipcRenderer.invoke('revoke-plugin', { id }),
 }
 
 // Expose under both names: 'codesynapt' is the canonical namespace from 0.14.6+;
@@ -146,6 +214,58 @@ const csApi = {
 // Both refer to the SAME object — no extra memory.
 contextBridge.exposeInMainWorld('codesynapt', csApi)
 contextBridge.exposeInMainWorld('fg3d', csApi)
+
+// Plugin guard control surface. The plugin HOST (trusted app code in
+// plugin-host.js) uses this to register granted permissions and to run
+// plugin code inside an attributed scope. The backing maps live in this
+// isolated world; plugin code in the main world cannot reach them, only call
+// these functions. Registering permissions is itself gated: it is a no-op if
+// invoked from inside a plugin scope (a plugin cannot grant itself rights).
+contextBridge.exposeInMainWorld('__pluginGuard', {
+  // host: declare the permissions the trust store granted this plugin
+  register(pluginId, permissions) {
+    if (typeof pluginId !== 'string') return
+    if (_scopeStack.length) return  // a plugin must not register/escalate perms
+    const set = new Set()
+    if (Array.isArray(permissions)) {
+      for (const p of permissions) if (typeof p === 'string') set.add(p)
+    }
+    _pluginPerms.set(pluginId, set)
+  },
+  unregister(pluginId) {
+    if (_scopeStack.length) return
+    _pluginPerms.delete(pluginId)
+  },
+  // host: run fn (a plugin's activate or a plugin-supplied callback) attributed
+  // to pluginId. Synchronous return is unwrapped; promises are awaited so the
+  // scope spans the async activate(). Re-entrant safe.
+  runInScope(pluginId, fn) {
+    if (typeof fn !== 'function') return undefined
+    _scopeStack.push(pluginId)
+    let popped = false
+    const pop = () => { if (!popped) { popped = true; _scopeStack.pop() } }
+    try {
+      const out = fn()
+      if (out && typeof out.then === 'function') {
+        return out.then(
+          (v) => { pop(); return v },
+          (e) => { pop(); throw e }
+        )
+      }
+      pop()
+      return out
+    } catch (e) {
+      pop()
+      throw e
+    }
+  },
+  // host: does a plugin currently hold a permission? (for the host's own
+  // advisory ctx.* gate to mirror the hard boundary)
+  has(pluginId, permission) {
+    const perms = _pluginPerms.get(pluginId)
+    return !!(perms && perms.has(permission))
+  },
+})
 
 // Platform info for renderer
 contextBridge.exposeInMainWorld('platform', {
