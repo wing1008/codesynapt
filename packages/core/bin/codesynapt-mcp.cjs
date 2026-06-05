@@ -74,10 +74,18 @@ function ensureBackend() {
   if (_backendReady) return _backendReady
   _backendReady = (async () => {
     const want = _intendedRoot()
-    // Reuse an already-running backend ONLY if it serves the same project
-    // (e.g. the desktop app open on this repo → the agent's calls pulse there).
+    // Reuse an already-running backend that serves THIS project — the desktop
+    // app open on this repo, or a `cs serve` — so the agent's calls flow there
+    // and the desktop shows them live (trace trail + blast pulse). Check the
+    // fast paths (current PORT, lock file) first, then SCAN the port range:
+    // the lock can be empty/stale and the desktop may have fallen back off the
+    // default port (7707 taken → 7708…), in which case [PORT, lock] alone would
+    // miss it and we'd wrongly self-host a disconnected backend.
+    const base = parseInt(process.env.CS_PORT || '7707', 10)
+    const cands = [PORT, _lockPort()]
+    for (let p = base; p < base + 25; p++) cands.push(p)
     const seen = new Set()
-    for (const cand of [PORT, _lockPort()]) {
+    for (const cand of cands) {
       if (!cand || seen.has(cand)) continue
       seen.add(cand)
       if (await _ping(cand) && _sameRoot(await _backendRoot(cand), want)) { PORT = cand; return }
