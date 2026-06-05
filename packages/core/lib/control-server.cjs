@@ -1519,6 +1519,30 @@ function createControlServer(opts) {
         const locale = url.searchParams.get('locale')
         const r = buildSafety(id, { deep, locale })
         if (!r) return writeJson(res, 404, { error: 'not found' })
+        // Large symbol-covered file: PUSH the function-level signal INTO the
+        // safety response. Dogfooding showed agents adopt safety heavily (incl.
+        // 5x on a 5000-line hub) but never make a separate cs_blast{function}
+        // call even when the text hint asks — so embed the file's internal hub
+        // functions (most callers) here. The agent sees internal coupling that
+        // file-level safety structurally cannot, without a second call.
+        if (r.functionLevelHint) {
+          scanner.getSymbolGraph().then((g) => {
+            const hubs = []
+            for (const sid of (g.byFile.get(id) || [])) {
+              const n = g.nodes.get(sid)
+              if (!n || (n.kind !== 'function' && n.kind !== 'method')) continue
+              const callers = g.inAdj.get(sid)?.size || 0
+              if (callers > 0) hubs.push({ name: n.qualifiedName || n.name, line: n.startLine, callers })
+            }
+            hubs.sort((a, b) => b.callers - a.callers)
+            r.internalHubs = hubs.slice(0, 8)
+            r.internalHubNote = hubs.length
+              ? 'Functions INSIDE this file ranked by caller count — editing a high-caller one ripples internally, which the file-level verdict above cannot see. For one function\'s full transitive impact: cs_blast({action:"function", id:"<name>"}).'
+              : undefined
+            return writeJson(res, 200, withMeta(r))
+          }).catch(() => writeJson(res, 200, withMeta(r)))
+          return
+        }
         return writeJson(res, 200, withMeta(r))
       }
       if (req.method === 'GET' && seg0 === 'bundle' && rest.length > 0) {
