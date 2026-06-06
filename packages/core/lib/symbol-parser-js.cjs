@@ -643,6 +643,20 @@ function extractReferences(content, fileId, index) {
       // already resolved above via the qualified `Type.method` path. memberCall
       // also rejects builtin method names before the same-file lookup.
       const isMemberCall = callee.type === 'MemberExpression'
+      // A bare call `name()` whose name is a LOCAL binding — a parameter, or a
+      // local var/const/let that is NOT itself a function — refers to that local
+      // (a callback/value), not a module function. Don't cross-file-guess it.
+      // (zod: `fn()` where `fn` is a callback parameter mis-linked to an
+      // unrelated module `fn`.) babel's own scope analysis tells us this.
+      if (!isMemberCall && callee.type === 'Identifier') {
+        const b = path.scope.getBinding(name)
+        if (b) {
+          const initPath = b.path && b.path.get && b.path.get('init')
+          const isFnLocal = (b.path && b.path.isFunctionDeclaration && b.path.isFunctionDeclaration())
+            || (initPath && initPath.isFunction && initPath.isFunction())
+          if (!isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) return
+        }
+      }
       if (!target && index.resolveCall) {
         target = index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
       }

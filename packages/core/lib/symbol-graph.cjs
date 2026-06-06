@@ -59,6 +59,15 @@ const BUILTIN_NAMES = new Set([
   'save', 'load', 'update', 'create', 'show', 'hide', 'flush', 'data',
   'tostring', 'valueof', 'keys', 'values', 'entries', 'includes', 'indexof',
   'trim', 'concat', 'flat', 'sort', 'reverse', 'call', 'apply', 'bind',
+  // String / Object builtins that collided with same-named user helpers on
+  // member calls (zod precision audit: Object.defineProperty, str.startsWith…).
+  // Deliberately NOT included: parse / stringify / validate / format — those
+  // are very commonly USER methods (e.g. zod's schema.parse()), so blocking
+  // them would cost real recall.
+  'defineproperty', 'getownpropertynames', 'getprototypeof', 'freeze',
+  'startswith', 'endswith', 'normalize', 'tolowercase', 'touppercase',
+  'padstart', 'padend', 'repeat', 'charat', 'charcodeat', 'codepointat',
+  'substring', 'substr', 'lastindexof', 'tofixed',
 ])
 
 function registerParser(extOrExts, parser) {
