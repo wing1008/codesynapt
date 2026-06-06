@@ -842,6 +842,10 @@ function makeParser(ext) {
           passTwo: false,
         }
         walk(tree.rootNode, ctx)
+        // Module-scope pseudo-symbol (parity with the babel parser): the source
+        // for top-level / module-init calls so they aren't dropped for lack of
+        // an enclosing function.
+        ctx.symbols.push({ id: mkId(fileId, '<module>', 1), name: '<module>', qualifiedName: '<module>', kind: 'module', file: fileId, startLine: 1, endLine: 1, signature: '', doc: '', exported: false })
         tree.delete?.()
         return ctx.symbols
       } catch (e) {
@@ -867,6 +871,9 @@ function makeParser(ext) {
             : null),
           passTwo: true,
         }
+        // Module base so top-level / module-scope calls attribute to <module>
+        // instead of being dropped (parity with the babel parser).
+        ctx.fnStack.push(mkId(fileId, '<module>', 1))
         walk(tree.rootNode, ctx)
         tree.delete?.()
         return ctx.edges
