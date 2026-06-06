@@ -167,6 +167,16 @@ function extractSymbols(content, fileId) {
   let currentClass = null
   const cjsExports = new Set()   // names assigned to module.exports / exports.X
 
+  // Module-scope pseudo-symbol: the source for top-level / module-init calls
+  // (`export const X = factory(...)`) and callbacks whose nearest named
+  // enclosing IS the module. Without a module source those calls have no
+  // enclosing symbol and are dropped — measured as the single biggest
+  // static-completeness gap (zod: ~1036 module-level/callback calls lost).
+  symbols.push({
+    id: mkId(fileId, '<module>', 1), name: '<module>', qualifiedName: '<module>',
+    kind: 'module', file: fileId, startLine: 1, endLine: 1, signature: '', doc: '', exported: false,
+  })
+
   traverse(ast, {
     FunctionDeclaration(path) {
       const n = path.node
@@ -344,6 +354,10 @@ function extractReferences(content, fileId, index) {
   if (!ast) return []
   const edges = []
   const enclosing = makeEnclosingStack()
+  // Seed the stack with the module pseudo-symbol so a call at top level (or in
+  // a callback whose nearest named enclosing is the module) attributes to the
+  // module instead of being dropped. Never popped — it is the base.
+  enclosing.push(mkId(fileId, '<module>', 1))
   let currentClass = null
   let currentPropTypes = null   // class property name → known type (for this.x.m())
 

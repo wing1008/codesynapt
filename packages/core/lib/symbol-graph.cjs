@@ -64,7 +64,8 @@ const BUILTIN_NAMES = new Set([
   // Deliberately NOT included: parse / stringify / validate / format — those
   // are very commonly USER methods (e.g. zod's schema.parse()), so blocking
   // them would cost real recall.
-  'defineproperty', 'getownpropertynames', 'getprototypeof', 'freeze',
+  'defineproperty', 'getownpropertydescriptor', 'getownpropertynames',
+  'getprototypeof', 'setprototypeof', 'freeze', 'seal', 'preventextensions',
   'startswith', 'endswith', 'normalize', 'tolowercase', 'touppercase',
   'padstart', 'padend', 'repeat', 'charat', 'charcodeat', 'codepointat',
   'substring', 'substr', 'lastindexof', 'tofixed',
