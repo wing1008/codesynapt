@@ -592,6 +592,7 @@ function extractReferences(content, fileId, index) {
       const callee = path.node.callee
       let name = null
       let receiverClass = null
+      let memberViaImport = false   // `ns.fn()` where ns is `import * as ns` / default import
       if (callee.type === 'Identifier') name = callee.name
       else if (callee.type === 'MemberExpression' && callee.property?.type === 'Identifier') {
         name = callee.property.name
@@ -601,6 +602,13 @@ function extractReferences(content, fileId, index) {
         if (obj?.type === 'Identifier') {
           const t = lookupVarType(obj.name)
           if (t) receiverClass = t
+          else {
+            // `ns.fn()` where `ns` is a namespace/default import → `fn` lives in
+            // the IMPORTED module, not same-file. Resolve imported-only so it
+            // doesn't grab a same-file function of that name (was a phantom).
+            const b = path.scope.getBinding(obj.name)
+            if (b && b.path && (b.path.isImportNamespaceSpecifier?.() || b.path.isImportDefaultSpecifier?.())) memberViaImport = true
+          }
         } else if (obj?.type === 'ThisExpression' && currentClass) {
           receiverClass = currentClass
         } else if (obj?.type === 'MemberExpression'
@@ -658,7 +666,9 @@ function extractReferences(content, fileId, index) {
         }
       }
       if (!target && index.resolveCall) {
-        target = index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
+        target = memberViaImport
+          ? index.resolveCall(fileId, name, { importedOnly: true, memberCall: true })
+          : index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
       }
       if (!target || target.id === src) return
       edges.push({

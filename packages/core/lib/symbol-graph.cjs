@@ -153,7 +153,7 @@ class SymbolGraph {
   // they share a name. AI agents downstream would get noise edges
   // and follow false trails. Conservative beats clever here.
   // If the host wants the loose match, set `allowAny: true`.
-  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false } = {}) {
+  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false } = {}) {
     if (!name) return null
     // Untyped member call `obj.foo()` where foo is a builtin / common method
     // name (.add/.get/.map/.then…): never a call to a user free function of
@@ -208,11 +208,15 @@ class SymbolGraph {
       // constructor `Transformer()` onto a function `transformer`, etc.
       // — phantom edges to same-spelled-different-case symbols (B-2).
       if (node.name !== name) continue
-      if (node.file === fromFileId) { sameFile = node; break }
+      // importedOnly (a namespace/default-import member call `ns.fn()`): the
+      // target is in the IMPORTED module, never same-file — don't break on a
+      // same-file match (that was the `ns.fn()` → same-file phantom), keep
+      // scanning for the imported one.
+      if (node.file === fromFileId) { sameFile = node; if (!importedOnly) break }
       if (!imported && importsOf && importsOf.has(node.file)) imported = node
       if (!isAuxPath(node.file)) { prodCount++; if (!prodOne) prodOne = node }
     }
-    if (sameFile) return sameFile
+    if (sameFile && !importedOnly) return sameFile
     if (imported) return imported
     if (!allowAny) return null
     // Tightened fallback. The old code returned ANY same-named symbol here,
