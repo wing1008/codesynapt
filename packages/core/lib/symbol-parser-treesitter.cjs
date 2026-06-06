@@ -395,10 +395,15 @@ function walk(node, ctx) {
           const rc = pyReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
         }
-        // Else: loose any-file fallback. Pass memberCall for `obj.method()` so
-        // builtin method names are rejected before a same-file grab (precision
-        // — matches the babel parser; protects the newly-registered languages).
-        if (!target) target = ctx.resolve(calleeName, { forCall: true, memberCall: isMemberCallNode(node) })
+        // Else: fallback. A bare `foo()` allows the cross-file unique-production
+        // guess; an untyped `obj.method()` does NOT (unknown receiver → that
+        // guess is a phantom), so member calls resolve same-file/imported only
+        // + reject builtin method names. Matches the babel parser, precision-
+        // first. Typed members were already resolved above (Python qualified).
+        if (!target) {
+          const member = isMemberCallNode(node)
+          target = ctx.resolve(calleeName, { forCall: !member, memberCall: member })
+        }
         if (target && target.id !== src) {
           const key = src + '|' + target.id + '|call'
           if (!ctx.seen.has(key)) {

@@ -633,16 +633,18 @@ function extractReferences(content, fileId, index) {
           ? index.resolveCall(fileId, `${receiverClass}.${name}`, { allowAny: true, qualifiedOnly: true })
           : null
       }
-      // Bare-name fallback for BOTH `foo()` and untyped `obj.foo()`. The
-      // tightened resolveCall (builtin-name filter + exact-case + unique-
-      // production-candidate) keeps this precise; passing memberCall makes
-      // it reject builtin method names (.add/.get) BEFORE the same-file
-      // lookup so `visited.add()` can't grab a same-file `add`. B-1.1 blocked
-      // member calls entirely here, which collapsed recall on method-heavy
-      // code (entry.js measured 6%); this recovers it without the FP.
+      // Bare-name fallback. A bare `foo()` is a strong signal → allowAny (incl.
+      // the unique-production cross-file guess). An UNTYPED `obj.foo()` is NOT:
+      // the receiver type is unknown, so a cross-file unique-production guess
+      // mis-links it to an unrelated same-named object-method/free function
+      // (measured: ~23 phantom edges on zod). So untyped member calls resolve
+      // only same-file / imported (allowAny:false) — precision over the guess
+      // ("a wrong edge is worse than a missing one"). Typed member calls were
+      // already resolved above via the qualified `Type.method` path. memberCall
+      // also rejects builtin method names before the same-file lookup.
       const isMemberCall = callee.type === 'MemberExpression'
       if (!target && index.resolveCall) {
-        target = index.resolveCall(fileId, name, { allowAny: true, memberCall: isMemberCall })
+        target = index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
       }
       if (!target || target.id === src) return
       edges.push({
