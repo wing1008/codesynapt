@@ -600,7 +600,10 @@ function extractReferences(content, fileId, index) {
         else enclosing.pop()
       },
     },
-    CallExpression(path) {
+    // Also handles `new X()` — the babel parser previously had no NewExpression
+    // handler, so every constructor call was dropped (measured: 202 missed on
+    // zod). `new X()`'s callee is the class, which resolves like any bare call.
+    'CallExpression|NewExpression'(path) {
       const src = enclosing.top()
       if (!src) return
       const callee = path.node.callee
@@ -675,6 +678,7 @@ function extractReferences(content, fileId, index) {
         if (b) {
           const initPath = b.path && b.path.get && b.path.get('init')
           const isFnLocal = (b.path && b.path.isFunctionDeclaration && b.path.isFunctionDeclaration())
+            || (b.path && b.path.isClassDeclaration && b.path.isClassDeclaration())
             || (initPath && initPath.isFunction && initPath.isFunction())
           if (!isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) return
         }
