@@ -108,6 +108,8 @@ class SymbolGraph {
     // call resolution disambiguate same-name symbols across files
     // by preferring targets in files the caller actually imports.
     this.fileImports = new Map() // fileId → Set<importedFileId>
+    this.fileReexports = new Map() // fileId → Set<file it re-exports from (barrel `export * from`)>
+    this._reexportReach = new Map() // fileId → expanded import+reexport reachable set (cache)
     this.builtAt  = 0
     this.fileCount = 0
     this.scanMs = 0
@@ -139,6 +141,8 @@ class SymbolGraph {
     this.callIn.clear()
     this._edgeKeys.clear()
     this.fileImports.clear()
+    this.fileReexports.clear()
+    this._reexportReach.clear()
     this.builtAt = 0
     this.fileCount = 0
     this.scanMs = 0
@@ -156,6 +160,29 @@ class SymbolGraph {
   // they share a name. AI agents downstream would get noise edges
   // and follow false trails. Conservative beats clever here.
   // If the host wants the loose match, set `allowAny: true`.
+  // Files reachable from `fromFileId`'s imports, FOLLOWING barrel re-export
+  // chains (`export * from './x'`). Lets `ns.fn()` (ns = `import * as ns from
+  // './index'`) resolve `fn` to the real declaration that index.ts only
+  // re-exports. Cached per caller.
+  _importReachable(fromFileId) {
+    let cached = this._reexportReach.get(fromFileId)
+    if (cached) return cached
+    const out = new Set()
+    const direct = this.fileImports.get(fromFileId)
+    if (direct) {
+      const queue = [...direct]
+      while (queue.length) {
+        const f = queue.shift()
+        if (out.has(f)) continue
+        out.add(f)
+        const rx = this.fileReexports.get(f)
+        if (rx) for (const t of rx) if (!out.has(t)) queue.push(t)
+      }
+    }
+    this._reexportReach.set(fromFileId, out)
+    return out
+  }
+
   resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false } = {}) {
     if (!name) return null
     // Untyped member call `obj.foo()` where foo is a builtin / common method
@@ -209,7 +236,9 @@ class SymbolGraph {
     // production symbol bears the name — more than one is ambiguous and we
     // refuse to guess (see docs/SYMBOL-MODE-PLAN.md §5).
     let prodOne = null, prodCount = 0
-    const importsOf = this.fileImports.get(fromFileId)
+    // importedOnly follows barrel re-export chains so `ns.fn()` resolves to the
+    // file that actually declares fn, not just the directly-imported barrel.
+    const importsOf = importedOnly ? this._importReachable(fromFileId) : this.fileImports.get(fromFileId)
     for (const id of set) {
       const node = this.nodes.get(id)
       if (!node) continue
@@ -470,6 +499,7 @@ class SymbolGraph {
     this.clear()
     // Set imports *after* clear so the host-provided map survives.
     if (fileImports) this.fileImports = fileImports
+    if (options.fileReexports) this.fileReexports = options.fileReexports
     // Big-repo safety knobs. None of them block — they cap the work
     // so a runaway monorepo (100k+ symbols) doesn't OOM the process.
     const MAX_SYMBOLS = options.maxSymbols

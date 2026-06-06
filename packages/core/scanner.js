@@ -691,12 +691,17 @@ export class Scanner extends EventEmitter {
       entries.push({ id: f.id, absPath: f.absPath, ext: f.ext })
     }
     const fileImports = new Map()
+    const fileReexports = new Map()   // barrel `export * from` — for re-export chain resolution
     for (const e of this.edges) {
       if (!fileImports.has(e.s)) fileImports.set(e.s, new Set())
       fileImports.get(e.s).add(e.t)
+      if (e.k === 'reexport') {
+        if (!fileReexports.has(e.s)) fileReexports.set(e.s, new Set())
+        fileReexports.get(e.s).add(e.t)
+      }
     }
     const g = new SymbolGraph()
-    await g.build(entries, fileImports, {})
+    await g.build(entries, fileImports, { fileReexports })
     this.symbolGraph = g
     this._symbolGraphStale = false
     return g
