@@ -249,6 +249,11 @@ class SymbolGraph {
       // constructor `Transformer()` onto a function `transformer`, etc.
       // — phantom edges to same-spelled-different-case symbols (B-2).
       if (node.name !== name) continue
+      // A bare call `foo()` cannot target a METHOD (`Class.foo` needs a
+      // receiver). Skipping same-file methods lets a method body's `dumps()`
+      // (calling the IMPORTED free `dumps`) resolve to the import instead of
+      // self-shadowing to the enclosing method.
+      if (!memberCall && node.qualifiedName && node.qualifiedName.includes('.') && node.qualifiedName !== node.name) continue
       // importedOnly (a namespace/default-import member call `ns.fn()`): the
       // target is in the IMPORTED module, never same-file — don't break on a
       // same-file match (that was the `ns.fn()` → same-file phantom), keep
