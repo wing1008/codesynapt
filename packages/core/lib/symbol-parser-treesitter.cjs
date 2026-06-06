@@ -395,9 +395,10 @@ function walk(node, ctx) {
           const rc = pyReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
         }
-        // Else: loose any-file fallback for calls (`foo()` is a strong signal);
-        // references below stay strict.
-        if (!target) target = ctx.resolve(calleeName, { forCall: true })
+        // Else: loose any-file fallback. Pass memberCall for `obj.method()` so
+        // builtin method names are rejected before a same-file grab (precision
+        // — matches the babel parser; protects the newly-registered languages).
+        if (!target) target = ctx.resolve(calleeName, { forCall: true, memberCall: isMemberCallNode(node) })
         if (target && target.id !== src) {
           const key = src + '|' + target.id + '|call'
           if (!ctx.seen.has(key)) {
@@ -431,10 +432,17 @@ function walk(node, ctx) {
             parent.type === 'parameter' ||
             parent.type === 'function_value_parameters' ||
             parent.type === 'value_definition' ||
-            parent.type === 'simple_value_definition'
+            parent.type === 'simple_value_definition' ||
+            // C/C++ the function's own name sits in the declarator chain, not
+            // directly under function_definition — without this the name token
+            // emitted a phantom self/same-name ref edge.
+            parent.type === 'function_declarator'
           )
-        // Skip if parent is a call_expression and we're the callee
-        const isCallee = parent && cfg.call?.includes(parent.type)
+        // Skip if parent is a call_expression and we're the callee, OR a
+        // member/navigation access (`u.save` — the `save` property is resolved
+        // by the call pass, not a free reference to a same-named function;
+        // otherwise it emits a phantom ref edge).
+        const isCallee = parent && (cfg.call?.includes(parent.type) || NAV_TYPES.has(parent.type))
         if (!isDeclaration && !isCallee) {
           const target = ctx.resolve(name)
           if (target && target.id !== src) {
@@ -781,11 +789,27 @@ function makeResolver(fileId, index) {
   // a file the caller actually imports — so local variables that
   // happen to share a name with some unrelated function elsewhere
   // don't produce a noise edge.
-  return function resolve(name, { forCall = false } = {}) {
+  return function resolve(name, { forCall = false, memberCall = false } = {}) {
     return index.resolveCall
-      ? index.resolveCall(fileId, name, { allowAny: forCall })
+      ? index.resolveCall(fileId, name, { allowAny: forCall, memberCall })
       : null
   }
+}
+
+// Is this call a member/navigation call (`obj.method()`) rather than a bare
+// `foo()`? The callee node is a navigation/attribute type. Member calls on an
+// untyped receiver must pass memberCall so resolveCall rejects builtin method
+// names (.map/.get/.then…) instead of grabbing a same-file free function of
+// that name — the same guard the babel JS parser uses.
+function isMemberCallNode(callNode) {
+  const fn = callNode.childForFieldName?.('function') || callNode.childForFieldName?.('name')
+  if (fn && NAV_TYPES.has(fn.type)) return true
+  for (let i = 0; i < callNode.namedChildCount; i++) {
+    const c = callNode.namedChild(i)
+    if (IDENT_TYPES.has(c.type)) return false
+    if (NAV_TYPES.has(c.type)) return true
+  }
+  return false
 }
 
 // Languages whose parser has already emitted a failure warning — so a broken

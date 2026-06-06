@@ -1813,7 +1813,12 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
   // Before giving up on a bare specifier, try TypeScript path mapping
   // (`@excalidraw/common` → `./packages/common/src/index.ts`) for any
   // ext that uses tsconfig — JS/TS, plus jsconfig for plain JS.
-  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(fromExt)) {
+  // Include component exts (vue/svelte/astro) + mts/cts — their <script>/
+  // frontmatter imports are extracted and use the same tsconfig aliases, but
+  // were excluded here, so every `@alias/*` import in a component resolved to
+  // null (and alias-only components became false orphans). Matches the
+  // workspace-package list just below.
+  if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts', 'vue', 'svelte', 'astro'].includes(fromExt)) {
     const r = resolveTsconfigPath(spec, rootAbs, validIds)
     if (r) return r
   }

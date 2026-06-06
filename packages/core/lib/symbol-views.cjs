@@ -31,7 +31,7 @@ function symbolCoverage(files, supportedExts) {
     coveragePct: total ? Math.round((100 * covered) / total) : 0,
     uncoveredLangs: uncovered.slice(0, 8),
     note: covered < total
-      ? 'Symbol (function-level) graph covers JS/TS + Python only; other languages are tracked at file level (layer-1) only.'
+      ? 'Symbol (function-level) graph covers JS/TS, Python, and the validated tree-sitter languages (Go, Rust, Java, Kotlin, Swift, C#, PHP, C/C++, Bash); other languages are tracked at file level (layer-1) only.'
       : undefined,
   }
 }
