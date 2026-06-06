@@ -97,6 +97,7 @@ class SymbolGraph {
     // Kept as a separate index so callersOf/calleesOf semantics are unchanged.
     this.callOut = new Map()    // symbolId → Set<calleeId>   (kind === 'call')
     this.callIn  = new Map()    // symbolId → Set<callerId>   (kind === 'call')
+    this.extendsOut = new Map() // classId → Set<baseId>      (extends/implements)
     // Dedup guard for the raw edge log: (source␞target␞kind) seen-set so a
     // symbol called from two sites (foo() on line 5 AND line 9) yields ONE
     // edge, matching the deduped adjacency. Without this edgeCount over-counts
@@ -131,6 +132,7 @@ class SymbolGraph {
     this.byFile.clear()
     this.byName.clear()
     this.outAdj.clear()
+    this.extendsOut.clear()
     this.inAdj.clear()
     this.callOut.clear()
     this.callIn.clear()
@@ -177,6 +179,15 @@ class SymbolGraph {
           const node = this.nodes.get(id)
           if (node?.qualifiedName === name) return node
         }
+      }
+      // Class-hierarchy (MRO) walk: `Sub.method` with no direct match — the
+      // method is inherited. Follow extends/implements edges to the bases and
+      // try `Base.method`. (Flask.register_blueprint → App.register_blueprint.)
+      const dot = name.lastIndexOf('.')
+      if (dot > 0) {
+        const typeName = name.slice(0, dot)
+        const inh = this._qualifiedViaHierarchy(typeName, name.slice(dot + 1), new Set([typeName.toLowerCase()]))
+        if (inh) return inh
       }
       // A typed member call (`Type.method`) with no exact qualifiedName
       // match must NOT degrade to a bare-name guess — that is how
@@ -231,6 +242,30 @@ class SymbolGraph {
     return null
   }
 
+  // Walk a class's extends/implements chain looking for `Base.method`. Bounded
+  // by `seen` (cycle/diamond guard). Returns the inherited method node or null.
+  _qualifiedViaHierarchy(typeName, method, seen) {
+    const clsSet = this.byName.get(typeName.toLowerCase())
+    if (!clsSet) return null
+    const mSet = this.byName.get(method.toLowerCase())
+    for (const cid of clsSet) {
+      const cnode = this.nodes.get(cid)
+      if (!cnode || cnode.name !== typeName) continue
+      const bases = this.extendsOut.get(cid)
+      if (!bases) continue
+      for (const bid of bases) {
+        const bnode = this.nodes.get(bid)
+        if (!bnode || seen.has(bnode.name.toLowerCase())) continue
+        seen.add(bnode.name.toLowerCase())
+        const q = `${bnode.name}.${method}`
+        if (mSet) for (const id of mSet) { const n = this.nodes.get(id); if (n?.qualifiedName === q) return n }
+        const up = this._qualifiedViaHierarchy(bnode.name, method, seen)
+        if (up) return up
+      }
+    }
+    return null
+  }
+
   addNode(node) {
     this.nodes.set(node.id, node)
     if (!this.byFile.has(node.file)) this.byFile.set(node.file, new Set())
@@ -281,6 +316,13 @@ class SymbolGraph {
     // byEdgeKind) — we just don't let it inflate the call adjacency. Per the
     // method contract we report it as newly added (return true) but build no
     // adjacency for it.
+    // Class-hierarchy index (extends/implements) — lets resolveCall walk from a
+    // class to its bases/interfaces so an inherited method `Sub.m()` resolves to
+    // `Base.m`. Kept separate from call adjacency (it is not a call).
+    if (kind === 'extends' || kind === 'implements') {
+      if (!this.extendsOut.has(source)) this.extendsOut.set(source, new Set())
+      this.extendsOut.get(source).add(target)
+    }
     if (kind !== 'call') return true
     if (!this.nodes.has(source) || !this.nodes.has(target)) return true
     // inAdj/outAdj back callersOf()/calleesOf() (call graph only, per above).
