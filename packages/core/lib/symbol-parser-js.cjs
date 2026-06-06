@@ -193,6 +193,7 @@ function extractSymbols(content, fileId) {
         signature: signatureOf(n, content),
         doc: docOf(n),
         exported: path.parent?.type?.startsWith('Export') ?? false,
+        returnType: extractTypeName(n.returnType?.typeAnnotation),
       })
     },
     ClassDeclaration: {
@@ -231,6 +232,7 @@ function extractSymbols(content, fileId) {
         signature: signatureOf(n, content),
         doc: docOf(n),
         exported: false,
+        returnType: extractTypeName(n.returnType?.typeAnnotation),
       })
     },
     VariableDeclarator(path) {
@@ -253,6 +255,7 @@ function extractSymbols(content, fileId) {
         signature: signatureOf(n, content),
         doc: docOf(path.parentPath?.parent),
         exported: false,
+        returnType: extractTypeName(init.returnType?.typeAnnotation),
       })
     },
     TSInterfaceDeclaration(path) {
@@ -391,6 +394,35 @@ function extractReferences(content, fileId, index) {
     }
     return null
   }
+  // Resolve a CallExpression's STATIC return type — the TS return annotation on
+  // the called function/method (now carried on every symbol node). This is what
+  // turns member-call DATA FLOW into edges: `const s = make(); s.parse()` and
+  // the chain `make().parse()` both need to know `make()` yields a `Schema` so
+  // `.parse()` resolves to `Schema.parse`. Unlike the name heuristics below this
+  // is a RESOLVED type (read off the callee's real signature), so it is exact —
+  // no wrong edge. Returns a type name or null. `seen` guards mutual recursion.
+  function callReturnType(callNode, seen) {
+    if (!callNode) return null
+    if (callNode.type === 'NewExpression') return extractTypeName(callNode.callee)  // new X() : X
+    if (callNode.type !== 'CallExpression' || !index.resolveCall) return null
+    const callee = callNode.callee
+    if (!callee) return null
+    let resolved = null
+    if (callee.type === 'Identifier') {
+      resolved = index.resolveCall(fileId, callee.name, { allowAny: true })
+    } else if (callee.type === 'MemberExpression' && callee.property?.type === 'Identifier') {
+      let recv = null
+      const obj = callee.object
+      if (obj?.type === 'Identifier') recv = lookupVarType(obj.name)
+      else if (obj?.type === 'ThisExpression' && currentClass) recv = currentClass
+      else if ((obj?.type === 'CallExpression' || obj?.type === 'NewExpression')) {
+        // chain `a().b().c()` — bound recursion so a cycle can't loop forever
+        if (!seen || seen < 8) recv = callReturnType(obj, (seen || 0) + 1)
+      }
+      if (recv) resolved = index.resolveCall(fileId, `${recv}.${callee.property.name}`, { allowAny: true, qualifiedOnly: true })
+    }
+    return resolved?.returnType || null
+  }
   function harvestTypesFrom(fnNode) {
     const types = topTypes()
     if (!types) return
@@ -427,10 +459,12 @@ function extractReferences(content, fileId, index) {
         const ann = d.id.typeAnnotation?.typeAnnotation
         const annName = extractTypeName(ann)
         if (annName) { types.set(varName, annName); continue }
-        // `new User()` / `new User(args)` initializer
-        if (d.init?.type === 'NewExpression') {
-          const cls = extractTypeName(d.init.callee)
-          if (cls) { types.set(varName, cls); continue }
+        // `new User()` / `const s = make()` / `factory()` — RESOLVED return
+        // type (the TS return annotation on the called fn). Exact (read off the
+        // callee's real signature), so it precedes the name-based guesses below.
+        if (d.init?.type === 'NewExpression' || d.init?.type === 'CallExpression') {
+          const rt = callReturnType(d.init)
+          if (rt) { types.set(varName, rt); continue }
         }
         // 3) `const u = User.find(...)` / `User.create(...)` — assume
         //    static factory returns the same type. Heuristic but
@@ -636,6 +670,12 @@ function extractReferences(content, fileId, index) {
           // property type (`this.collection: Collection`). Type is known, so
           // qualified resolution stays precise.
           const t = currentPropTypes.get(obj.property.name)
+          if (t) receiverClass = t
+        } else if (obj?.type === 'CallExpression' || obj?.type === 'NewExpression') {
+          // `make().method()` / `getRepo().find()` — receiver is itself a call;
+          // its STATIC return type (TS annotation on the callee) gives the type.
+          // This is the dominant member-call data-flow gap (e.g. `z.object().parse()`).
+          const t = callReturnType(obj)
           if (t) receiverClass = t
         }
       }
