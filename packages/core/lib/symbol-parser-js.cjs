@@ -318,6 +318,30 @@ function extractSymbols(content, fileId) {
         signature: signatureOf(n, content), doc: docOf(n), exported: false,
       })
     },
+    // Re-export aliases: `export { _slugify as slugify } from './api'` (or a
+    // local `export { _slugify as slugify }`). The exported name (`slugify`) is
+    // what a namespace member call `ns.slugify()` sees, but the real symbol is
+    // `_slugify` — so without this the call mis-resolves to an unrelated
+    // same-named symbol that happens to be reachable through a barrel (measured
+    // wrong edge: `checks.slugify` → `util.slugify`). Recorded as an alias entry
+    // (routed to the graph's fileExportAlias, not added as a node) so resolution
+    // can redirect `slugify` → `_slugify` in the source module.
+    ExportNamedDeclaration(path) {
+      const n = path.node
+      if (!n.specifiers || !n.specifiers.length) return
+      const srcSpec = n.source?.value || null
+      for (const sp of n.specifiers) {
+        if (sp.type !== 'ExportSpecifier') continue
+        const exported = sp.exported?.name || sp.exported?.value
+        const local = sp.local?.name
+        if (!exported || !local) continue
+        // Only renames (local !== exported) or sourced re-exports carry new
+        // information; a plain `export { foo }` of an in-file symbol is already
+        // the node itself.
+        if (local === exported && !srcSpec) continue
+        symbols.push({ __exportAlias: true, file: fileId, exported, orig: local, srcSpec })
+      }
+    },
     // CommonJS exports: `module.exports = foo`, `module.exports = { foo, bar }`,
     // `module.exports.foo = …`, `exports.foo = …`. The visitors above default
     // exported:false and only knew ES `export`, so CJS-exported functions were
@@ -356,6 +380,31 @@ function extractReferences(content, fileId, index) {
   const ast = parseAst(content, ext)
   if (!ast) return []
   const edges = []
+  // Resolve a relative module specifier (`./checks`, `../core/util`) to the
+  // graph's file id, so a namespace member call `ns.fn()` can be PINNED to the
+  // exact module `ns` came from (no cross-import same-name mis-link). Returns a
+  // fileId present in the graph, or null (external pkg / unresolvable).
+  function resolveImportSource(source) {
+    if (!source || source[0] !== '.') return null
+    const dir = fileId.includes('/') ? fileId.slice(0, fileId.lastIndexOf('/')) : ''
+    const stack = []
+    for (const p of (dir ? dir.split('/') : []).concat(source.split('/'))) {
+      if (p === '' || p === '.') continue
+      if (p === '..') stack.pop()
+      else stack.push(p)
+    }
+    const base = stack.join('/')
+    // TS resolves `./checks.js` to `./checks.ts` — strip a trailing module
+    // extension to a stem and try real source extensions on that too.
+    const stem = base.replace(/\.(js|jsx|mjs|cjs|ts|tsx)$/, '')
+    const exts = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.d.ts',
+      '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.mjs']
+    if (index.byFile) {
+      if (index.byFile.has(base)) return base
+      for (const e of exts) { const c = stem + e; if (index.byFile.has(c)) return c }
+    }
+    return null
+  }
   const enclosing = makeEnclosingStack()
   // Seed the stack with the module pseudo-symbol so a call at top level (or in
   // a callback whose nearest named enclosing is the module) attributes to the
@@ -644,6 +693,7 @@ function extractReferences(content, fileId, index) {
       let name = null
       let receiverClass = null
       let memberViaImport = false   // `ns.fn()` where ns is `import * as ns` / default import
+      let nsModule = null           // the resolved source module fileId of `ns` (pin target)
       if (callee.type === 'Identifier') name = callee.name
       else if (callee.type === 'MemberExpression' && callee.property?.type === 'Identifier') {
         name = callee.property.name
@@ -658,7 +708,13 @@ function extractReferences(content, fileId, index) {
             // the IMPORTED module, not same-file. Resolve imported-only so it
             // doesn't grab a same-file function of that name (was a phantom).
             const b = path.scope.getBinding(obj.name)
-            if (b && b.path && (b.path.isImportNamespaceSpecifier?.() || b.path.isImportDefaultSpecifier?.())) memberViaImport = true
+            if (b && b.path && (b.path.isImportNamespaceSpecifier?.() || b.path.isImportDefaultSpecifier?.())) {
+              memberViaImport = true
+              // Pin to the exact module `ns` was imported from. b.path is the
+              // specifier; its parent is the ImportDeclaration carrying `source`.
+              const decl = b.path.parent
+              nsModule = resolveImportSource(decl?.source?.value)
+            }
           }
         } else if (obj?.type === 'ThisExpression' && currentClass) {
           receiverClass = currentClass
@@ -725,7 +781,7 @@ function extractReferences(content, fileId, index) {
       }
       if (!target && index.resolveCall) {
         target = memberViaImport
-          ? index.resolveCall(fileId, name, { importedOnly: true, memberCall: true })
+          ? index.resolveCall(fileId, name, { importedOnly: true, memberCall: true, inModule: nsModule })
           : index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
       }
       if (!target || target.id === src) return

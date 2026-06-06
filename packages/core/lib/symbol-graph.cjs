@@ -110,6 +110,11 @@ class SymbolGraph {
     this.fileImports = new Map() // fileId → Set<importedFileId>
     this.fileReexports = new Map() // fileId → Set<file it re-exports from (barrel `export * from`)>
     this._reexportReach = new Map() // fileId → expanded import+reexport reachable set (cache)
+    // Renamed/sourced re-exports: fileId → Map<exportedName, {orig, srcSpec}>.
+    // Lets a namespace member call `ns.bar()` redirect to the real `_bar` when
+    // the module does `export { _bar as bar } from './x'` (alias hides the true
+    // name from the byName index).
+    this.fileExportAlias = new Map()
     this.builtAt  = 0
     this.fileCount = 0
     this.scanMs = 0
@@ -143,6 +148,8 @@ class SymbolGraph {
     this.fileImports.clear()
     this.fileReexports.clear()
     this._reexportReach.clear()
+    this._moduleReachCache?.clear()
+    this.fileExportAlias.clear()
     this.builtAt = 0
     this.fileCount = 0
     this.scanMs = 0
@@ -183,7 +190,81 @@ class SymbolGraph {
     return out
   }
 
-  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false } = {}) {
+  // Module + everything it re-exports (barrel `export * from`). Used to pin a
+  // namespace member call `ns.fn()` to the module `ns` was imported from, so it
+  // can never grab a same-named symbol from an UNRELATED import (the
+  // `checks.slugify` → `util.slugify` wrong-function bug).
+  _moduleReach(moduleFileId) {
+    if (!this._moduleReachCache) this._moduleReachCache = new Map()
+    const cached = this._moduleReachCache.get(moduleFileId)
+    if (cached) return cached
+    const out = new Set([moduleFileId])
+    const queue = [moduleFileId]
+    while (queue.length) {
+      const f = queue.shift()
+      const rx = this.fileReexports.get(f)
+      if (rx) for (const t of rx) if (!out.has(t)) { out.add(t); queue.push(t) }
+    }
+    this._moduleReachCache.set(moduleFileId, out)
+    return out
+  }
+
+  // Resolve a relative module specifier to a graph fileId (mirror of the JS
+  // parser's resolver, but graph-side for alias chains). TS maps `./x.js`→`x.ts`.
+  _resolveSpec(fromFileId, spec) {
+    if (!spec || spec[0] !== '.') return null
+    const dir = fromFileId.includes('/') ? fromFileId.slice(0, fromFileId.lastIndexOf('/')) : ''
+    const stack = []
+    for (const p of (dir ? dir.split('/') : []).concat(spec.split('/'))) {
+      if (p === '' || p === '.') continue
+      if (p === '..') stack.pop()
+      else stack.push(p)
+    }
+    const base = stack.join('/')
+    if (this.byFile.has(base)) return base
+    const stem = base.replace(/\.(js|jsx|mjs|cjs|ts|tsx)$/, '')
+    for (const e of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.d.ts',
+      '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.mjs']) {
+      const c = stem + e
+      if (this.byFile.has(c)) return c
+    }
+    return null
+  }
+
+  // Redirect an exported name through a module's rename re-exports to the real
+  // declaration: `export { _bar as bar } from './x'` makes `ns.bar` → `_bar` in
+  // x. Follows alias chains (bounded). Returns the real node or null.
+  _resolveExportAlias(moduleFileId, name, depth) {
+    if (depth > 6) return null
+    const m = this.fileExportAlias.get(moduleFileId)
+    if (!m || !m.has(name)) return null
+    const { orig, srcSpec } = m.get(name)
+    const srcFile = srcSpec ? this._resolveSpec(moduleFileId, srcSpec) : moduleFileId
+    if (srcFile) {
+      const deeper = this._resolveExportAlias(srcFile, orig, depth + 1)
+      if (deeper) return deeper
+    }
+    const set = this.byName.get(orig.toLowerCase())
+    if (set) {
+      // `orig` may be DECLARED in srcFile, or star-re-exported by it (the alias
+      // pointed at a barrel). Prefer an exact-file decl, else accept one inside
+      // srcFile's re-export reach (orig is the canonical name, ~always unique).
+      const reach = srcFile ? this._moduleReach(srcFile) : null
+      let inReach = null, any = null
+      for (const id of set) {
+        const n = this.nodes.get(id)
+        if (!n || n.name !== orig) continue
+        if (srcFile && n.file === srcFile) return n
+        if (reach && reach.has(n.file) && !inReach) inReach = n
+        if (!any) any = n
+      }
+      if (inReach) return inReach
+      if (!srcFile && any) return any
+    }
+    return null
+  }
+
+  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false, inModule = null } = {}) {
     if (!name) return null
     // Untyped member call `obj.foo()` where foo is a builtin / common method
     // name (.add/.get/.map/.then…): never a call to a user free function of
@@ -228,6 +309,15 @@ class SymbolGraph {
       // path below.
       name = tail
     }
+    // Namespace member call pinned to its source module: if that module
+    // re-exports `name` under a rename (`export { _bar as bar }`), redirect to
+    // the real `_bar` before the byName scan — otherwise a same-named symbol
+    // reachable through an unrelated barrel wins (the `checks.slugify` →
+    // `util.slugify` wrong edge).
+    if (importedOnly && inModule) {
+      const aliased = this._resolveExportAlias(inModule, name, 0)
+      if (aliased) return aliased
+    }
     const set = this.byName.get(name.toLowerCase())
     if (!set || !set.size) return null
     let sameFile = null, imported = null
@@ -239,6 +329,12 @@ class SymbolGraph {
     // importedOnly follows barrel re-export chains so `ns.fn()` resolves to the
     // file that actually declares fn, not just the directly-imported barrel.
     const importsOf = importedOnly ? this._importReachable(fromFileId) : this.fileImports.get(fromFileId)
+    // Namespace member call pinned to its source module: accept ONLY symbols in
+    // that module's re-export reach — so `checks.slugify` can never grab an
+    // unrelated import's `util.slugify` (the one measured wrong-function edge).
+    // When the source can't be resolved (external pkg / path miss) pin is null
+    // and we keep the plain import-reachable match — no recall change there.
+    const pin = (importedOnly && inModule) ? this._moduleReach(inModule) : null
     for (const id of set) {
       const node = this.nodes.get(id)
       if (!node) continue
@@ -259,7 +355,11 @@ class SymbolGraph {
       // same-file match (that was the `ns.fn()` → same-file phantom), keep
       // scanning for the imported one.
       if (node.file === fromFileId) { sameFile = node; if (!importedOnly) break }
-      if (!imported && importsOf && importsOf.has(node.file)) imported = node
+      if (importedOnly && pin) {
+        // Pinned: a candidate from outside the namespace's module reach is the
+        // wrong module's same-named symbol — skip it entirely.
+        if (pin.has(node.file) && !imported) imported = node
+      } else if (!imported && importsOf && importsOf.has(node.file)) imported = node
       if (!isAuxPath(node.file)) { prodCount++; if (!prodOne) prodOne = node }
     }
     if (sameFile && !importedOnly) return sameFile
@@ -565,6 +665,14 @@ class SymbolGraph {
       if (HEAD_DEPRECATED_RE.test(head)) fileLevelDeprecated = true
       for (const s of symbols) {
         if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
+        // Re-export alias entry (not a node) — index it for namespace
+        // member-call redirection (`export { _bar as bar }`).
+        if (s.__exportAlias) {
+          let m = this.fileExportAlias.get(s.file)
+          if (!m) { m = new Map(); this.fileExportAlias.set(s.file, m) }
+          if (!m.has(s.exported)) m.set(s.exported, { orig: s.orig, srcSpec: s.srcSpec })
+          continue
+        }
         // Stamp every symbol with the file's mtime — explore uses it
         // for the `legacy` classification (old + low in-degree). Cost
         // is one extra Map allocation per symbol; the stat call was
