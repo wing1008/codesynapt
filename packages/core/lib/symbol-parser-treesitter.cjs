@@ -956,7 +956,34 @@ const BIND_OF = {
   rust(n) { if (n.type !== 'let_declaration') return []; const nm = n.childForFieldName?.('pattern') || n.namedChild(0); const tf = n.childForFieldName?.('type'); const val = n.childForFieldName?.('value'); const ty = typeNameOf(tf) || ctorTypeName(val); return (nm && IDENT_TYPES.has(nm.type) && ty) ? [{ name: nm.text, type: ty }] : [] },
   kotlin(n) { if (n.type !== 'property_declaration') return []; let nm = null, tn = null, val = null; for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c.type === 'variable_declaration') { nm = c.namedChild(0); for (let j = 0; j < c.namedChildCount; j++) { const u = c.namedChild(j); if (u.type === 'user_type') tn = typeNameOf(u) } } else if (c.type === 'user_type') tn = typeNameOf(c); else if (c.type === 'call_expression' || c.type === 'navigation_expression') val = c } const ty = tn || ctorTypeName(val); return (nm && ty) ? [{ name: nm.text, type: ty }] : [] },
   swift(n) { if (n.type !== 'property_declaration') return []; let nm = null, tn = null, val = null; for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c.type === 'pattern') nm = c.namedChild(0) || c; else if (c.type === 'type_annotation') tn = typeNameOf(c); else if (c.type === 'call_expression') val = c } const ty = tn || ctorTypeName(val); return (nm && ty) ? [{ name: recvName(nm) || nm.text, type: ty }] : [] },
-  cpp(n) { if (n.type !== 'declaration') return []; const tn = typeNameOf(n.childForFieldName?.('type')); const out = []; for (let i = 0; i < n.namedChildCount; i++) { const d = n.namedChild(i); if (d.type === 'identifier') { if (tn) out.push({ name: d.text, type: tn }) } else if (d.type === 'init_declarator') { const nm = d.childForFieldName?.('declarator') || d.namedChild(0); const val = d.childForFieldName?.('value') || d.namedChild(d.namedChildCount - 1); const ty = tn || ctorTypeName(val); if (nm && IDENT_TYPES.has(nm.type) && ty) out.push({ name: nm.text, type: ty }) } } return out },
+  cpp(n) {
+    if (n.type !== 'declaration') return []
+    const tn = typeNameOf(n.childForFieldName?.('type'))
+    const out = []
+    // `Foo* p`, `Foo& r`, `Foo a[]` wrap the name in a (pointer|reference|array)
+    // _declarator chain — descend to the inner identifier.
+    const declIdent = (d) => {
+      let g = d, guard = 0
+      while (g && guard++ < 6) {
+        if (IDENT_TYPES.has(g.type)) return g.text
+        g = g.childForFieldName?.('declarator') || g.namedChild(0)
+      }
+      return null
+    }
+    for (let i = 0; i < n.namedChildCount; i++) {
+      const d = n.namedChild(i)
+      if (d.type === 'identifier') { if (tn) out.push({ name: d.text, type: tn }) }
+      else if (d.type === 'pointer_declarator' || d.type === 'reference_declarator' || d.type === 'array_declarator') {
+        const nm = declIdent(d); if (nm && tn) out.push({ name: nm, type: tn })
+      } else if (d.type === 'init_declarator') {
+        const nm = declIdent(d.childForFieldName?.('declarator') || d.namedChild(0))
+        const val = d.childForFieldName?.('value') || d.namedChild(d.namedChildCount - 1)
+        const ty = tn || ctorTypeName(val)
+        if (nm && ty) out.push({ name: nm, type: ty })
+      }
+    }
+    return out
+  },
 }
 BIND_OF.c = BIND_OF.cpp
 // Per-language param list extraction → (name,type).
