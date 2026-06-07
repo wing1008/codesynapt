@@ -696,6 +696,9 @@ class SymbolGraph {
       try {
         const r = cp.spawnSync(process.execPath, [worker], {
           input: req, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024,
+          // In the Electron desktop, execPath is the Electron binary — run it as
+          // plain Node so the worker script executes (no-op under real node).
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
         })
         // IGNORE exit status: the heavy grammars OOM on process TEARDOWN, after
         // the result is already written to stdout. As long as stdout parses to
