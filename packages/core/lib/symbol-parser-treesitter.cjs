@@ -366,12 +366,19 @@ function walk(node, ctx) {
       if (ctx.lang === 'python') {
         const rt = pyTypeName(node.childForFieldName?.('return_type'))
         if (rt) sym.returnType = rt
+      } else if (ctx.lang === 'go') {
+        // `func NewEngine() *Engine` → returnType Engine, so `s := NewEngine()`
+        // then `s.Method()` resolves. Multiple returns (a parameter_list) yield
+        // null and are skipped.
+        const rt = goTypeName(node.childForFieldName?.('result'))
+        if (rt) sym.returnType = rt
       }
       ctx.symbols.push(sym)
       ctx.fnStack.push(sym.id)
       if (ctx.varTypeStack) {
         const vmap = new Map()
         if (ctx.passTwo && ctx.lang === 'python') harvestPyFuncTypes(node, vmap, ctx)
+        else if (ctx.passTwo && ctx.lang === 'go') goHarvestFuncTypes(node, vmap, ctx)
         ctx.varTypeStack.push(vmap)
       }
       pushedFn = true
@@ -393,6 +400,9 @@ function walk(node, ctx) {
         // untyped path declines.
         if (ctx.lang === 'python' && ctx.resolveQualified) {
           const rc = pyReceiverType(node, ctx)
+          if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
+        } else if (ctx.lang === 'go' && ctx.resolveQualified) {
+          const rc = goReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
         }
         // Else: fallback. A bare `foo()` allows the cross-file unique-production
@@ -762,6 +772,115 @@ function pyReceiverType(callNode, ctx) {
   const fn = callNode.childForFieldName?.('function')
   if (!fn || fn.type !== 'attribute') return null
   return pyObjType(fn.childForFieldName?.('object'), ctx)
+}
+
+// ── Go receiver-type inference ───────────────────────────────────────────────
+// Go methods are already indexed as `Type.method` (extractGoReceiver), but a
+// call `s.Method()` only resolves if we know `s`'s type. Mirrors the Python
+// machinery: track the KNOWN type of a local from its declaration —
+//   var s Engine | s := Engine{} | s := &Engine{} | s := NewEngine() |
+//   func (e *Engine) m() | func f(s *Engine)
+// then resolve `Type.method` via qualifiedOnly (exact, never a guess). This also
+// fixes the BUILTIN_NAMES over-block: a typed `s.Get()` resolves qualified,
+// bypassing the bare-member builtin guard that was dropping Get/Set/Save/Find.
+
+// Type name from a Go type node. `*Engine`→Engine, `pkg.Type`→Type, plain ident
+// as-is. Composite/slice/map/func types yield null (not a method-owning struct).
+function goTypeName(typeNode) {
+  if (!typeNode) return null
+  const t = typeNode.type
+  if (t === 'type_identifier') return typeNode.text
+  if (t === 'pointer_type') return goTypeName(typeNode.namedChild(0))
+  if (t === 'qualified_type') { const n = typeNode.childForFieldName?.('name'); return n?.text || lastIdentText(typeNode) }
+  return null
+}
+// Type a Go expression evaluates to: `Engine{}` / `&Engine{}` construction, or a
+// call whose target declares a (single) return type.
+function goValueType(valueNode, ctx) {
+  if (!valueNode) return null
+  let v = valueNode
+  if (v.type === 'unary_expression') v = v.namedChild(0)   // &Engine{}
+  if (v && v.type === 'composite_literal') return goTypeName(v.childForFieldName?.('type'))
+  if (v && v.type === 'call_expression') { const n = goResolveCalledNode(v, ctx); return n?.returnType || null }
+  return null
+}
+// Symbol node a Go call resolves to (one level) — only to read its returnType.
+function goResolveCalledNode(callNode, ctx) {
+  const fnName = extractCalleeName(callNode)
+  if (!fnName) return null
+  const fn = callNode.childForFieldName?.('function')
+  if (fn?.type === 'selector_expression') {
+    const recv = goObjType(fn.childForFieldName?.('operand'), ctx)
+    if (recv && ctx.resolveQualified) return ctx.resolveQualified(`${recv}.${fnName}`)
+    return null
+  }
+  return ctx.resolve ? ctx.resolve(fnName, { forCall: true }) : null
+}
+// Known type of a Go receiver expression.
+function goObjType(obj, ctx) {
+  if (!obj) return null
+  if (obj.type === 'identifier') {
+    const st = ctx.varTypeStack
+    if (st) for (let i = st.length - 1; i >= 0; i--) { const ty = st[i].get(obj.text); if (ty) return ty }
+    return null
+  }
+  if (obj.type === 'call_expression') { const n = goResolveCalledNode(obj, ctx); return n?.returnType || null }
+  return null
+}
+function goReceiverType(callNode, ctx) {
+  const fn = callNode.childForFieldName?.('function')
+  if (!fn || fn.type !== 'selector_expression') return null
+  return goObjType(fn.childForFieldName?.('operand'), ctx)
+}
+// Record `name → type` for every identifier in a Go parameter/receiver list.
+function goWalkParams(plist, map) {
+  if (!plist) return
+  for (let i = 0; i < plist.namedChildCount; i++) {
+    const pd = plist.namedChild(i)
+    if (pd.type !== 'parameter_declaration') continue
+    const tn = goTypeName(pd.childForFieldName?.('type'))
+    if (!tn) continue
+    for (let j = 0; j < pd.namedChildCount; j++) {
+      const c = pd.namedChild(j)
+      if (c.type === 'identifier') map.set(c.text, tn)
+    }
+  }
+}
+// Pair a Go `:=` / `=` left list with its right list, typing each name.
+function goPairAssign(left, right, map, ctx) {
+  if (!left) return
+  const list = (n) => n.type === 'expression_list'
+    ? Array.from({ length: n.namedChildCount }, (_, i) => n.namedChild(i)) : [n]
+  const names = list(left), vals = right ? list(right) : []
+  for (let i = 0; i < names.length; i++) {
+    if (names[i].type !== 'identifier') continue
+    const v = vals.length === names.length ? vals[i] : (vals.length === 1 ? vals[0] : null)
+    const tn = v ? goValueType(v, ctx) : null
+    if (tn) map.set(names[i].text, tn)
+  }
+}
+// Scan a Go function body for local declarations, without descending into nested
+// function literals (their locals are not ours).
+function goScanDecls(node, map, ctx) {
+  if (!node) return
+  const t = node.type
+  if (t === 'func_literal' || t === 'function_declaration' || t === 'method_declaration') return
+  if (t === 'short_var_declaration') {
+    goPairAssign(node.childForFieldName?.('left'), node.childForFieldName?.('right'), map, ctx)
+  } else if (t === 'var_spec') {
+    const tn = goTypeName(node.childForFieldName?.('type'))
+    const val = node.childForFieldName?.('value')
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const c = node.namedChild(i)
+      if (c.type === 'identifier') { const ty = tn || (val ? goValueType(val, ctx) : null); if (ty) map.set(c.text, ty) }
+    }
+  }
+  for (let i = 0; i < node.childCount; i++) goScanDecls(node.child(i), map, ctx)
+}
+function goHarvestFuncTypes(fnNode, map, ctx) {
+  goWalkParams(fnNode.childForFieldName?.('receiver'), map)
+  goWalkParams(fnNode.childForFieldName?.('parameters'), map)
+  goScanDecls(fnNode.childForFieldName?.('body'), map, ctx)
 }
 
 function extractCalleeName(callNode) {
