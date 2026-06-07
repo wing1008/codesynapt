@@ -14,6 +14,10 @@ function symbolNodeView(g, n) {
     file: n.file, line: n.startLine, exported: !!n.exported,
     callers: g.inAdj.get(n.id)?.size || 0,
     callees: g.outAdj.get(n.id)?.size || 0,
+    // Dynamic candidate dispatch (possible, not confident). 0 omitted to keep
+    // the common payload lean.
+    candidateCallers: g.candIn?.get(n.id)?.size || undefined,
+    candidateCallees: g.candOut?.get(n.id)?.size || undefined,
   }
 }
 
@@ -118,12 +122,23 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
     case 'callers': {
       const id = params.id || ''
       if (!g.nodes.has(id)) return { status: 404, body: { error: 'symbol not found', id } }
-      return { status: 200, body: { id, callers: g.callersOf(id).map((c) => symbolNodeView(g, c)) } }
+      const cand = g.candidateCallersOf(id).map((c) => symbolNodeView(g, c))
+      return { status: 200, body: {
+        id, callers: g.callersOf(id).map((c) => symbolNodeView(g, c)),
+        // Dynamic dispatch (possible callers, not confirmed) — see candidate leg.
+        candidateCallers: cand.length ? cand : undefined,
+        candidateNote: cand.length ? 'candidate* = possible dynamic-dispatch targets (the call could not be statically pinned to one); the real one is among these.' : undefined,
+      } }
     }
     case 'callees': {
       const id = params.id || ''
       if (!g.nodes.has(id)) return { status: 404, body: { error: 'symbol not found', id } }
-      return { status: 200, body: { id, callees: g.calleesOf(id).map((c) => symbolNodeView(g, c)) } }
+      const cand = g.candidateCalleesOf(id).map((c) => symbolNodeView(g, c))
+      return { status: 200, body: {
+        id, callees: g.calleesOf(id).map((c) => symbolNodeView(g, c)),
+        candidateCallees: cand.length ? cand : undefined,
+        candidateNote: cand.length ? 'candidate* = possible dynamic-dispatch targets (the call could not be statically pinned to one); the real one is among these.' : undefined,
+      } }
     }
     case 'blast': {
       const id = params.id || ''

@@ -98,6 +98,11 @@ class SymbolGraph {
     // Kept as a separate index so callersOf/calleesOf semantics are unchanged.
     this.callOut = new Map()    // symbolId → Set<calleeId>   (kind === 'call')
     this.callIn  = new Map()    // symbolId → Set<callerId>   (kind === 'call')
+    // Dynamic candidate adjacency (kind === 'call-candidate'). Kept SEPARATE
+    // from the confident call graph so callers/callees/blast stay precise; the
+    // "could be one of these" set is queried on demand via candidate*Of().
+    this.candOut = new Map()    // symbolId → Set<candidateCalleeId>
+    this.candIn  = new Map()    // symbolId → Set<candidateCallerId>
     this.extendsOut = new Map() // classId → Set<baseId>      (extends/implements)
     // Dedup guard for the raw edge log: (source␞target␞kind) seen-set so a
     // symbol called from two sites (foo() on line 5 AND line 9) yields ONE
@@ -144,6 +149,8 @@ class SymbolGraph {
     this.inAdj.clear()
     this.callOut.clear()
     this.callIn.clear()
+    this.candOut.clear()
+    this.candIn.clear()
     this._edgeKeys.clear()
     this.fileImports.clear()
     this.fileReexports.clear()
@@ -486,6 +493,14 @@ class SymbolGraph {
       if (!this.extendsOut.has(source)) this.extendsOut.set(source, new Set())
       this.extendsOut.get(source).add(target)
     }
+    // Dynamic candidate adjacency — isolated from the confident call graph.
+    if (kind === 'call-candidate') {
+      if (!this.candOut.has(source)) this.candOut.set(source, new Set())
+      this.candOut.get(source).add(target)
+      if (!this.candIn.has(target)) this.candIn.set(target, new Set())
+      this.candIn.get(target).add(source)
+      return true
+    }
     if (kind !== 'call') return true
     if (!this.nodes.has(source) || !this.nodes.has(target)) return true
     // inAdj/outAdj back callersOf()/calleesOf() (call graph only, per above).
@@ -604,6 +619,19 @@ class SymbolGraph {
     const set = this.outAdj.get(id)
     if (!set) return []
     return [...set].map((tid) => this.nodes.get(tid)).filter(Boolean)
+  }
+  // Dynamic candidate dispatch (kind 'call-candidate'): possible targets/sources
+  // for calls that couldn't be statically pinned. Honest "could be one of these"
+  // — never asserted as a confident edge.
+  candidateCalleesOf(id) {
+    const set = this.candOut.get(id)
+    if (!set) return []
+    return [...set].map((tid) => this.nodes.get(tid)).filter(Boolean)
+  }
+  candidateCallersOf(id) {
+    const set = this.candIn.get(id)
+    if (!set) return []
+    return [...set].map((sid) => this.nodes.get(sid)).filter(Boolean)
   }
   findByName(query, limit = 50) {
     const q = (query || '').toLowerCase()
