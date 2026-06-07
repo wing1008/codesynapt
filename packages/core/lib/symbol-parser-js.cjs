@@ -784,13 +784,31 @@ function extractReferences(content, fileId, index) {
           ? index.resolveCall(fileId, name, { importedOnly: true, memberCall: true, inModule: nsModule })
           : index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
       }
-      if (!target || target.id === src) return
-      edges.push({
-        source: src,
-        target: target.id,
-        kind: 'call',
-        line: path.node.loc?.start.line || 0,
-      })
+      const callLine = path.node.loc?.start.line || 0
+      if (target) {
+        if (target.id === src) return
+        edges.push({ source: src, target: target.id, kind: 'call', line: callLine })
+        return
+      }
+      // Dynamic candidate leg: no single static target → expose the maximal
+      // honest candidate set (every production callable of this name) as
+      // `call-candidate` edges. They stay OUT of the confident call graph
+      // (blast/dead-code only walk kind==='call'), so precision is untouched;
+      // they surface the "could be one of these" set the spec asks for. Only
+      // when it's genuinely a SET (≥2) — a clear dynamic-dispatch / ambiguous
+      // signal, not a lone same-file guess resolveCall already declined.
+      if (index.candidatesFor) {
+        const { candidates, capped } = index.candidatesFor(fileId, name, { memberCall: isMemberCall })
+        // ≥1: even a single candidate is worth surfacing — resolveCall declined
+        // to ASSERT it (precision), but as an honest "could be this" it carries
+        // the real target the confident graph left blank.
+        if (candidates.length >= 1) {
+          for (const c of candidates) {
+            if (c.id === src) continue
+            edges.push({ source: src, target: c.id, kind: 'call-candidate', line: callLine, candidate: true, ambiguity: candidates.length, capped: capped || undefined })
+          }
+        }
+      }
     },
     // Expression-level references — non-call identifier usage. Lets us
     // see "Foo is used here" even when it's not being invoked

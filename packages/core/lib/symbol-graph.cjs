@@ -377,6 +377,34 @@ class SymbolGraph {
     return null
   }
 
+  // The DYNAMIC candidate leg. When a call can't be pinned to ONE static target
+  // (polymorphic dispatch, unknown receiver type, ambiguous name) we do NOT drop
+  // it — we expose the maximal HONEST candidate set: every production callable
+  // that bears the call name. The real target is guaranteed to be among these
+  // (a superset, never a wrong single guess), which is exactly the user's spec:
+  // "정적은 100%, 동적은 후보군 최대치". Builtin/common method names on member
+  // calls are dispatch noise (.map/.add/.get on stdlib values), not a knowable
+  // user candidate set, so they return empty. Capped to keep a hot name
+  // (`validate` on 40 classes) from flooding; `capped` signals truncation.
+  candidatesFor(fromFileId, name, { memberCall = false, cap = 24 } = {}) {
+    const bare = name.includes('.') ? name.split('.').pop() : name
+    if (!bare) return { candidates: [], capped: false }
+    if (memberCall && BUILTIN_NAMES.has(bare.toLowerCase())) return { candidates: [], capped: false }
+    const set = this.byName.get(bare.toLowerCase())
+    if (!set) return { candidates: [], capped: false }
+    const out = []
+    let capped = false
+    for (const id of set) {
+      const n = this.nodes.get(id)
+      if (!n || n.name !== bare) continue                 // exact-case, real callable
+      if (n.kind !== 'function' && n.kind !== 'method') continue
+      if (isAuxPath(n.file)) continue                     // production only
+      out.push(n)
+      if (out.length >= cap) { capped = true; break }
+    }
+    return { candidates: out, capped }
+  }
+
   // Walk a class's extends/implements chain looking for `Base.method`. Bounded
   // by `seen` (cycle/diamond guard). Returns the inherited method node or null.
   _qualifiedViaHierarchy(typeName, method, seen) {

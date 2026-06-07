@@ -413,6 +413,21 @@ function walk(node, ctx) {
               line: node.startPosition.row + 1,
             })
           }
+        } else if (!target && ctx.candidates) {
+          // Dynamic candidate leg: no single static target → expose the maximal
+          // honest candidate set as isolated `call-candidate` edges (not in the
+          // confident call graph). resolveCall declined to assert one; this keeps
+          // the real target visible as a "could be" instead of blank.
+          const member = isMemberCallNode(node)
+          const { candidates, capped } = ctx.candidates(calleeName, { memberCall: member })
+          const ln = node.startPosition.row + 1
+          for (const c of candidates) {
+            if (c.id === src) continue
+            const key = src + '|' + c.id + '|call-candidate'
+            if (ctx.seen.has(key)) continue
+            ctx.seen.add(key)
+            ctx.edges.push({ source: src, target: c.id, kind: 'call-candidate', line: ln, candidate: true, ambiguity: candidates.length, capped: capped || undefined })
+          }
         }
       }
     }
@@ -863,6 +878,9 @@ function makeParser(ext) {
           edges: [], seen: new Set(),
           kwSet,
           resolve: makeResolver(fileId, index),
+          // Dynamic candidate set (parity with babel) — maximal honest set of
+          // production callables for a call with no single static target.
+          candidates: (name, opts) => (index.candidatesFor ? index.candidatesFor(fileId, name, opts) : { candidates: [], capped: false }),
           // Qualified resolver for `self.method()` → `Class.method` (exact
           // qualifiedName match only — no bare-name degrade). Lets an ambiguous
           // method name still link when the receiver is unambiguously `self`.
