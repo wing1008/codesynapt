@@ -313,10 +313,11 @@ function walk(node, ctx) {
           const key = sym.id + '|' + target.id + '|' + kind
           if (ctx.seen.has(key)) continue
           ctx.seen.add(key)
-          ctx.edges.push({
-            source: sym.id, target: target.id, kind,
-            line: node.startPosition.row + 1,
-          })
+          const edge = { source: sym.id, target: target.id, kind, line: node.startPosition.row + 1 }
+          ctx.edges.push(edge)
+          // Populate extendsOut NOW so inherited calls in this pass can MRO-walk
+          // (dedup in addEdge makes build's later re-add a no-op).
+          ctx.index?.addEdge?.(edge)
         }
       }
     }
@@ -1178,6 +1179,12 @@ function makeParser(ext) {
           resolveQualified: (qn) => (index.resolveCall
             ? index.resolveCall(fileId, qn, { allowAny: true, qualifiedOnly: true })
             : null),
+          // Live graph handle: inheritance edges are added to the index AS the
+          // class is entered (not just collected) so the class-hierarchy (MRO)
+          // walk can resolve inherited calls LATER in the same pass — extendsOut
+          // is otherwise only built after extractReferences returns, so
+          // `init()` inheriting from a base resolved to nothing.
+          index,
           passTwo: true,
         }
         // Module base so top-level / module-scope calls attribute to <module>
