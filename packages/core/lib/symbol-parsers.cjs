@@ -31,7 +31,11 @@ function registerAll() {
   // didn't). Excluded: Ruby/Dart (web-tree-sitter ABI mismatch — wasm throws),
   // Lua (table-OOP, partial), Elixir (def/call share one node — needs special
   // casing). Those stay file-level (L1) only.
-  for (const ext of ['go', 'rs', 'java', 'kt', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash']) {
+  // scala: validated working (symbols + calls + implicit-this) 2026-06-07.
+  // lua: function-level symbols only (table-OOP — most member calls don't
+  // resolve), still better than L1. Ruby/Dart stay out (web-tree-sitter 0.20
+  // ↔ grammar-wasm ABI mismatch: dart needs ABI 15, ruby crashes mid-parse).
+  for (const ext of ['go', 'rs', 'java', 'kt', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash', 'scala', 'lua']) {
     const p = makeParser(ext)
     if (p) sg.registerParser([ext], p)
   }
@@ -41,6 +45,7 @@ function registerAll() {
 const SUPPORTED_EXTS = new Set([
   'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'pyw', 'pyi',
   'go', 'rs', 'java', 'kt', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash',
+  'scala', 'lua',
 ])
 
 module.exports = { registerAll, SUPPORTED_EXTS, SymbolGraph: sg.SymbolGraph }

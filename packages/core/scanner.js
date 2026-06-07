@@ -179,6 +179,8 @@ const TRACKED_EXT = new Set([
   'sql', 'xml',
   // DB schema (Prisma)
   'prisma',
+  // JVM/scripting with L2 symbol support
+  'scala', 'lua',
   // NOTE: dwg/dxf removed — binary CAD files have no import concept,
   // scanning them just creates orphan noise.
 ])
