@@ -71,6 +71,11 @@ const BUILTIN_NAMES = new Set([
   'substring', 'substr', 'lastindexof', 'tofixed',
 ])
 
+// Grammars whose web-tree-sitter wasm parser leaks memory at scale and must be
+// parsed in a recycled child process. Swift is the known offender (OOMs ~50+
+// files); kept as a set so others can be added if they exhibit the same.
+const WORKER_GRAMMAR_EXTS = new Set(['swift'])
+
 function registerParser(extOrExts, parser) {
   const exts = Array.isArray(extOrExts) ? extOrExts : [extOrExts]
   for (const e of exts) PARSERS[e] = parser
@@ -673,6 +678,38 @@ class SymbolGraph {
   // `fileImports` (optional) is a Map<fileId, Set<importedFileId>>
   // built from the file-mode edge list; lets resolveCall prefer
   // imported targets.
+  // Parse heavy-grammar files in recycled child processes (small batches, fresh
+  // process per batch) to bound web-tree-sitter's ever-growing wasm heap.
+  // phase 'symbols' → returns SymbolNode[]; phase 'refs' → returns SymbolEdge[]
+  // (extra ships {nodes, extends} so the child rebuilds a resolver index).
+  // A crashed batch (OOM/parse error) degrades gracefully: those files are
+  // skipped, not fatal to the whole build.
+  _workerParse(phase, files, extra = {}) {
+    const cp = require('child_process')
+    const worker = path.join(__dirname, 'symbol-parse-worker.cjs')
+    const BATCH = parseInt(process.env.CS_WORKER_BATCH || '20', 10)
+    const out = []
+    for (let i = 0; i < files.length; i += BATCH) {
+      const batch = files.slice(i, i + BATCH)
+      let req
+      try { req = JSON.stringify({ phase, files: batch, ...extra }) } catch { continue }
+      try {
+        const r = cp.spawnSync(process.execPath, [worker], {
+          input: req, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024,
+        })
+        // IGNORE exit status: the heavy grammars OOM on process TEARDOWN, after
+        // the result is already written to stdout. As long as stdout parses to
+        // complete JSON, the batch succeeded. A mid-parse crash leaves stdout
+        // empty/partial → parse throws → those files are skipped.
+        if (!r.stdout) continue
+        const res = JSON.parse(r.stdout)
+        if (res.symbols) for (const s of res.symbols) out.push(s)
+        if (res.edges) for (const e of res.edges) out.push(e)
+      } catch { /* batch failed — skip its files */ }
+    }
+    return out
+  }
+
   async build(fileEntries, fileImports = null, options = {}) {
     const start = Date.now()
     this.clear()
@@ -692,6 +729,10 @@ class SymbolGraph {
     // resolve references in pass 2.
     let fileCount = 0
     const fileContents = new Map()    // fileId → content (kept for pass 2)
+    // Grammars whose wasm parser leaks memory at scale → parsed via a recycled
+    // child process (see symbol-parse-worker.cjs). Opt-out with CS_NO_WORKER.
+    const WORKER_EXTS = (process.env.CS_NO_WORKER || options.noWorker) ? new Set() : WORKER_GRAMMAR_EXTS
+    const workerFiles = []            // heavy-grammar files deferred to the worker
     for (const entry of fileEntries) {
       if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
       const parser = PARSERS[entry.ext]
@@ -704,6 +745,10 @@ class SymbolGraph {
         fileMtimeMs = stat.mtimeMs
       } catch { continue }
       fileContents.set(entry.id, content)
+      // Heavy-grammar files (Swift) are parsed in a recycled child process —
+      // web-tree-sitter's wasm heap never shrinks, so parsing them in-process
+      // OOMs on large repos. Defer to the worker pass below.
+      if (WORKER_EXTS.has(entry.ext)) { workerFiles.push({ id: entry.id, ext: entry.ext, content, mtimeMs: fileMtimeMs }); continue }
       let symbols
       let parseThrew = false
       try {
@@ -766,12 +811,21 @@ class SymbolGraph {
       }
       fileCount++
     }
+    // Worker pass 1 — heavy-grammar symbols, parsed in recycled child processes.
+    if (workerFiles.length) {
+      for (const s of this._workerParse('symbols', workerFiles)) {
+        if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
+        this.addNode(s)
+      }
+      fileCount += new Set(workerFiles.map((f) => f.id)).size
+    }
     // Pass 2 — references. Per-file, ask the language parser to find
     // call/extends/implements edges. Parsers consult `this` (the
     // symbol index) to resolve names.
     for (const [fileId, content] of fileContents) {
       if (this.edges.length >= MAX_EDGES) { abortedAt = abortedAt || 'edges'; break }
       const ext = extFor(fileId)
+      if (WORKER_EXTS.has(ext)) continue   // handled by the worker pass below
       const parser = PARSERS[ext]
       if (!parser || !parser.extractReferences) continue
       let refs
@@ -784,6 +838,19 @@ class SymbolGraph {
         if (this.nodes.has(r.source) && this.nodes.has(r.target)) {
           this.addEdge(r)
         }
+      }
+    }
+    // Worker pass 2 — heavy-grammar references. The worker rebuilds a resolver
+    // from the symbols we just indexed for those grammars (+ their structural
+    // edges) so the normal extractReferences path runs unchanged in the child.
+    if (workerFiles.length && this.edges.length < MAX_EDGES) {
+      const wExts = new Set(workerFiles.map((f) => f.ext))
+      const wNodes = []
+      for (const n of this.nodes.values()) if (wExts.has(extFor(n.file))) wNodes.push(n)
+      const wExtends = this.edges.filter((e) => (e.kind === 'extends' || e.kind === 'implements') && wExts.has(extFor(this.nodes.get(e.source)?.file || '')))
+      for (const r of this._workerParse('refs', workerFiles, { nodes: wNodes, extends: wExtends })) {
+        if (this.edges.length >= MAX_EDGES) { abortedAt = abortedAt || 'edges'; break }
+        if (this.nodes.has(r.source) && this.nodes.has(r.target)) this.addEdge(r)
       }
     }
     this.fileCount = fileCount
