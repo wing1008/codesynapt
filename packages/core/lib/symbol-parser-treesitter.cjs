@@ -412,6 +412,16 @@ function walk(node, ctx) {
           const rc = genericReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
         }
+        // Implicit-this bare call: in Java/C#/Kotlin/Swift/Scala/C++ a bare
+        // `save()` inside a method means `this.save()` — resolve it to the
+        // enclosing class's method (incl. inherited, via the qualified MRO walk).
+        // NOT for Python/Rust/Go/PHP/JS, where same-class calls are explicit
+        // self/this and a bare name is a free function (the bare-call-method-skip
+        // guard depends on that — see flask `dumps()`).
+        if (!target && ctx.resolveQualified && IMPLICIT_THIS_LANGS.has(ctx.lang) && !isMemberCallNode(node)) {
+          const cls = ctx.classStack[ctx.classStack.length - 1]
+          if (cls) target = ctx.resolveQualified(`${cls.name}.${calleeName}`)
+        }
         // Else: fallback. A bare `foo()` allows the cross-file unique-production
         // guess; an untyped `obj.method()` does NOT (unknown receiver → that
         // guess is a phantom), so member calls resolve same-file/imported only
@@ -948,6 +958,10 @@ const RECV_OF = {
   cpp:     (c) => { const fe = c.childForFieldName?.('function') || c.namedChild(0); return fe && fe.type === 'field_expression' ? (fe.childForFieldName?.('argument') || fe.namedChild(0)) : null },
 }
 RECV_OF.c = RECV_OF.cpp
+// Languages where a bare `m()` inside a method means `this.m()` (implicit
+// receiver). Excludes Python/Rust/Go (explicit self/Self) and PHP/JS ($this/
+// this required).
+const IMPLICIT_THIS_LANGS = new Set(['java', 'c_sharp', 'kotlin', 'swift', 'scala', 'cpp', 'c'])
 // Per-language: list of (name,type) bound by a declaration statement node.
 const BIND_OF = {
   java(n) { if (n.type !== 'local_variable_declaration') return []; const tn = typeNameOf(n.childForFieldName?.('type')); const out = []; for (let i = 0; i < n.namedChildCount; i++) { const d = n.namedChild(i); if (d.type === 'variable_declarator') { const nm = d.childForFieldName?.('name'); const ty = tn || ctorTypeName(d.childForFieldName?.('value')); if (nm && ty) out.push({ name: nm.text, type: ty }) } } return out },
