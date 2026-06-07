@@ -327,6 +327,21 @@ class SymbolGraph {
     }
     const set = this.byName.get(name.toLowerCase())
     if (!set || !set.size) return null
+    // Ambiguous-method guard: a bare-name MEMBER call (`Self::m()`, `x.m()` with
+    // unknown receiver) where ≥2 production classes define a method of that name
+    // cannot be pinned to one — confidently returning the first same-file/
+    // imported match is the "arbitrary impl" bug (Rust `Self::read_u32` → an
+    // arbitrary `BigEndian.read_u32` among 3 trait impls). Decline so the
+    // dynamic candidate leg surfaces ALL impls instead. Typed member calls are
+    // already resolved above (qualifiedOnly) and never reach here.
+    let methodNameCount = 0
+    if (memberCall) {
+      for (const id of set) {
+        const n = this.nodes.get(id)
+        if (n && n.name === name && n.qualifiedName && n.qualifiedName.includes('.') && n.qualifiedName !== n.name && !isAuxPath(n.file)) methodNameCount++
+      }
+    }
+    const ambiguousMethodCall = methodNameCount > 1
     let sameFile = null, imported = null
     // Count *production* candidates (not aux: scripts/, test/, build/…).
     // The tightened allowAny fallback resolves only when exactly one
@@ -369,6 +384,9 @@ class SymbolGraph {
       } else if (!imported && importsOf && importsOf.has(node.file)) imported = node
       if (!isAuxPath(node.file)) { prodCount++; if (!prodOne) prodOne = node }
     }
+    // Ambiguous bare-name member call (≥2 impls of the method name) — refuse the
+    // arbitrary first match; the candidate leg exposes all impls instead.
+    if (ambiguousMethodCall) { this.unresolvedAmbiguous++; return null }
     if (sameFile && !importedOnly) return sameFile
     if (imported) return imported
     if (!allowAny) return null
