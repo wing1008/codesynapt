@@ -380,6 +380,11 @@ function extractReferences(content, fileId, index) {
   const ast = parseAst(content, ext)
   if (!ast) return []
   const edges = []
+  // Push a structural (extends/implements) edge AND add it to the index now, so
+  // the class-hierarchy (MRO) walk can resolve inherited `this.method()` calls
+  // LATER in this same pass — extendsOut is otherwise only built after
+  // extractReferences returns. build's later re-add is a dedup no-op.
+  const pushStruct = (e) => { edges.push(e); index.addEdge?.(e) }
   // Resolve a relative module specifier (`./checks`, `../core/util`) to the
   // graph's file id, so a namespace member call `ns.fn()` can be PINNED to the
   // exact module `ns` came from (no cross-import same-name mis-link). Returns a
@@ -565,7 +570,7 @@ function extractReferences(content, fileId, index) {
           const superName = extractTypeName(n.superClass)
           if (superName) {
             const t = resolveCall(superName)
-            if (t) edges.push({ source: classId, target: t.id, kind: 'extends', line: n.loc.start.line })
+            if (t) pushStruct({ source: classId, target: t.id, kind: 'extends', line: n.loc.start.line })
           }
           // TypeScript `class Foo implements IFoo, IBar`
           if (Array.isArray(n.implements)) {
@@ -573,7 +578,7 @@ function extractReferences(content, fileId, index) {
               const name = extractTypeName(imp.expression || imp)
               if (!name) continue
               const t = resolveCall(name)
-              if (t) edges.push({ source: classId, target: t.id, kind: 'implements', line: n.loc.start.line })
+              if (t) pushStruct({ source: classId, target: t.id, kind: 'implements', line: n.loc.start.line })
             }
           }
         }
@@ -591,7 +596,7 @@ function extractReferences(content, fileId, index) {
             const name = extractTypeName(ext.expression || ext)
             if (!name) continue
             const t = resolveCall(name)
-            if (t) edges.push({ source: ifaceId, target: t.id, kind: 'extends', line: n.loc.start.line })
+            if (t) pushStruct({ source: ifaceId, target: t.id, kind: 'extends', line: n.loc.start.line })
           }
         }
       },
