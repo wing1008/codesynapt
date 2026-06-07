@@ -343,9 +343,12 @@ function walk(node, ctx) {
         methodOwner = extractGoReceiver(node)
       }
       const cls = ctx.classStack[ctx.classStack.length - 1]
-      const lexicallyMethod = !!cls && (cfg.method?.includes(t)
-        || ctx.lang === 'python' || ctx.lang === 'kotlin'
-        || ctx.lang === 'swift'  || ctx.lang === 'rust')
+      // A function-like declaration lexically inside a class IS a method — give
+      // it a `Class.method` qualifiedName so a call `obj.method()` can resolve
+      // to it. Covers every language whose methods nest in the class body
+      // (Java/C#/C++/Kotlin/Swift/Rust/Python); Go carries the owner explicitly
+      // via the receiver (methodOwner above) instead of lexical nesting.
+      const lexicallyMethod = !!cls && (cfg.method?.includes(t) || cfg.fn?.includes(t))
       const isMethod = !!methodOwner || lexicallyMethod
       const qn = methodOwner ? `${methodOwner}.${name}`
                  : (lexicallyMethod ? `${cls.name}.${name}` : name)
@@ -379,6 +382,7 @@ function walk(node, ctx) {
         const vmap = new Map()
         if (ctx.passTwo && ctx.lang === 'python') harvestPyFuncTypes(node, vmap, ctx)
         else if (ctx.passTwo && ctx.lang === 'go') goHarvestFuncTypes(node, vmap, ctx)
+        else if (ctx.passTwo && RECV_OF[ctx.lang]) genericHarvest(node, vmap, ctx)
         ctx.varTypeStack.push(vmap)
       }
       pushedFn = true
@@ -403,6 +407,9 @@ function walk(node, ctx) {
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
         } else if (ctx.lang === 'go' && ctx.resolveQualified) {
           const rc = goReceiverType(node, ctx)
+          if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
+        } else if (RECV_OF[ctx.lang] && ctx.resolveQualified) {
+          const rc = genericReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
         }
         // Else: fallback. A bare `foo()` allows the cross-file unique-production
@@ -881,6 +888,126 @@ function goHarvestFuncTypes(fnNode, map, ctx) {
   goWalkParams(fnNode.childForFieldName?.('receiver'), map)
   goWalkParams(fnNode.childForFieldName?.('parameters'), map)
   goScanDecls(fnNode.childForFieldName?.('body'), map, ctx)
+}
+
+// ── Generic receiver-type inference (Java/C#/Kotlin/Swift/Rust/PHP/C/C++) ─────
+// The same idea as Python/Go but driven by a per-language config, since the
+// statically-typed languages all index methods as `Type.method` (lexical class
+// nesting) yet a call `obj.method()` only resolves once we know obj's type. We
+// learn types from declarations + constructors + typed params, then resolve
+// `Type.method` via qualifiedOnly (exact, precision-safe, bypasses the builtin
+// guard). Only KNOWN types are recorded — never a guess.
+
+// Name text of a receiver expression node (PHP `$x` is variable_name>name).
+function recvName(node) {
+  if (!node) return null
+  if (node.type === 'variable_name') { const n = node.childForFieldName?.('name') || node.namedChild(0); return n?.text || null }
+  if (IDENT_TYPES.has(node.type)) return node.text
+  return null
+}
+// Type name from a declared-type node (type_identifier, user_type wrapper,
+// pointer/qualified). Reuses goTypeName + a user_type peek (Kotlin/Swift).
+function typeNameOf(node) {
+  if (!node) return null
+  if (node.type === 'user_type') return typeNameOf(node.namedChild(0))
+  if (node.type === 'type_annotation') { for (let i = 0; i < node.namedChildCount; i++) { const r = typeNameOf(node.namedChild(i)); if (r) return r } return null }
+  const g = goTypeName(node)
+  if (g) return g
+  if (IDENT_TYPES.has(node.type)) return node.text
+  return null
+}
+// Constructed type from a value node: `new Foo()`, `Foo()` (PascalCase),
+// `Foo::new()` (Rust), `Foo{}`/`&Foo{}`. Never a non-Capitalized guess.
+function ctorTypeName(valueNode) {
+  if (!valueNode) return null
+  let v = valueNode
+  if (v.type === 'unary_expression' || v.type === 'parenthesized_expression') v = v.namedChild(0)
+  if (!v) return null
+  if (v.type === 'object_creation_expression' || v.type === 'new_expression') {
+    const tf = v.childForFieldName?.('type')
+    if (tf) return typeNameOf(tf)
+    for (let i = 0; i < v.namedChildCount; i++) { const c = v.namedChild(i); if (c.type === 'type_identifier' || c.type === 'name' || c.type === 'identifier' || c.type === 'scoped_type_identifier' || c.type === 'qualified_type') return typeNameOf(c) || c.text }
+    return null
+  }
+  if (v.type === 'call_expression' || v.type === 'call') {
+    const callee = v.childForFieldName?.('function') || v.namedChild(0)
+    if (!callee) return null
+    if (callee.type === 'scoped_identifier' || callee.type === 'scoped_type_identifier') { const first = callee.namedChild(0); return first && /^[A-Z]/.test(first.text) ? first.text : null }
+    if ((callee.type === 'simple_identifier' || callee.type === 'identifier' || callee.type === 'type_identifier') && /^[A-Z]/.test(callee.text)) return callee.text
+  }
+  return null
+}
+// Per-language: extract the receiver expression node of a member call.
+const RECV_OF = {
+  java:    (c) => c.childForFieldName?.('object'),
+  c_sharp: (c) => { const m = c.childForFieldName?.('function') || c.namedChild(0); return m && m.type === 'member_access_expression' ? (m.childForFieldName?.('expression') || m.namedChild(0)) : null },
+  php:     (c) => c.childForFieldName?.('object') || c.namedChild(0),
+  rust:    (c) => { const fe = c.childForFieldName?.('function') || c.namedChild(0); return fe && fe.type === 'field_expression' ? (fe.childForFieldName?.('value') || fe.namedChild(0)) : null },
+  kotlin:  (c) => { const n = c.namedChild(0); return n && n.type === 'navigation_expression' ? n.namedChild(0) : null },
+  swift:   (c) => { const n = c.namedChild(0); return n && n.type === 'navigation_expression' ? n.namedChild(0) : null },
+  cpp:     (c) => { const fe = c.childForFieldName?.('function') || c.namedChild(0); return fe && fe.type === 'field_expression' ? (fe.childForFieldName?.('argument') || fe.namedChild(0)) : null },
+}
+RECV_OF.c = RECV_OF.cpp
+// Per-language: list of (name,type) bound by a declaration statement node.
+const BIND_OF = {
+  java(n) { if (n.type !== 'local_variable_declaration') return []; const tn = typeNameOf(n.childForFieldName?.('type')); const out = []; for (let i = 0; i < n.namedChildCount; i++) { const d = n.namedChild(i); if (d.type === 'variable_declarator') { const nm = d.childForFieldName?.('name'); const ty = tn || ctorTypeName(d.childForFieldName?.('value')); if (nm && ty) out.push({ name: nm.text, type: ty }) } } return out },
+  c_sharp(n) { if (n.type !== 'local_declaration_statement') return []; const vd = n.namedChild(0); if (!vd || vd.type !== 'variable_declaration') return []; const tf = vd.childForFieldName?.('type'); const tn = (tf && tf.type !== 'implicit_type') ? typeNameOf(tf) : null; const out = []; for (let i = 0; i < vd.namedChildCount; i++) { const d = vd.namedChild(i); if (d.type === 'variable_declarator') { const nm = d.namedChild(0); let val = null; for (let j = 0; j < d.namedChildCount; j++) { const c = d.namedChild(j); if (c.type === 'equals_value_clause') val = c.namedChild(c.namedChildCount - 1) } const ty = tn || ctorTypeName(val); if (nm && ty) out.push({ name: nm.text, type: ty }) } } return out },
+  php(n) { if (n.type !== 'assignment_expression') return []; const left = n.childForFieldName?.('left') || n.namedChild(0); const right = n.childForFieldName?.('right') || n.namedChild(n.namedChildCount - 1); const nm = recvName(left); const ty = ctorTypeName(right); return (nm && ty) ? [{ name: nm, type: ty }] : [] },
+  rust(n) { if (n.type !== 'let_declaration') return []; const nm = n.childForFieldName?.('pattern') || n.namedChild(0); const tf = n.childForFieldName?.('type'); const val = n.childForFieldName?.('value'); const ty = typeNameOf(tf) || ctorTypeName(val); return (nm && IDENT_TYPES.has(nm.type) && ty) ? [{ name: nm.text, type: ty }] : [] },
+  kotlin(n) { if (n.type !== 'property_declaration') return []; let nm = null, tn = null, val = null; for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c.type === 'variable_declaration') { nm = c.namedChild(0); for (let j = 0; j < c.namedChildCount; j++) { const u = c.namedChild(j); if (u.type === 'user_type') tn = typeNameOf(u) } } else if (c.type === 'user_type') tn = typeNameOf(c); else if (c.type === 'call_expression' || c.type === 'navigation_expression') val = c } const ty = tn || ctorTypeName(val); return (nm && ty) ? [{ name: nm.text, type: ty }] : [] },
+  swift(n) { if (n.type !== 'property_declaration') return []; let nm = null, tn = null, val = null; for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c.type === 'pattern') nm = c.namedChild(0) || c; else if (c.type === 'type_annotation') tn = typeNameOf(c); else if (c.type === 'call_expression') val = c } const ty = tn || ctorTypeName(val); return (nm && ty) ? [{ name: recvName(nm) || nm.text, type: ty }] : [] },
+  cpp(n) { if (n.type !== 'declaration') return []; const tn = typeNameOf(n.childForFieldName?.('type')); const out = []; for (let i = 0; i < n.namedChildCount; i++) { const d = n.namedChild(i); if (d.type === 'identifier') { if (tn) out.push({ name: d.text, type: tn }) } else if (d.type === 'init_declarator') { const nm = d.childForFieldName?.('declarator') || d.namedChild(0); const val = d.childForFieldName?.('value') || d.namedChild(d.namedChildCount - 1); const ty = tn || ctorTypeName(val); if (nm && IDENT_TYPES.has(nm.type) && ty) out.push({ name: nm.text, type: ty }) } } return out },
+}
+BIND_OF.c = BIND_OF.cpp
+// Per-language param list extraction → (name,type).
+function genericWalkParams(fnNode, map, lang) {
+  // params live under different fields; scan all descendants for param nodes.
+  const PARAM = { java: 'formal_parameter', c_sharp: 'parameter', rust: 'parameter', php: 'simple_parameter', cpp: 'parameter_declaration', c: 'parameter_declaration', kotlin: 'parameter', swift: 'parameter' }
+  const pt = PARAM[lang]
+  if (!pt) return
+  const visit = (n, depth) => {
+    if (!n || depth > 4) return
+    if (n.type === pt) {
+      const tf = n.childForFieldName?.('type')
+      const tn = typeNameOf(tf)
+      if (tn) { const nm = n.childForFieldName?.('name') || (() => { for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (IDENT_TYPES.has(c.type) || c.type === 'variable_name' || c.type === 'simple_identifier') return c } return null })(); const name = recvName(nm); if (name) map.set(name, tn) }
+      return
+    }
+    for (let i = 0; i < n.namedChildCount; i++) visit(n.namedChild(i), depth + 1)
+  }
+  // Only descend the parameter clause region, not the body.
+  for (let i = 0; i < fnNode.namedChildCount; i++) { const c = fnNode.namedChild(i); if (/param/i.test(c.type)) visit(c, 0) }
+}
+const LAMBDA_TYPES = new Set(['lambda', 'lambda_expression', 'lambda_literal', 'closure_expression', 'anonymous_function', 'func_literal', 'arrow_function', 'function_literal'])
+function genericScanDecls(node, map, ctx, lang) {
+  if (!node) return
+  const t = node.type
+  // Don't descend into a NESTED function/method declaration or a lambda (its
+  // locals aren't ours). Must use the cfg lists + lambda set, NOT a name regex —
+  // a regex on "function" wrongly matched Kotlin/Swift `function_body` (the
+  // body WRAPPER) and stopped harvest before it reached the declarations.
+  const cfg = ctx.types
+  if (node !== ctx._harvestRoot && (cfg.fn?.includes(t) || cfg.method?.includes(t) || LAMBDA_TYPES.has(t))) return
+  const binder = BIND_OF[lang]
+  if (binder) { const binds = binder(node); for (const b of binds) map.set(b.name, b.type) }
+  for (let i = 0; i < node.childCount; i++) genericScanDecls(node.child(i), map, ctx, lang)
+}
+function genericHarvest(fnNode, map, ctx) {
+  const lang = ctx.lang
+  genericWalkParams(fnNode, map, lang)
+  ctx._harvestRoot = fnNode
+  genericScanDecls(fnNode, map, ctx, lang)
+}
+function genericReceiverType(callNode, ctx) {
+  const rf = RECV_OF[ctx.lang]
+  if (!rf) return null
+  const recv = rf(callNode)
+  const nm = recvName(recv)
+  if (!nm) return null
+  if (nm === 'this' || nm === 'self') return ctx.classStack[ctx.classStack.length - 1]?.name || null
+  const st = ctx.varTypeStack
+  if (st) for (let i = st.length - 1; i >= 0; i--) { const ty = st[i].get(nm); if (ty) return ty }
+  return null
 }
 
 function extractCalleeName(callNode) {
