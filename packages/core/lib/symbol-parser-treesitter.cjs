@@ -1007,6 +1007,10 @@ function genericReceiverType(callNode, ctx) {
   if (nm === 'this' || nm === 'self') return ctx.classStack[ctx.classStack.length - 1]?.name || null
   const st = ctx.varTypeStack
   if (st) for (let i = st.length - 1; i >= 0; i--) { const ty = st[i].get(nm); if (ty) return ty }
+  // Static call `ClassName.method()` — the receiver IS the type. Only for a
+  // PascalCase receiver (class-name convention); resolveQualified is exact, so
+  // a non-class name just yields null — never a wrong edge.
+  if (/^[A-Z]/.test(nm)) return nm
   return null
 }
 
