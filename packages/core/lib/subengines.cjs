@@ -8,7 +8,7 @@
 // Each sub-engine is a self-contained block exporting { exts, available(),
 // resolve(absFiles, rootDir) -> records }. resolve returns RAW call records
 // (caller/decl by file+line+name); this layer maps them to graph nodes and adds
-// only NEW edges (provenance via:'tsc') + promotes matching candidates.
+// only NEW edges (provenance via: engine.name, e.g. 'ts') + promotes matching candidates.
 
 const ENGINES = []
 function register(engine) { if (engine && engine.available && engine.resolve) ENGINES.push(engine) }
@@ -55,7 +55,13 @@ function buildTargetIndex(g) {
   }
 }
 
-// Enrich a built graph in place. opts = { files: [absPath], rootDir }.
+// Enrich a built graph in place. opts = { files: [absPath], rootDir, external, heavy }.
+// Tiered by engine cost:
+//   - in-process engines (TS — bundled `typescript`) ALWAYS run.
+//   - engine.external (Java/C#/Python — spawn an external toolchain) run only
+//     when opts.external is set.
+//   - engine.heavy (Python/jedi — also slow) run only when opts.heavy is set.
+//   So: TS always; Java/C# need opts.external; Python needs opts.external AND opts.heavy.
 // Returns { engine: {added, considered, unmapped} } per engine.
 function enrich(g, opts = {}) {
   const files = opts.files || []
@@ -65,10 +71,11 @@ function enrich(g, opts = {}) {
   let encl = null, tgt = null
   for (const engine of ENGINES) {
     if (!engine.exts.some((e) => exts.has(e))) continue
-    if (engine.heavy && !opts.heavy) continue   // slow blocks (Python/jedi) only on explicit opt-in
+    if (engine.external && !opts.external) continue  // toolchain-spawning blocks (Java/C#/Python) only on explicit opt-in
+    if (engine.heavy && !opts.heavy) continue        // slow blocks (Python/jedi) only on explicit opt-in
     if (!engine.available()) continue
     let records
-    try { records = engine.resolve(files, rootDir) || [] } catch { continue }
+    try { records = engine.resolve(files, rootDir) || [] } catch (e) { if (process.env.CS_DBG) console.error('[cs] subengine ' + (engine.name || '?') + ' resolve:', e && e.message); continue }
     if (!encl) { encl = buildEnclosingIndex(g); tgt = buildTargetIndex(g) }
     let added = 0, unmapped = 0
     for (const r of records) {

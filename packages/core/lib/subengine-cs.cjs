@@ -21,7 +21,7 @@ function bincore() {
   if (_bincore !== null) return _bincore
   _bincore = null
   try {
-    const out = cp.execFileSync('dotnet', ['--list-sdks'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const out = cp.execFileSync('dotnet', ['--list-sdks'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 180000 })
     for (const line of out.split('\n')) {
       const m = line.match(/^(\S+)\s+\[(.+)\]\s*$/)
       if (!m) continue
@@ -52,7 +52,7 @@ function ensureBuilt() {
   fs.writeFileSync(path.join(dir, 'Sub.csproj'), csproj)
   const dll = path.join(dir, 'bin', 'Release', 'net9.0', 'Sub.dll')
   const stale = !fs.existsSync(dll) || fs.statSync(SRC).mtimeMs > fs.statSync(dll).mtimeMs
-  if (stale) cp.execFileSync('dotnet', ['build', '-c', 'Release', '--nologo', '-v', 'q'], { cwd: dir, stdio: 'ignore' })
+  if (stale) cp.execFileSync('dotnet', ['build', '-c', 'Release', '--nologo', '-v', 'q'], { cwd: dir, stdio: 'ignore', timeout: 180000 })
   _dll = dll
   return dll
 }
@@ -62,11 +62,13 @@ function resolve(files, rootDir) {
   if (!files.some((f) => f.toLowerCase().endsWith('.cs'))) return []
   try {
     const dll = ensureBuilt(); if (!dll) return []
-    const out = cp.execFileSync('dotnet', [dll, rootDir], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] })
+    const out = cp.execFileSync('dotnet', [dll, rootDir], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], timeout: 180000 })
     const recs = []
     for (const line of out.split('\n')) { if (!line.trim()) continue; try { const r = JSON.parse(line); if (r.declName) recs.push(r) } catch { /* skip */ } }
     return recs
   } catch { return [] }
 }
 
-module.exports = { exts: ['cs'], available, resolve, name: 'cs' }
+// external: spawns an out-of-process toolchain (dotnet/Roslyn) — enrich() skips
+// it unless explicitly opted in (enrich(..,{external:true})).
+module.exports = { exts: ['cs'], available, resolve, name: 'cs', external: true }

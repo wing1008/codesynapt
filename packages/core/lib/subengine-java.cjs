@@ -31,7 +31,7 @@ function ensureCompiled() {
   fs.mkdirSync(dir, { recursive: true })
   const cls = path.join(dir, 'Sub.class')
   const stale = !fs.existsSync(cls) || fs.statSync(HELPER_SRC).mtimeMs > fs.statSync(cls).mtimeMs
-  if (stale) cp.execFileSync('javac', ['-d', dir, HELPER_SRC], { stdio: 'ignore' })
+  if (stale) cp.execFileSync('javac', ['-d', dir, HELPER_SRC], { stdio: 'ignore', timeout: 120000 })
   _classDir = dir
   return dir
 }
@@ -41,7 +41,7 @@ function resolve(files, rootDir) {
   if (!files.some((f) => f.toLowerCase().endsWith('.java'))) return []
   try {
     const dir = ensureCompiled()
-    const out = cp.execFileSync('java', ['-cp', dir, 'Sub', rootDir], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] })
+    const out = cp.execFileSync('java', ['-cp', dir, 'Sub', rootDir], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], timeout: 120000 })
     const recs = []
     for (const line of out.split('\n')) {
       if (!line.trim()) continue
@@ -51,4 +51,6 @@ function resolve(files, rootDir) {
   } catch { return [] }
 }
 
-module.exports = { exts: ['java'], available, resolve, name: 'java' }
+// external: spawns an out-of-process toolchain (javac/java) — enrich() skips it
+// unless explicitly opted in (enrich(..,{external:true})).
+module.exports = { exts: ['java'], available, resolve, name: 'java', external: true }

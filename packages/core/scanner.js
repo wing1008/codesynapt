@@ -164,7 +164,7 @@ const TRACKED_EXT = new Set([
   // Docs
   'md', 'mdx', 'rst',
   // JVM family
-  'java', 'kt',
+  'java', 'kt', 'kts',
   // .NET family
   'cs',
   // Apple family
@@ -281,7 +281,7 @@ export class Scanner extends EventEmitter {
           if (CONVENTIONAL_NAMES.has(e.name.toLowerCase())) {
             confidence += 0.2; reasons.push('conventional vendor folder name')
           }
-        } catch {}
+        } catch (e) { if (process.env.CS_DBG) console.error('[cs] scanVendorCandidates probe:', e && e.message) }
 
         if (confidence >= 0.3) {
           this.vendorCandidates.push({
@@ -707,6 +707,25 @@ export class Scanner extends EventEmitter {
     await g.build(entries, fileImports, { fileReexports })
     this.symbolGraph = g
     this._symbolGraphStale = false
+    // Sub-engine enrichment (type-checker post-pass), TIERED by engine cost:
+    //   - DEFAULT-ON: the in-process TS block (bundled `typescript`, ~1.5-2s) —
+    //     the core value for JS/TS users, so it runs unless disabled.
+    //   - CS_SUBENGINE=1   adds the external Java/C# blocks (spawn javac/dotnet).
+    //   - CS_SUBENGINE_HEAVY=1 adds the slow Python/jedi block (~24s; needs
+    //     CS_SUBENGINE=1 too, since python+jedi is also an external toolchain).
+    //   - CS_SUBENGINE_OFF=1 disables ALL enrichment (escape hatch if the TS
+    //     post-pass ever misbehaves).
+    // This wires enrichSymbolGraph into every getSymbolGraph consumer (headless
+    // control-server, in-process MCP). enrichSymbolGraph has its own try/catch;
+    // we guard here too so a throw can never escape buildSymbolGraph.
+    if (process.env.CS_SUBENGINE_OFF !== '1') {
+      try {
+        this.enrichSymbolGraph({
+          external: process.env.CS_SUBENGINE === '1',
+          heavy: process.env.CS_SUBENGINE_HEAVY === '1',
+        })
+      } catch (e) { if (process.env.CS_DBG) console.error('[cs] enrichSymbolGraph guard:', e && e.message) }
+    }
     return g
   }
 
@@ -717,13 +736,15 @@ export class Scanner extends EventEmitter {
   // calls this AFTER build, ideally in the background (the TS block is ~1.5-2s
   // for a few-hundred-file repo). No-op if no sub-engine is available, and it
   // never touches the build path — pure post-pass on the existing graph.
-  // opts.heavy = also run slow opt-in blocks (Python/jedi), off by default.
+  // opts.external = also run external toolchain blocks (Java/C#/Python), off by
+  // default. opts.heavy = also run slow opt-in blocks (Python/jedi), off by
+  // default. The in-process TS block always runs.
   enrichSymbolGraph(opts = {}) {
     if (!this.symbolGraph) return null
     try {
       const files = []
       for (const f of this.files.values()) if (f.absPath) files.push(f.absPath)
-      return enrichSubengines(this.symbolGraph, { files, rootDir: this.root, heavy: !!opts.heavy })
+      return enrichSubengines(this.symbolGraph, { files, rootDir: this.root, external: !!opts.external, heavy: !!opts.heavy })
     } catch (e) { if (process.env.CS_DBG) console.error('enrich err', e && e.stack); return null }
   }
 

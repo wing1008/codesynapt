@@ -20,7 +20,7 @@ let _py = null   // resolved interpreter command, or false
 function py() {
   if (_py !== null) return _py
   for (const cmd of ['python', 'python3', 'py']) {
-    try { cp.execFileSync(cmd, ['-c', 'import jedi'], { stdio: 'ignore' }); _py = cmd; return _py } catch { /* try next */ }
+    try { cp.execFileSync(cmd, ['-c', 'import jedi'], { stdio: 'ignore', timeout: 15000 }); _py = cmd; return _py } catch { /* try next */ }
   }
   _py = false
   return _py
@@ -32,13 +32,13 @@ function resolve(files, rootDir) {
   if (!cmd) return []
   if (!files.some((f) => f.toLowerCase().endsWith('.py'))) return []
   try {
-    const out = cp.execFileSync(cmd, [HELPER, rootDir], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] })
+    const out = cp.execFileSync(cmd, [HELPER, rootDir], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], timeout: 300000 })
     const recs = []
     for (const line of out.split('\n')) { if (!line.trim()) continue; try { const r = JSON.parse(line); if (r.declName) recs.push(r) } catch { /* skip */ } }
     return recs
   } catch { return [] }
 }
 
-// heavy: enrich skips this unless explicitly asked (enrich(..,{heavy:true})) —
-// jedi is too slow to run by default alongside the fast TS/Java/C# blocks.
-module.exports = { exts: ['py'], available, resolve, name: 'python', heavy: true }
+// external: spawns an out-of-process toolchain (python+jedi). heavy: jedi is also
+// slow (~24s). enrich() runs this only when BOTH opted in (external && heavy).
+module.exports = { exts: ['py'], available, resolve, name: 'python', external: true, heavy: true }
