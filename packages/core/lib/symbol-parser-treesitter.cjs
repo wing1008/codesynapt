@@ -953,7 +953,7 @@ const RECV_OF = {
   java:    (c) => c.childForFieldName?.('object'),
   c_sharp: (c) => { const m = c.childForFieldName?.('function') || c.namedChild(0); return m && m.type === 'member_access_expression' ? (m.childForFieldName?.('expression') || m.namedChild(0)) : null },
   php:     (c) => c.childForFieldName?.('object') || c.namedChild(0),
-  rust:    (c) => { const fe = c.childForFieldName?.('function') || c.namedChild(0); return fe && fe.type === 'field_expression' ? (fe.childForFieldName?.('value') || fe.namedChild(0)) : null },
+  rust:    (c) => { const fe = c.childForFieldName?.('function') || c.namedChild(0); if (!fe) return null; if (fe.type === 'field_expression') return fe.childForFieldName?.('value') || fe.namedChild(0); if (fe.type === 'scoped_identifier') return fe.childForFieldName?.('path') || fe.namedChild(0); return null },
   kotlin:  (c) => { const n = c.namedChild(0); return n && n.type === 'navigation_expression' ? n.namedChild(0) : null },
   swift:   (c) => { const n = c.namedChild(0); return n && n.type === 'navigation_expression' ? n.namedChild(0) : null },
   cpp:     (c) => { const fe = c.childForFieldName?.('function') || c.namedChild(0); return fe && fe.type === 'field_expression' ? (fe.childForFieldName?.('argument') || fe.namedChild(0)) : null },
