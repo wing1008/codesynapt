@@ -7,6 +7,7 @@ import { parseFile, resolveImport, resolveImportAll, clearParserCaches, normaliz
          extractNextApiRoutes, extractNuxtServerRoutes, extractSvelteKitServerRoutes } from './parser.js'
 import { detectMonorepo, packageForFile } from './monorepo.js'
 import { registerAll as registerSymbolParsers, SymbolGraph } from './lib/symbol-parsers.cjs'
+import { enrich as enrichSubengines } from './lib/subengines.cjs'
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg',
@@ -707,6 +708,22 @@ export class Scanner extends EventEmitter {
     this.symbolGraph = g
     this._symbolGraphStale = false
     return g
+  }
+
+  // Optional sub-engine enrichment. The fast AST engine (build above) resolves
+  // ~80% of static calls across all languages; registered per-language
+  // sub-engines (e.g. the TS type-checker block) union in the rest that need
+  // real type resolution (generics/field-chains). Lazy + isolated: the host
+  // calls this AFTER build, ideally in the background (the TS block is ~1.5-2s
+  // for a few-hundred-file repo). No-op if no sub-engine is available, and it
+  // never touches the build path — pure post-pass on the existing graph.
+  enrichSymbolGraph() {
+    if (!this.symbolGraph) return null
+    try {
+      const files = []
+      for (const f of this.files.values()) if (f.absPath) files.push(f.absPath)
+      return enrichSubengines(this.symbolGraph, { files, rootDir: this.root })
+    } catch (e) { if (process.env.CS_DBG) console.error('enrich err', e && e.stack); return null }
   }
 
   // Lazy accessor. Coalesces concurrent callers onto one in-flight build so a
