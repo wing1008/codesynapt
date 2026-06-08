@@ -273,6 +273,24 @@ function extractSymbols(content, fileId) {
         doc: docOf(n),
         exported: path.parent?.type?.startsWith('Export') ?? false,
       })
+      // Interface method/function-property signatures as `Interface.method`
+      // symbols, so a call on an interface-typed receiver resolves (qualifiedOnly)
+      // to the declaration — e.g. zod `$ZodType.init()` -> the `$constructor`
+      // interface's `init`. Only callables (method sigs + function-typed props).
+      for (const m of (n.body?.body || [])) {
+        const isMethodSig = m.type === 'TSMethodSignature'
+        const isFnProp = m.type === 'TSPropertySignature'
+          && m.typeAnnotation?.typeAnnotation?.type === 'TSFunctionType'
+        if (!isMethodSig && !isFnProp) continue
+        const mn = m.key?.name ?? m.key?.value
+        if (!mn || !m.loc) continue
+        symbols.push({
+          id: mkId(fileId, `${n.id.name}.${mn}`, m.loc.start.line),
+          name: String(mn), qualifiedName: `${n.id.name}.${mn}`, kind: 'method',
+          file: fileId, startLine: m.loc.start.line, endLine: m.loc.end.line,
+          signature: '', doc: '', exported: false,
+        })
+      }
     },
     TSTypeAliasDeclaration(path) {
       const n = path.node
@@ -506,41 +524,52 @@ function extractReferences(content, fileId, index) {
     if (!Array.isArray(body)) return
     for (const stmt of body) {
       if (stmt.type !== 'VariableDeclaration') continue
-      for (const d of stmt.declarations || []) {
-        if (d.id?.type !== 'Identifier') continue
-        const varName = d.id.name
-        // TS annotation: `let user: User`
-        const ann = d.id.typeAnnotation?.typeAnnotation
-        const annName = extractTypeName(ann)
-        if (annName) { types.set(varName, annName); continue }
-        // `new User()` / `const s = make()` / `factory()` — RESOLVED return
-        // type (the TS return annotation on the called fn). Exact (read off the
-        // callee's real signature), so it precedes the name-based guesses below.
-        if (d.init?.type === 'NewExpression' || d.init?.type === 'CallExpression') {
-          const rt = callReturnType(d.init)
-          if (rt) { types.set(varName, rt); continue }
-        }
-        // 3) `const u = User.find(...)` / `User.create(...)` — assume
-        //    static factory returns the same type. Heuristic but
-        //    extremely common in ORM/DDD code.
-        if (d.init?.type === 'CallExpression'
-            && d.init.callee?.type === 'MemberExpression'
-            && d.init.callee.object?.type === 'Identifier'
-            && /^[A-Z]/.test(d.init.callee.object.name)
-            && /^(find|findOne|findFirst|findMany|create|build|new|of|from|get|fetch)/.test(
-                 d.init.callee.property?.name || '')) {
-          types.set(varName, d.init.callee.object.name)
-        }
-        // 4) `const u = makeUser()` / `getUser()` — heuristic on
-        //    factory names that contain a capitalised noun: `makeUser`
-        //    → User, `getOrder` → Order.
-        if (d.init?.type === 'CallExpression'
-            && d.init.callee?.type === 'Identifier') {
-          const fnName = d.init.callee.name
-          const m = fnName.match(/^(?:make|create|build|get|fetch|find|new|of|to)?([A-Z][a-zA-Z0-9]+)$/)
-          if (m) types.set(varName, m[1])
-        }
-      }
+      for (const d of stmt.declarations || []) harvestVarDecl(d, types)
+    }
+  }
+  // Type a single `const/let x = …` declarator into `types`. Shared by function
+  // bodies and the MODULE-level harvest (top-level `const X: T = factory()` —
+  // e.g. zod's `export const $ZodType: core.$constructor<…> = …`, whose `.init`
+  // calls were the single biggest static-recall gap).
+  function harvestVarDecl(d, types) {
+    if (d.id?.type !== 'Identifier') return
+    const varName = d.id.name
+    const ann = d.id.typeAnnotation?.typeAnnotation
+    const annName = extractTypeName(ann)
+    if (annName) { types.set(varName, annName); return }
+    if (d.init?.type === 'NewExpression' || d.init?.type === 'CallExpression') {
+      const rt = callReturnType(d.init)
+      if (rt) { types.set(varName, rt); return }
+    }
+    if (d.init?.type === 'CallExpression'
+        && d.init.callee?.type === 'MemberExpression'
+        && d.init.callee.object?.type === 'Identifier'
+        && /^[A-Z]/.test(d.init.callee.object.name)
+        && /^(find|findOne|findFirst|findMany|create|build|new|of|from|get|fetch)/.test(
+             d.init.callee.property?.name || '')) {
+      types.set(varName, d.init.callee.object.name); return
+    }
+    if (d.init?.type === 'CallExpression' && d.init.callee?.type === 'Identifier') {
+      const m = d.init.callee.name.match(/^(?:make|create|build|get|fetch|find|new|of|to)?([A-Z][a-zA-Z0-9]+)$/)
+      if (m) types.set(varName, m[1])
+    }
+  }
+
+  // Module-level const types — harvested once into the BASE of the type stack so
+  // `X.method()` resolves anywhere in the file when X is a top-level
+  // `const X: T = …` / `const X = factory()` (function locals shadow it via the
+  // maps pushed on top). This was the dominant static-recall gap: zod's
+  // `export const $ZodType: core.$constructor<…>` — its `.init()` calls (55% of
+  // all missed TS calls) had no receiver type because only function-body consts
+  // were tracked.
+  pushTypes()
+  {
+    const moduleBase = topTypes()
+    for (const stmt of (ast.program?.body || [])) {
+      const vd = stmt.type === 'VariableDeclaration' ? stmt
+        : (stmt.type === 'ExportNamedDeclaration' && stmt.declaration?.type === 'VariableDeclaration') ? stmt.declaration
+          : null
+      if (vd) for (const d of vd.declarations || []) harvestVarDecl(d, moduleBase)
     }
   }
 
