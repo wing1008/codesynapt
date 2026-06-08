@@ -69,14 +69,6 @@ const BUILTIN_NAMES = new Set([
   'startswith', 'endswith', 'normalize', 'tolowercase', 'touppercase',
   'padstart', 'padend', 'repeat', 'charat', 'charcodeat', 'codepointat',
   'substring', 'substr', 'lastindexof', 'tofixed',
-  // Rust std trait methods — measured to mis-link on untyped receivers
-  // (`s.to_owned()` where s is a `str` -> a same-file user `to_owned`). Only the
-  // untyped member-call fallback is gated; a TYPED `x.to_owned()` still resolves
-  // via the qualified path (resolveQualified passes memberCall:false). snake_case
-  // so they won't collide with user method names in other languages.
-  'to_owned', 'into_iter', 'as_ref', 'as_mut', 'as_str', 'as_bytes', 'as_slice',
-  'to_vec', 'borrow', 'borrow_mut', 'unwrap', 'unwrap_or', 'unwrap_or_else',
-  'expect', 'cloned', 'copied', 'as_deref', 'with_capacity',
 ])
 
 // Grammars whose web-tree-sitter wasm parser leaks memory at scale and must be

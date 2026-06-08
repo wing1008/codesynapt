@@ -430,7 +430,16 @@ function walk(node, ctx) {
         // first. Typed members were already resolved above (Python qualified).
         if (!target) {
           const member = isMemberCallNode(node)
-          target = ctx.resolve(calleeName, { forCall: !member, memberCall: member })
+          // Rust: an untyped MEMBER call (`x.method()` / `Vec::with`) whose
+          // receiver type we couldn't resolve is almost always a std-library
+          // method (the std surface is huge — iter/to_owned/unwrap/with_capacity
+          // /…), and bare-resolving it grabs a coincidentally same-named user
+          // method (measured: `slice.iter()` -> `Map.iter`, `s.to_owned()` ->
+          // `RawValue.to_owned`). Refuse — typed receivers already resolved
+          // above via the qualified path. Bare FUNCTION calls `foo()` still
+          // resolve (member=false).
+          if (ctx.lang === 'rust' && member) { /* no bare-fallback for untyped Rust member calls */ }
+          else target = ctx.resolve(calleeName, { forCall: !member, memberCall: member })
         }
         if (target && target.id !== src) {
           const key = src + '|' + target.id + '|call'
@@ -912,6 +921,7 @@ function goHarvestFuncTypes(fnNode, map, ctx) {
 // Name text of a receiver expression node (PHP `$x` is variable_name>name).
 function recvName(node) {
   if (!node) return null
+  if (node.type === 'self' || node.type === 'this') return 'self'   // Rust/Swift `self`, etc.
   if (node.type === 'variable_name') { const n = node.childForFieldName?.('name') || node.namedChild(0); return n?.text || null }
   if (IDENT_TYPES.has(node.type)) return node.text
   return null
