@@ -12,8 +12,9 @@
 
 const ENGINES = []
 function register(engine) { if (engine && engine.available && engine.resolve) ENGINES.push(engine) }
-// Built-in: the TS type-checker block.
+// Built-in blocks. TS = bundled (typescript npm). Java = toolchain-gated (JDK).
 try { register(require('./subengine-ts.cjs')) } catch { /* optional */ }
+try { register(require('./subengine-java.cjs')) } catch { /* optional */ }
 
 // Smallest graph symbol whose line range encloses `line` in `file` (the calling
 // function/method); falls back to the file's <module> node.
@@ -74,7 +75,7 @@ function enrich(g, opts = {}) {
       if (src.id === dst.id) continue
       // addEdge dedups; a duplicate of a main-engine edge is a no-op, so this
       // only ADDS the ones the AST engine missed.
-      if (g.addEdge({ source: src.id, target: dst.id, kind: 'call', line: r.callLine, via: 'tsc' })) added++
+      if (g.addEdge({ source: src.id, target: dst.id, kind: 'call', line: r.callLine, via: engine.name })) added++
     }
     stats[engine.name] = { added, considered: records.length, unmapped }
   }
