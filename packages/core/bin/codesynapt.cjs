@@ -148,6 +148,31 @@ const USAGE = `CodeSynapt CLI — usage:
   cs blast <id> [n] [dir]   # impact of editing <id>: dependents within n hops
                               #   n   = BFS depth (default 3)
                               #   dir = users|deps (default users)
+
+  ── Function / symbol level (Layer 2) — needs desktop app ────
+  cs symbol summary [--json]
+                              # function-level overview: symbol/edge counts,
+                              #   top hubs (most-called functions), coverage.
+                              #   (Layer-2 equivalent of \`cs summary\`.)
+  cs symbol find <query> [--json]
+                              # functions/classes/… whose NAME contains <query>.
+                              #   prints  id  kind  file:line.
+  cs symbol callers <name|id> [--json]
+                              # who CALLS this function (function-level blast
+                              #   surface). Pass a bare name → resolved via find;
+                              #   if ambiguous, candidates are listed (pick by id).
+  cs symbol callees <name|id> [--json]
+                              # what this function CALLS (its outgoing calls).
+  cs symbol blast <name|id> [depth] [callers|callees] [--json]
+                              # FUNCTION-level impact: what breaks if you change
+                              #   this function. depth default 3, dir default callers.
+                              #   File-level \`cs blast\` can call a hub file "low
+                              #   risk" while a function inside is called everywhere.
+  cs symbol node <id> [--json]
+                              # one symbol's detail + source body + callers/callees.
+                              #   id must be a full symbol id (from find/callers).
+                              # Coverage: JS/TS + Python (+ validated tree-sitter
+                              #   langs). Other languages: layer-1 only.
   cs safety <id> [--deep] [--json]
                               # 🟢/🟡/🔴 + 한 줄 권고. AI에게 시키기 전
                               #   "이 파일 건드려도 되나" 즉답.
@@ -925,6 +950,169 @@ async function main() {
           if (d.ids.length > 50) process.stdout.write(`    … +${d.ids.length - 50} more\n`)
         }
         break
+      }
+      case 'symbol': {
+        // ── Layer-2 (function/symbol) commands. Mirror the /symbol/* HTTP
+        //    endpoints (already used by the MCP server). Symbol ids carry #/@,
+        //    so they ride the ?id= query param (the control-server accepts both
+        //    ?id= and the path tail). Reuse req() exactly like every Layer-1
+        //    command — no new transport.
+        const sub = args[0]
+        const asJson = args.includes('--json')
+        const rest = args.slice(1).filter((a) => a !== '--json')
+
+        // Format a symbolNodeView for humans: "kind name  file:line  (cN/eN)".
+        const fmtSym = (s) => {
+          const loc = s.line ? `${s.file}:${s.line}` : s.file
+          const deg = (s.callers !== undefined || s.callees !== undefined)
+            ? `  (callers ${s.callers ?? 0}, callees ${s.callees ?? 0})` : ''
+          process.stdout.write(`  [${(s.kind || '?').padEnd(8)}] ${s.name}\n      ${loc}${deg}\n      id: ${s.id}\n`)
+        }
+
+        // Resolve a name → symbol id via /symbol/find. If the arg already looks
+        // like a full symbol id (an exact id match exists), use it directly.
+        // Ambiguous bare names → print candidates and exit so the user re-runs
+        // with the precise id.
+        const resolveSymbol = async (nameOrId) => {
+          const fr = await req('GET', '/symbol/find', { q: nameOrId })
+          if (fr.status !== 200) die(fr.json?.error || `symbol find failed (status ${fr.status})`)
+          const matches = (fr.json && fr.json.matches) || []
+          // Exact id match wins (lets you pass an id straight through).
+          const exactId = matches.find((m) => m.id === nameOrId)
+          if (exactId) return exactId.id
+          // Exact name match, single → use it.
+          const byName = matches.filter((m) => m.name === nameOrId || m.name.endsWith('.' + nameOrId) || m.name.endsWith('#' + nameOrId))
+          const pool = byName.length ? byName : matches
+          if (pool.length === 0) {
+            die(`no symbol matching "${nameOrId}". Coverage is JS/TS + Python (+ validated tree-sitter langs); other languages are layer-1 only. Try \`cs symbol find ${nameOrId}\`.`)
+          }
+          if (pool.length === 1) return pool[0].id
+          // Ambiguous — list candidates, ask the user to pick by id.
+          process.stderr.write(`"${nameOrId}" is ambiguous — ${pool.length} candidates. Re-run with one of these ids:\n\n`)
+          for (const m of pool.slice(0, 25)) {
+            process.stderr.write(`  ${m.id}\n      [${m.kind}] ${m.file}:${m.line}  (callers ${m.callers ?? 0})\n`)
+          }
+          if (pool.length > 25) process.stderr.write(`  … +${pool.length - 25} more (narrow the query)\n`)
+          process.exit(1)
+        }
+
+        if (!sub || sub === 'summary') {
+          const r = await req('GET', '/symbol/summary')
+          if (r.status === 404) return die(r.json?.error || 'symbol mode requires the desktop app (not available on `cs serve`).')
+          if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
+          const j = r.json
+          if (asJson) { printJson(j); break }
+          const sc = j.symbolCount ?? j.nodes ?? j.totalSymbols ?? '?'
+          const ec = j.edgeCount ?? j.edges ?? j.callEdges ?? '?'
+          process.stdout.write(`function-level graph: ${sc} symbols, ${ec} edges\n`)
+          if (j.byKind) {
+            const kinds = Object.entries(j.byKind).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join('  ')
+            if (kinds) process.stdout.write(`by kind: ${kinds}\n`)
+          }
+          if (j.coverage) {
+            const c = j.coverage
+            process.stdout.write(`coverage: ${c.filesCovered}/${c.filesTotal} files (${c.coveragePct}%)`)
+            if (c.uncoveredLangs && c.uncoveredLangs.length) process.stdout.write(`  · uncovered: ${c.uncoveredLangs.join(' ')}`)
+            process.stdout.write(`\n`)
+          }
+          if (j.topHubs && j.topHubs.length) {
+            process.stdout.write(`\ntop hubs (most-called functions):\n`)
+            for (const h of j.topHubs.slice(0, 15)) {
+              process.stdout.write(`  c=${String(h.callers).padStart(4)}  [${(h.kind || '?').padEnd(8)}] ${h.name}  ${h.file}:${h.line}\n`)
+            }
+          }
+          break
+        }
+
+        if (sub === 'find') {
+          if (!rest[0]) return die('usage: cs symbol find <query> [--json]')
+          const q = rest[0]
+          const r = await req('GET', '/symbol/find', { q })
+          if (r.status === 404) return die(r.json?.error || 'symbol mode requires the desktop app.')
+          if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
+          const j = r.json
+          if (asJson) { printJson(j); break }
+          const matches = j.matches || []
+          if (!matches.length) { process.stdout.write(`no symbols matching "${q}"\n`); break }
+          process.stdout.write(`${matches.length} symbol${matches.length === 1 ? '' : 's'} matching "${q}":\n\n`)
+          for (const m of matches) fmtSym(m)
+          break
+        }
+
+        if (sub === 'callers' || sub === 'callees') {
+          if (!rest[0]) return die(`usage: cs symbol ${sub} <name|id> [--json]`)
+          const id = await resolveSymbol(rest[0])
+          const r = await req('GET', '/symbol/' + sub, { id })
+          if (r.status === 404) return die(r.json?.error || `symbol not found: ${id}`)
+          if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
+          const j = r.json
+          if (asJson) { printJson(j); break }
+          const list = j[sub] || []
+          const label = sub === 'callers' ? 'callers (who calls this)' : 'callees (what this calls)'
+          process.stdout.write(`${label} of ${id}\n`)
+          if (!list.length) { process.stdout.write(`  (none)\n`) }
+          else for (const s of list) fmtSym(s)
+          const cand = sub === 'callers' ? j.candidateCallers : j.candidateCallees
+          if (cand && cand.length) {
+            process.stdout.write(`\ncandidate* (possible dynamic-dispatch, not confirmed):\n`)
+            for (const s of cand) fmtSym(s)
+            if (j.candidateNote) process.stdout.write(`\n  ${j.candidateNote}\n`)
+          }
+          break
+        }
+
+        if (sub === 'blast') {
+          if (!rest[0]) return die('usage: cs symbol blast <name|id> [depth] [callers|callees] [--json]')
+          const id = await resolveSymbol(rest[0])
+          const depth = rest[1] && /^\d+$/.test(rest[1]) ? rest[1] : '3'
+          const direction = rest.includes('callees') ? 'callees' : 'callers'
+          const r = await req('GET', '/symbol/blast', { id, depth, direction })
+          if (r.status === 404) return die(r.json?.error || `symbol not found: ${id}`)
+          if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
+          const j = r.json
+          if (asJson) { printJson(j); break }
+          process.stdout.write(`seed: ${j.seed.name}  (${j.seed.file}:${j.seed.line})\n`)
+          process.stdout.write(`direction: ${j.direction === 'callers' ? 'who calls this (impact)' : 'what this calls (closure)'}\n`)
+          process.stdout.write(`depth: ${j.depth} hops\n`)
+          process.stdout.write(`impact: ${j.totalImpacted} symbols across ${j.filesTouched} files\n`)
+          if (j.byDepth && j.byDepth.length) {
+            process.stdout.write(`by hop: ${j.byDepth.map((d) => `h${d.depth}=${d.count}`).join('  ')}\n`)
+          }
+          process.stdout.write(`\n`)
+          for (const s of (j.impacted || [])) {
+            process.stdout.write(`  [${(s.kind || '?').padEnd(8)}] ${s.name}  ${s.file}:${s.line}\n`)
+          }
+          if (j.truncated) process.stdout.write(`  … (truncated — pass --json for the full list)\n`)
+          if (j.caveat) process.stdout.write(`\n  ⚠ ${j.caveat}\n`)
+          break
+        }
+
+        if (sub === 'node') {
+          if (!rest[0]) return die('usage: cs symbol node <id> [--json]\n  (id is a full symbol id — get one from `cs symbol find`)')
+          const id = rest[0]
+          const r = await req('GET', '/symbol/node', { id })
+          if (r.status === 404) return die(r.json?.error || `symbol not found: ${id}`)
+          if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
+          const j = r.json
+          if (asJson) { printJson(j); break }
+          process.stdout.write(`[${j.kind || '?'}] ${j.name}\n`)
+          process.stdout.write(`file: ${j.file}:${j.line}${j.exported ? '  (exported)' : ''}\n`)
+          process.stdout.write(`callers ${(j.callers || []).length}  ·  callees ${(j.callees || []).length}\n`)
+          if (j.callers && j.callers.length) {
+            process.stdout.write(`\ncallers:\n`)
+            for (const s of j.callers) process.stdout.write(`  [${(s.kind || '?').padEnd(8)}] ${s.name}  ${s.file}:${s.line}\n`)
+          }
+          if (j.callees && j.callees.length) {
+            process.stdout.write(`\ncallees:\n`)
+            for (const s of j.callees) process.stdout.write(`  [${(s.kind || '?').padEnd(8)}] ${s.name}  ${s.file}:${s.line}\n`)
+          }
+          if (j.source || j.body) {
+            process.stdout.write(`\n--- source ---\n${j.source || j.body}\n`)
+          }
+          break
+        }
+
+        return die(`unknown symbol subcommand: ${sub}\n  valid: summary | find | callers | callees | blast | node`)
       }
       case 'safety': {
         if (!args[0]) return die('usage: cs safety <id> [--deep] [--json] [--locale ko|en]')
