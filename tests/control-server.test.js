@@ -18,6 +18,13 @@ beforeAll(async () => {
   fs.writeFileSync(path.join(tmpRoot, 'src/foo.ts'), `export const foo = 1`)
   fs.writeFileSync(path.join(tmpRoot, 'src/db.ts'), `const k = process.env.STRIPE_KEY`)
   fs.writeFileSync(path.join(tmpRoot, '.env'), 'STRIPE_KEY=x\nUNUSED_KEY=y')
+  // A JS file with a distinctive function body so /symbol/node source
+  // extraction (parity with desktop) has a real symbol to read.
+  fs.writeFileSync(path.join(tmpRoot, 'src/calc.js'), `export function addNumbers(a, b) {
+  const CALC_MARKER = a + b
+  return CALC_MARKER
+}
+`)
 
   scanner = new Scanner(tmpRoot)
   await new Promise((resolve) => { scanner.once('snapshot', resolve); scanner.start() })
@@ -245,5 +252,30 @@ describe('control-server endpoints', () => {
   it('unknown action via /summary?action=nope (via /preflight is fine — /unknown 404)', async () => {
     const r = await call('GET', '/this-does-not-exist')
     expect(r.error).toBeDefined()
+  })
+})
+
+describe('control-server /symbol/node source (desktop parity)', () => {
+  it('GET /symbol/node?id=<fn> includes the symbol SOURCE body', async () => {
+    // Find a real function id from the fixture's calc.js.
+    const found = await call('GET', '/symbol/find?q=addNumbers')
+    expect(Array.isArray(found.matches)).toBe(true)
+    const match = found.matches.find((m) => /addNumbers/.test(m.name) || /addNumbers/.test(m.id))
+    expect(match, 'expected addNumbers to be in the symbol graph').toBeDefined()
+
+    const r = await call('GET', '/symbol/node?id=' + encodeURIComponent(match.id))
+    expect(typeof r.source).toBe('string')
+    expect(r.source.length).toBeGreaterThan(0)
+    // The extracted lines must contain the function's actual code.
+    expect(r.source).toMatch(/addNumbers/)
+    expect(r.source).toMatch(/CALC_MARKER/)
+    // node shape + caller/callee parity is still present.
+    expect(Array.isArray(r.callers)).toBe(true)
+    expect(Array.isArray(r.callees)).toBe(true)
+  })
+
+  it('GET /symbol/node?id=<missing> returns 404 (source path does not 500)', async () => {
+    const r = await call('GET', '/symbol/node?id=' + encodeURIComponent('does/not/exist#nope@0'))
+    expect(r.error).toBe('symbol not found')
   })
 })

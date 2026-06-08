@@ -17,8 +17,24 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const { execFile } = require('child_process')
 const { SUPPORTED_EXTS } = require('./symbol-parsers.cjs')
 const sv = require('./symbol-views.cjs')
+const traceStore = require('./trace-store.cjs')
+const changesViews = require('./changes-views.cjs')
+const symbolExplore = require('./symbol-explore.cjs')
+
+// Promisified git invocation for /timeline. Git is a LOCAL tool — never a
+// network call — so this is offline-rule compliant. Mirrors desktop's
+// pExecFile(git, ...).
+function pExecFile(cmd, args, opts) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, opts, (err, stdout, stderr) => {
+      if (err) return reject(err)
+      resolve({ stdout: stdout || '', stderr: stderr || '' })
+    })
+  })
+}
 
 // Distinguishes "the client sent a bad path/param" (→ 400) from a genuine
 // server fault (→ 500). Thrown by safeDecode() on malformed %-encoding so the
@@ -452,6 +468,30 @@ function createControlServer(opts) {
     for (const b of byDomain.values()) total += b.callers.length
     const domains = [...byDomain.values()].sort((a, b) => b.callers.length - a.callers.length)
     return { domains, totalCalls: total }
+  }
+
+  // ── Trace / changes / timeline state (per server instance) ─────
+  // The headless server records the SAME trace .jsonl + session-change log the
+  // desktop does, so an AI on the MCP/`cs serve` path is no longer silent.
+  const _trace = new traceStore.TraceStore({ getCurrentRoot, scanner })
+  const _changes = new changesViews.SessionChangeLog()
+  let _timelineCache = { root: null, data: null, building: false }
+  // Read a symbol's source lines, root-scoped — injected into the explore view.
+  function readSymbolSource(file, startLine, endLine) {
+    try {
+      const root = getCurrentRoot()
+      const full = path.join(root, file)
+      if (!isInsideRoot(root, full)) return null
+      const lines = fs.readFileSync(full, 'utf8').split('\n')
+      return lines.slice(startLine - 1, endLine).join('\n')
+    } catch { return null }
+  }
+  // Record a successful write/edit into BOTH the trace log and the session
+  // change log (mirrors desktop writeFileToRoot → emitTrace('write') +
+  // trackChange). `content` is the post-write content.
+  function recordWrite(id, content) {
+    try { _trace.emit('write', id) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite trace.emit:', e && e.message) }
+    try { _changes.track(id, content) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite changes.track:', e && e.message) }
   }
 
   // ── Blast radius ──────────────────────────────────────────────
@@ -1334,7 +1374,7 @@ function createControlServer(opts) {
         }
         collect('dependencies'); collect('devDependencies'); collect('peerDependencies')
       }
-    } catch {}
+    } catch (e) { if (process.env.CS_DBG) console.error('[cs] package declared-deps parse:', e && e.message) }
     return {
       name, relRoot: pkg.relRoot, manifest: pkg.manifest,
       language: pkg.language, kind: pkg.kind,
@@ -1368,7 +1408,7 @@ function createControlServer(opts) {
       const file = path.join(auditLogDir, `${day}.jsonl`)
       fs.mkdirSync(auditLogDir, { recursive: true })
       fs.appendFileSync(file, JSON.stringify(entry) + '\n', 'utf8')
-    } catch { /* silent */ }
+    } catch (e) { if (process.env.CS_DBG) console.error('[cs] auditWrite:', e && e.message) /* silent */ }
   }
 
   // ── Main router ───────────────────────────────────────────────
@@ -1484,6 +1524,10 @@ function createControlServer(opts) {
             'GET /symbol/summary', 'GET /symbol/graph', 'GET /symbol/find?q=', 'GET /symbol/node?id=',
             'GET /symbol/callers?id=', 'GET /symbol/callees?id=',
             'GET /symbol/blast?id=[&depth=&direction=callers|callees]',
+            'GET /symbol/explore?q=[&budget=]',
+            'GET /trace', 'GET /trace/stats', 'GET /trace/sessions', 'GET /trace/session/:id',
+            'POST /trace/clear', 'POST /trace/export?path=',
+            'GET /tour', 'GET /timeline', 'GET /changes', 'GET /changes/:id',
             'POST /write/:id', 'POST /edit/:id',
           ],
         })
@@ -1595,13 +1639,51 @@ function createControlServer(opts) {
           if (sub === 'node') {
             const n = g.nodes.get(params.id)
             if (!n) return writeJson(res, 404, { error: 'symbol not found', id: params.id })
+            // Parity with desktop (electron/main.cjs node branch): include the
+            // symbol's SOURCE body — file lines startLine..endLine, capped at
+            // 4000 chars with a '…' suffix. Reuses the root-scoped, path-safe
+            // readSymbolSource() (same getCurrentRoot()/isInsideRoot() the /file
+            // route uses). A read failure degrades to no `source` (not a 500),
+            // mirroring desktop's try/catch.
+            let source = ''
+            try {
+              const src = readSymbolSource(n.file, n.startLine, n.endLine)
+              if (src != null) {
+                source = src.length > 4000 ? src.slice(0, 4000) + '\n…' : src
+              }
+            } catch (e) {
+              if (process.env.CS_DBG) console.error('[cs] symbol/node source:', e && e.message)
+            }
             return writeJson(res, 200, withMeta({
               ...sv.symbolNodeView(g, n),
+              source,
               callers: g.callersOf(params.id).map((c) => sv.symbolNodeView(g, c)),
               callees: g.calleesOf(params.id).map((c) => sv.symbolNodeView(g, c)),
             }))
           }
-          return writeJson(res, 404, { error: 'unknown symbol endpoint', sub, valid: ['summary', 'graph', 'find?q=', 'node?id=', 'callers?id=', 'callees?id=', 'blast?id=[&depth=&direction=callers|callees]'] })
+          if (sub === 'explore') {
+            // Semantic+keyword classify view. Offline-safe: embeddings are only
+            // used when the graph already carries them (g._embedded) — the
+            // headless scanner.getSymbolGraph() does NOT embed, so this is the
+            // keyword fallback and NEVER downloads a model. We pass the
+            // embedding module only as a guarded dependency for the (rare) case
+            // a host pre-embedded the graph with a cached model.
+            const exploreQ = params.q || ''
+            const budget = parseInt(url.searchParams.get('budget') || '8000', 10)
+            const requestedMode = (url.searchParams.get('mode') || 'classify').toLowerCase()
+            let embeddingMod = null
+            if (g._embedded) { try { embeddingMod = require('./embedding.cjs') } catch {} }
+            return symbolExplore.buildClassifyResponse(g, exploreQ, budget, readSymbolSource, embeddingMod)
+              .then((payload) => {
+                if (req._csClientGone || res.writableEnded) return
+                if (requestedMode !== 'classify') {
+                  payload.note = `mode "${requestedMode}" is no longer supported — returning classify shape`
+                }
+                writeJson(res, 200, withMeta(payload))
+              })
+              .catch((e) => { if (!res.writableEnded) writeJson(res, 500, { error: 'explore failed', message: e && e.message }) })
+          }
+          return writeJson(res, 404, { error: 'unknown symbol endpoint', sub, valid: ['summary', 'graph', 'find?q=', 'node?id=', 'callers?id=', 'callees?id=', 'blast?id=[&depth=&direction=callers|callees]', 'explore?q='] })
         }).catch((e) => {
           if (req._csClientGone || res.writableEnded) return
           writeJson(res, 500, { error: 'symbol graph build failed', message: e && e.message })
@@ -1668,6 +1750,103 @@ function createControlServer(opts) {
       }
       if (req.method === 'GET' && seg0 === 'external') {
         return writeJson(res, 200, getExternalUrls())
+      }
+      // ── Trace (AI session log) — full 6-route parity with desktop. ──
+      if (seg0 === 'trace') {
+        // GET /trace — current in-memory session log (filter/since/limit).
+        if (req.method === 'GET' && rest.length === 0) {
+          const sinceRaw = url.searchParams.get('since')
+          const toolFilter = url.searchParams.get('tool')
+          const limit = parseInt(url.searchParams.get('limit') || '0', 10)
+          let evs = _trace.log
+          if (sinceRaw) {
+            const since = parseInt(sinceRaw, 10)
+            evs = evs.filter((e) => e.ts > since)
+          }
+          if (toolFilter) evs = evs.filter((e) => e.tool === toolFilter)
+          const totalAvailable = evs.length
+          if (limit > 0) evs = evs.slice(-limit)   // most recent N
+          return writeJson(res, 200, withMeta(
+            { sessionId: _trace.sessionId, events: evs },
+            { totalAvailable, returned: evs.length },
+          ))
+        }
+        // GET /trace/stats
+        if (req.method === 'GET' && rest[0] === 'stats') {
+          const stats = traceStore.computeTraceStats(_trace.log)
+          return writeJson(res, 200, withMeta({ sessionId: _trace.sessionId, ...stats }))
+        }
+        // GET /trace/sessions
+        if (req.method === 'GET' && rest[0] === 'sessions') {
+          return writeJson(res, 200, withMeta({
+            sessions: traceStore.listTraceSessions(getCurrentRoot(), _trace.sessionId),
+            currentSessionId: _trace.sessionId,
+          }))
+        }
+        // GET /trace/session/:id
+        if (req.method === 'GET' && rest[0] === 'session' && rest[1]) {
+          const id = parseInt(rest[1], 10)
+          const data = traceStore.readTraceSession(getCurrentRoot(), id)
+          if (!data) return writeJson(res, 404, { error: 'session not found' })
+          const stats = traceStore.computeTraceStats(data.events)
+          return writeJson(res, 200, withMeta({ ...data, stats }))
+        }
+        // POST /trace/clear — soft clear (preserves old .jsonl, rolls a new one).
+        if (req.method === 'POST' && rest[0] === 'clear') {
+          const newSessionId = _trace.clear()
+          return writeJson(res, 200, { ok: true, newSessionId })
+        }
+        // POST /trace/export?path= — write the current session to a chosen path.
+        if (req.method === 'POST' && rest[0] === 'export') {
+          let bodyChunks = []
+          req.on('data', (c) => bodyChunks.push(c))
+          req.on('end', () => {
+            let exportPath = url.searchParams.get('path')
+            try {
+              const body = Buffer.concat(bodyChunks).toString('utf8')
+              if (body) { const parsed = JSON.parse(body); exportPath = exportPath || (parsed && parsed.path) }
+            } catch {}
+            if (!exportPath) return writeJson(res, 400, { error: 'usage: pass ?path= or { "path": "..." }' })
+            try {
+              const stats = traceStore.computeTraceStats(_trace.log)
+              const out = {
+                sessionId: _trace.sessionId,
+                root: getCurrentRoot(),
+                startedAt: _trace.startedAt,
+                exportedAt: Date.now(),
+                stats,
+                events: _trace.log,
+              }
+              fs.writeFileSync(exportPath, JSON.stringify(out, null, 2), 'utf8')
+              return writeJson(res, 200, { ok: true, path: exportPath, eventCount: _trace.log.length })
+            } catch (e) { return writeJson(res, 500, { error: e.message }) }
+          })
+          return
+        }
+        return writeJson(res, 404, { error: 'unknown trace endpoint', path: url.pathname })
+      }
+      // ── Tour (heuristic onboarding script) ──
+      if (req.method === 'GET' && seg0 === 'tour') {
+        const t = changesViews.buildTour(scanner, getExternalUrls())
+        if (!t) return writeJson(res, 503, { error: 'no folder loaded' })
+        return writeJson(res, 200, t)
+      }
+      // ── Timeline (git file-creation history) ──
+      if (req.method === 'GET' && seg0 === 'timeline') {
+        changesViews.buildTimeline(getCurrentRoot(), scanner, pExecFile, _timelineCache)
+          .then((data) => writeJson(res, 200, data))
+          .catch((e) => writeJson(res, 500, { error: e.message }))
+        return
+      }
+      // ── Changes (this-session file modifications) + diff ──
+      if (req.method === 'GET' && seg0 === 'changes' && rest.length === 0) {
+        return writeJson(res, 200, _changes.list())
+      }
+      if (req.method === 'GET' && seg0 === 'changes' && rest.length > 0) {
+        const id = idFromRest()
+        const d = _changes.diff(id, getCurrentRoot())
+        if (!d) return writeJson(res, 404, { error: 'no change recorded for this file' })
+        return writeJson(res, 200, d)
       }
       if (req.method === 'GET' && seg0 === 'env' && rest.length === 0) {
         const v = url.searchParams.get('var')
@@ -1784,7 +1963,13 @@ function createControlServer(opts) {
         const depth = Math.max(1, Math.min(10, parseInt(url.searchParams.get('depth') || '3', 10)))
         const dir = url.searchParams.get('dir') === 'deps' ? 'deps' : 'users'
         const r = computeBlastRadius(id, depth, dir)
-        if (!r) return writeJson(res, 404, { error: 'not found' })
+        if (!r) { try { _trace.emit('blast', id) } catch {} ; return writeJson(res, 404, { error: 'not found' }) }
+        // Trace the blast with impact-level trust meta (parity with desktop:
+        // how many impacted files use dynamic patterns → true blast may be larger).
+        try {
+          const dynHits = r.files.filter((f) => (scanner.files.get(f.id)?.dynamicPatterns || []).length).length
+          _trace.emit('blast', id, { n: r.totalFiles, dyn: dynHits || undefined })
+        } catch {}
         // IPC highlight always uses the full file set (desktop UI unaffected).
         if (onBlast) { try { onBlast({ seed: id, ids: r.files.map((f) => f.id) }) } catch {} }
         // Explicit truthiness: `compact=0` / `compact=false` must mean OFF,
@@ -1854,6 +2039,7 @@ function createControlServer(opts) {
             if (typeof body.content !== 'string') return writeJson(res, 400, { error: 'usage: { "content": "..." }' })
             const r = writeFile(id, body.content)
             if (!r.ok) return writeJson(res, 500, r)
+            recordWrite(id, body.content)
             return writeJson(res, 200, withMeta({ ...r, id }))
           }
           if (typeof body.find !== 'string' || typeof body.replace !== 'string') {
@@ -1879,6 +2065,7 @@ function createControlServer(opts) {
             : content.replace(findStr, body.replace)
           const r = writeFile(id, next)
           if (!r.ok) return writeJson(res, 500, r)
+          recordWrite(id, next)
           return writeJson(res, 200, withMeta({ ...r, id, replacements: replaceAll ? count : 1 }))
         })
         return
