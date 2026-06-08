@@ -8,6 +8,7 @@ curious; not required reading for users.
 - [Project structure](#project-structure)
 - [The parser](#the-parser)
 - [The scanner](#the-scanner)
+- [Layer-2: the symbol (function-call) graph](#layer-2-the-symbol-function-call-graph)
 - [Layout simulation](#layout-simulation)
 - [Rendering](#rendering)
 - [Event bus](#event-bus)
@@ -51,7 +52,8 @@ Standard Electron split:
 - **Main process** (`electron/main.cjs`) — Node.js. Owns the BrowserWindow,
   filesystem, child processes, IPC. Runs the scanner and parser.
 - **Preload** (`electron/preload.cjs`) — bridges main and renderer via
-  `contextBridge`. Exposes only the explicit `window.cs.*` API.
+  `contextBridge`. Exposes only the explicit `window.codesynapt.*` API
+  (`window.fg3d` is a legacy alias pointing at the same object).
 - **Renderer** (`public/`) — Chromium. Renders the graph, handles
   user input. Cannot reach Node APIs except via the preload bridge.
 
@@ -135,6 +137,87 @@ to watch the filesystem.
 - Emits `scan-progress` events during initial scan (for the loading UI)
 - Re-parses only changed files; full snapshot rebuild only on folder
   open
+
+## Layer-2: the symbol (function-call) graph
+
+The file/import graph above is **Layer-1**: nodes are files, edges are
+imports. **Layer-2** is a second, finer graph whose nodes are individual
+**symbols** (functions, classes, methods, structs…) and whose edges are
+the **`call`** relationships between them. It is built lazily — only when a
+symbol-level query arrives — by `Scanner.buildSymbolGraph()` in `scanner.js`,
+which drives `SymbolGraph` in `packages/core/lib/symbol-graph.cjs`.
+
+### How it's built
+
+Per-language AST parsers, registered in
+`packages/core/lib/symbol-parsers.cjs`:
+
+- **JS/TS family** (`js jsx ts tsx mjs cjs`) → the babel-based parser
+  (`symbol-parser-js.cjs`), with type-aware receiver inference.
+- **Python** (`py pyw pyi`) → a tree-sitter parser.
+- **Other tree-sitter–validated languages** — `go rs java kt swift cs php
+  c cc cpp h hpp sh bash scala lua` — via `symbol-parser-treesitter.cjs`.
+  Only grammars that passed independent ground-truth validation are
+  registered; languages with known web-tree-sitter ABI / parsing problems
+  (e.g. Ruby, Dart) stay Layer-1 only rather than emit a wrong graph.
+
+Each parser yields the file's symbols (with line ranges) and the raw call
+sites inside them. `SymbolGraph.build()` then resolves each call site to a
+target symbol, also using Layer-1's import data (`fileImports`) so a call
+can prefer a symbol in a file the caller actually imports.
+
+### resolveCall — precision-first
+
+`SymbolGraph.resolveCall()` is deliberately **precision-first**: when a
+call name is ambiguous it declines to guess rather than inventing a
+plausible-but-wrong edge. Concretely:
+
+- Untyped member calls on builtin/common method names (`map`, `filter`,
+  `parse`-like names that collide with user helpers, …) are not resolved.
+- When ≥2 imported files (or ≥2 production symbols) declare the same name,
+  it records every candidate but resolves the edge **only when exactly one**
+  unambiguous target exists; ≥2 ⇒ decline. Auxiliary paths
+  (`scripts/`, `test/`, `build/`…) are deprioritised as call targets so
+  production wins.
+
+Declined calls are counted (surfaced in `stats()`) instead of being
+silently dropped — "unresolved" is reported as data.
+
+### The call-candidate (dynamic-dispatch) leg
+
+Calls that can't be confidently resolved to a single target — dynamic
+dispatch, multiple trait/interface implementations of the same method name
+— are recorded as a separate **`call-candidate`** edge kind. These live in
+their own adjacency (`candOut` / `candIn`), kept SEPARATE from the
+confident `call` graph so that callers/callees/blast stay precise. The
+"could be one of these" set is queried on demand rather than mixed into the
+confident answer.
+
+### Optional sub-engine enrichment (type-checkers)
+
+After the fast AST engine builds the graph, an **optional** post-pass
+(`packages/core/lib/subengines.cjs`, `enrich()`) runs registered
+per-language type-checker **sub-engines** and unions in only the edges the
+AST engine missed (it never rewrites existing edges; duplicates are
+no-ops). Each added edge is tagged with its provenance
+`via: engine.name` (e.g. `'ts'`), and a matching `call-candidate` can be
+promoted to a confident `call`.
+
+The pass is **tiered by cost**, wired up in `buildSymbolGraph()`:
+
+- **TS sub-engine — default-on.** In-process (the bundled `typescript`
+  package), so it always runs for JS/TS users.
+- **`CS_SUBENGINE=1`** — also runs the external Java / C# sub-engines
+  (they spawn an external toolchain, off by default).
+- **`CS_SUBENGINE_HEAVY=1`** — also runs the slow Python (jedi)
+  sub-engine. (Python is both heavy and external, so in practice this is
+  set alongside `CS_SUBENGINE=1`.)
+- **`CS_SUBENGINE_OFF=1`** — disables ALL enrichment (escape hatch if the
+  TS post-pass ever misbehaves).
+
+Layer-2 is surfaced to AI agents through the `cs_symbol_*` MCP tools and
+the function-level `cs_blast({action:'function'})`; see
+[docs/mcp-setup.md](./mcp-setup.md).
 
 ## Layout simulation
 

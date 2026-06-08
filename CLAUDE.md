@@ -18,11 +18,13 @@ can watch).
    mistakes, patterns the existing code follows. **Read this first.**
 2. **[docs/architecture.md](./docs/architecture.md)** — how the
    internals fit together.
-3. **[docs/mcp-setup.md](./docs/mcp-setup.md)** — MCP tool catalog. Note:
-   the 19-tool table in that doc is the pre-0.14 layout; current is **8
-   `cs_*` tools** dispatched via `{action: '...'}`. README and the slash
-   command bodies (`~/.claude/commands/codesynapt.md`) have the live
-   contract until that doc is rewritten.
+3. **[docs/mcp-setup.md](./docs/mcp-setup.md)** — MCP tool catalog. Current
+   surface is **11 `cs_*` tools**: 8 file-level tools dispatched via
+   `{action: '...'}` (`cs_summary`, `cs_query`, `cs_blast`, `cs_intent`,
+   `cs_health`, `cs_change`, `cs_trace`, `cs_ui`) plus 3 symbol-level tools
+   for the Layer-2 function-call graph (`cs_symbol_summary`,
+   `cs_symbol_search`, `cs_symbol_explore`). The authoritative list is the
+   `TOOLS` array in `packages/core/bin/codesynapt-mcp.cjs`.
 
 ## When you're working IN this project, you can use codesynapt ON itself
 

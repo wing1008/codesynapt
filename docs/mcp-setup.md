@@ -3,8 +3,9 @@
 CodeSynapt ships a Model Context Protocol (MCP) server at
 `packages/core/bin/codesynapt-mcp.cjs`. Once registered with an MCP-capable
 client (Claude Code, Cursor, Continue, Cline, custom clients), the client
-gets **8 unified `cs_*` tools**. Each takes an `action` field that dispatches
-to a sub-operation — so the surface stays small while behavior stays rich.
+gets **11 `cs_*` tools** (8 file-level + 3 symbol-level). Most take an
+`action` field that dispatches to a sub-operation — so the surface stays
+small while behavior stays rich.
 
 ## Prerequisites
 
@@ -20,7 +21,14 @@ to a sub-operation — so the surface stays small while behavior stays rich.
    `/codesynapt-auto` for AUTO) per session. **Default behavior is OFF** —
    `cs_*` tools are not called until you enter a mode.
 
-## The 8 tools
+## The tools
+
+8 file-level tools (`cs_summary`, `cs_query`, `cs_blast`, `cs_intent`,
+`cs_health`, `cs_change`, `cs_trace`, `cs_ui`) operate on the Layer-1
+file/import graph. 3 symbol-level tools (`cs_symbol_summary`,
+`cs_symbol_search`, `cs_symbol_explore`) operate on the Layer-2
+function-call (symbol) graph — see the [Symbol-level tools](#symbol-level-tools-layer-2)
+section at the end.
 
 ### `cs_summary` — project shape (cheap, call first)
 
@@ -136,6 +144,56 @@ recently-touched files, or replaying a past session.
 **WHEN**: you want the human watching the desktop to *see* what you're
 talking about. Optional but useful for demos / pairing.
 
+## Symbol-level tools (Layer-2)
+
+The three `cs_symbol_*` tools work on the **function-call (symbol) graph**
+— individual functions, classes, methods and the `call` edges between them
+— rather than the file/import graph the eight tools above use. They mirror
+the most-used trio of a symbol-level code-graph tool. File-mode tools stay
+available; pick whichever matches the question.
+
+### `cs_symbol_summary` — symbol-mode overview (call first for symbol work)
+
+No arguments. Returns total symbol count, breakdown by kind
+(function / class / struct / …) and by edge kind. The first call after a
+project is loaded triggers the symbol scan (it is built lazily).
+
+**WHEN**: once at the start of a function-level investigation.
+
+### `cs_symbol_search` — symbol search + graph navigation
+
+| Action | What it returns |
+|---|---|
+| `find` | Symbols whose name contains `q` (case-insensitive). Optional `limit` (default 50). |
+| `callers` | Symbols that call this symbol `id` |
+| `callees` | Symbols that this symbol `id` calls |
+| `node` | One symbol with its source body — requires `id` |
+
+**WHEN**: after `cs_symbol_summary`, when the answer needs a specific
+function/class — "who calls `handleAuth`?", "what does `parseConfig` call?".
+
+### `cs_symbol_explore` — one-shot architecture answer
+
+Takes a natural-language question `q` (optional `budget`, default 8000
+tokens for snippet bodies). Returns symbols grouped by lifecycle:
+`exact_match` (literal name match), `active` (called a lot — live
+production), `entry` (exported main / handler / route / CLI bin),
+`semantic` (pulled in by embedding similarity), and
+`deprecated / legacy / test / aux / orphan` (usually skip). Each entry
+carries `inDegree`, `outDegree`, classification, `ageDays`, and `semSim`
+so you can filter without a second call.
+
+**WHEN**: a broad architecture question where you want one call to surface
+the relevant functions ranked by how live they are.
+
+> **Coverage**: the symbol graph is built for all supported languages via
+> per-language AST parsers (babel for JS/TS, tree-sitter for the validated
+> languages). `cs_blast({action:'function'})` (function-level blast) is
+> documented as JS/TS + Python only; the `cs_symbol_*` tools surface the
+> symbol graph for whatever languages parsed. See
+> [docs/architecture.md](./architecture.md) for how Layer-2 is built and
+> the optional type-checker sub-engines that enrich it.
+
 ## Claude Code
 
 One-time registration:
@@ -180,7 +238,7 @@ Same MCP config format. Add to `~/.cursor/mcp.json` or per-workspace
 }
 ```
 
-Restart Cursor. The 8 `cs_*` tools appear under the MCP tools section.
+Restart Cursor. The 11 `cs_*` tools appear under the MCP tools section.
 
 ## Continue / Cline / others
 

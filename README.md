@@ -15,7 +15,7 @@
 > The dependency map Claude Code / Cursor / any MCP agent should be
 > reading before it edits your code. Live-updating (~300 ms after a
 > save), no re-indexing, no cloud. Same scanner ships as MCP server
-> (8 intent-shaped tools), CLI (`cs`), and a 3D desktop window that
+> (11 `cs_*` tools: 8 file-level + 3 symbol-level), CLI (`cs`), and a 3D desktop window that
 > pulses every node the AI touches.
 
 ## Why this exists
@@ -37,7 +37,7 @@ All three share the same scanner: imports across JS/TS, Python, Go, Rust, Java/K
 
 ## What it does well
 
-- **8 intent-shaped MCP tools** (not 37 narrow ones) — `cs_summary`, `cs_query`, `cs_blast`, `cs_intent`, `cs_health`, `cs_change`, `cs_trace`, `cs_ui`. Each takes an `action` enum. Designed so the agent picks the right one with a glance, not by scanning a wall of tool names.
+- **11 `cs_*` MCP tools** (not 37 narrow ones) — 8 file-level: `cs_summary`, `cs_query`, `cs_blast`, `cs_intent`, `cs_health`, `cs_change`, `cs_trace`, `cs_ui` (each takes an `action` enum); plus 3 symbol-level: `cs_symbol_summary`, `cs_symbol_search`, `cs_symbol_explore` for the Layer-2 function-call graph. Designed so the agent picks the right one with a glance, not by scanning a wall of tool names.
 - **AI-aware response envelope** — every response includes `meta: { scannedAt, tokenEstimate, totalAvailable, truncated }`. The agent budgets tokens before drilling deeper.
 - **Blast radius before edit** — `cs_blast({action:'safety', id})` returns 🟢/🟡/🔴 verdict + reasons in one call; `action:'bundle'` packs the closest neighbours into a token budget so the agent reads the right context first.
 - **Verified dependency accuracy** — import resolution is checked against independent ground truth (TypeScript Compiler API, Python `ast`, language-native rules) at precision/recall ≈ 1.0 across 11 languages on real codebases (VS Code ~6.8k files; Django), measured on library/app source (tests/generated code excluded). For Go, C# and Swift the edge is module/namespace-level (one import links the importing file to the imported unit). Honest limit: it follows *static imports*, so it does **not** see autoload / DI / reflection-implicit dependencies (Rails/Zeitwerk, Spring) — those carry no import statement to resolve, and are surfaced as `caveat` markers rather than silently dropped.
@@ -151,7 +151,7 @@ list including history, restore, refresh, tour, timeline, trace.
 ```sh
 cd <your-project>
 cs init                              # generates CLAUDE.md + installs /codesynapt slash commands
-claude mcp add codesynapt codesynapt-mcp   # registers 8 cs_* tools (one-time, per OS user)
+claude mcp add codesynapt codesynapt-mcp   # registers 11 cs_* tools (one-time, per OS user)
 ```
 
 That's it. Inside any Claude Code session in that project:
@@ -173,7 +173,9 @@ If you skipped `cs init` or use Cursor/Continue/Cline:
 claude mcp add codesynapt node /absolute/path/to/codesynapt/packages/core/bin/codesynapt-mcp.cjs
 ```
 
-That registers 8 intent-shaped MCP tools (all `cs_*`). In any
+That registers 11 MCP tools (all `cs_*`): 8 intent-shaped file-level
+tools plus 3 symbol-level tools (`cs_symbol_summary` / `cs_symbol_search`
+/ `cs_symbol_explore`) for the Layer-2 function-call graph. In any
 session, just ask project-shape questions and Claude picks the right
 action automatically:
 
