@@ -56,6 +56,7 @@ async function loadScannerModule() {
 // project swap so it never returns stale symbols from a prior repo.
 const { SymbolGraph, registerParser } = require('../packages/core/lib/symbol-graph.cjs')
 const symbolViews = require('../packages/core/lib/symbol-views.cjs')   // shared /symbol/* views (dedup with control-server)
+const { SUPPORTED_EXTS } = require('../packages/core/lib/symbol-parsers.cjs')   // symbol-covered exts (honest coverage)
 const jsSymbolParser = require('../packages/core/lib/symbol-parser-js.cjs')
 const pySymbolParser = require('../packages/core/lib/symbol-parser-py.cjs')
 const miscSymbolParsers = require('../packages/core/lib/symbol-parser-misc.cjs')
@@ -73,6 +74,15 @@ let _tscParserModule = null
 try { _tscParserModule = require('../packages/core/lib/symbol-parser-tsc.cjs') } catch {}
 const SYMBOL_PARSER_MODE = process.env.CS_SYMBOL_PARSER || 'treesitter'
 
+// Shared data-layer modules (single source of truth — the headless
+// control-server uses the SAME ones, so trace/changes/tour/timeline/explore
+// data can't drift between desktop and headless). The desktop keeps its OWN
+// thin wrappers around these for its UI side-effects (IPC pulse / Live Trace
+// overlay); only the DATA layer (persistence, format, computation) lives here.
+const traceStore = require('../packages/core/lib/trace-store.cjs')
+const changesViews = require('../packages/core/lib/changes-views.cjs')
+const symbolExplore = require('../packages/core/lib/symbol-explore.cjs')
+
 function registerSymbolParsers() {
   // Always register the Stage-1/2 parsers as the fallback set.
   registerParser(['js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx'], jsSymbolParser)
@@ -87,10 +97,18 @@ function registerSymbolParsers() {
   // without a shipped wasm.
   try {
     for (const ext of _tsParserModule.availableExtensions()) {
-      // TypeScript / TSX have no dedicated grammar in our bundled
-      // tree-sitter-wasms — the JS grammar is missing `interface`,
-      // type aliases, generics, etc. Keep babel for those.
-      if (ext === 'ts' || ext === 'tsx') continue
+      // Keep these extensions on the VALIDATED babel parser, never the
+      // tree-sitter grammar:
+      //   - ts/tsx: our bundled tree-sitter JS grammar is missing
+      //     `interface`, type aliases, generics, etc.
+      //   - js/jsx/mjs/cjs: babel is the validated path for plain JS
+      //     (the headless server uses babel for JS); the tree-sitter JS
+      //     grammar produces wrong call edges, so do NOT downgrade here.
+      if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(ext)) continue
+      // Skip languages whose wasm grammar is broken (ABI mismatch throws
+      // at parse time) — these are excluded from the validated headless
+      // set too. Registering them only produces silently-failing parsers.
+      if (ext === 'rb' || ext === 'dart') continue
       const tsP = _tsParserModule.makeParser(ext)
       if (tsP) registerParser([ext], tsP)
     }
@@ -141,337 +159,34 @@ function symbolFileSetHash(sc) {
   return require('crypto').createHash('sha1').update(parts.join('\n')).digest('hex')
 }
 
-// Path looks like a test file? Used by explore() ranking to push real
-// implementation symbols above test fixtures with similar names.
-// Heavier explore-only auxiliary-path filter than `isTestPath` —
-// covers vendored bundles inside src/ (`compiled/`, `vendor/`),
-// example apps, and tooling code. Match is "any segment is one of
-// these". Distinct from isAuxPath in symbol-graph (that one drives
-// resolver buckets); here it drives explore ranking.
-const EXPLORE_AUX_SEGMENTS = new Set([
-  'compiled', 'vendored', 'vendor', '_compiled',
-  'examples', 'example', 'samples', 'sample', 'demo', 'demos',
-  'scripts', 'script', 'tools', 'tool',
-  'build', 'dist', 'out', 'bin',
-  'fixtures', 'fixture',
-  // Additional rarely-production segments — common in OSS layouts
-  // but never the answer to "how does X actually work".
-  'mocks', 'mock', '__mocks__',
-  'stubs', 'stub',
-  'storybook', '.storybook', 'stories',
-  'docs-src', 'documentation',
-])
-function isAuxExplorePath(filePath) {
-  if (!filePath) return false
-  const parts = filePath.toLowerCase().replace(/\\/g, '/').split('/')
-  return parts.some((p) => EXPLORE_AUX_SEGMENTS.has(p))
+// The explore classification helpers (path/test/aux detection, camelCase split,
+// Porter-style stemmer, deprecated/public-entry detection) now live ONCE in the
+// shared lib/symbol-explore.cjs — the same module the headless control-server
+// uses for /symbol/explore. Bind the few still referenced directly here:
+//   - isPublicEntry: used below for g.computeReachability(isPublicEntry).
+const isPublicEntry = symbolExplore.isPublicEntry
+
+
+// ─── /symbol/explore classify view ────────────────────────────
+// DATA layer lives ONCE in lib/symbol-explore.cjs (same as the headless
+// control-server). The desktop wrapper keeps the original (g, query, budget)
+// signature and injects:
+//   - readSource: a root-scoped disk read (the snippet source). Mirrors the
+//     desktop's original `path.join(currentRoot, file)` read; the shared
+//     module slices [startLine-1, endLine] exactly like the old inline code.
+//   - embedding: only when the graph already carries embeddings (g._embedded),
+//     matching control-server — offline-safe, never triggers a model download.
+function _exploreReadSource(file, startLine, endLine) {
+  try {
+    if (!currentRoot) return null
+    const lines = fs.readFileSync(path.join(currentRoot, file), 'utf8').split('\n')
+    return lines.slice(startLine - 1, endLine).join('\n')
+  } catch { return null }
 }
-
-function isTestPath(filePath) {
-  if (!filePath) return false
-  const p = filePath.toLowerCase().replace(/\\/g, '/')
-  // path segments: …/tests/, …/test/, …/__tests__/, …/spec/,
-  // …/e2e/, …/integration/, …/bench/ (perf test)
-  if (/\/(tests?|__tests__|spec|specs|e2e|integration|integration[_-]tests?|fixtures?|bench(es|marks?)?)\//.test('/' + p + '/')) return true
-  // suffixes: foo_test.go, foo.test.ts, FooTests.swift, FooTest.java,
-  //          foo.bench.ts, foo_bench.go, foo.spec.tsx
-  if (/(?:_test|\.test|\.spec|\.bench|_bench|\.e2e)\.[a-z]+$/.test(p)) return true
-  if (/tests?\.(swift|kt|java)$/.test(p)) return true
-  return false
-}
-
-// Stopwords stripped from the explore query before keyword matching.
-const EXPLORE_STOPWORDS = new Set([
-  'a','an','and','are','as','at','be','by','do','does','for','from','how','in',
-  'into','is','it','its','of','on','or','the','their','this','to','using','what',
-  'when','where','which','who','why','will','with',
-])
-
-// Break a token at camelCase / PascalCase / digit boundaries so query
-// "getUserName" also tries [get, user, name]. Acronym-aware: keeps
-// uppercase runs together when followed by another word (HTTPRequest
-// → [HTTP, Request], not [H, T, T, P, Request]). Each alternative
-// covers a specific shape and the order matters:
-//   1. [A-Z]+(?=[A-Z][a-z])  — leading acronym before a word
-//      ("HTTP" in "HTTPRequest")
-//   2. [A-Z]?[a-z]+          — normal camel word
-//      ("Request" / "get" / "Name")
-//   3. [A-Z]+                 — trailing acronym
-//      ("HTML" at end of "URL2HTML")
-//   4. [0-9]+                 — digit group
-function splitCamelCase(w) {
-  const parts = w.match(/[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+/g) || []
-  return parts.map((s) => s.toLowerCase())
-}
-
-// Simplified Porter-style stemmer. Two phases:
-//   Step 2 — derivational suffix MAP (rewrite, not strip)
-//            "authentication" → "authentic + ate" → "authenticate"
-//   Step 4 — terminal suffix STRIP if stem stays ≥ 4 chars
-//            "processing"/"processed"/"processor" → "process"
-//
-// Mapping suffixes first preserves the "verb form" so different
-// noun/adjective inflections normalize back to it. Plain strip-only
-// (the previous 12-suffix version) wasn't enough — "authentication"
-// would just lose "ation" and become "authentic", which doesn't
-// substring-match "authenticate".
-//
-// Stem length lower bound (>=4) guards against over-stripping
-// "rate" → "r" etc. We deliberately don't strip bare "s" or "es":
-// risks of mangling "process"/"business"/"axis" outweigh the wins.
-const STEM_STEP2 = [
-  ['ization', 'ize'], ['ational', 'ate'], ['fulness', 'ful'],
-  ['ousness', 'ous'], ['iveness', 'ive'], ['tional', 'tion'],
-  ['ation', 'ate'], ['ator', 'ate'], ['ative', 'ate'],
-  ['izer', 'ize'], ['icate', 'ic'], ['alize', 'al'],
-  ['ical', 'ic'],
-]
-const STEM_STEP4 = [
-  'ement', 'ements', 'ance', 'ances', 'ence', 'ences',
-  'ment', 'ments', 'tion', 'tions', 'sion', 'sions',
-  'able', 'ables', 'ible', 'ibles', 'ism', 'isms',
-  'ness', 'nesses', 'ful', 'fully', 'ous', 'ously',
-  'ive', 'ives', 'ize', 'izes', 'ized', 'izing',
-  'ing', 'ed', 'ly', 'er', 'or',
-]
-function stem(w) {
-  if (w.length < 5) return w
-  for (const [from, to] of STEM_STEP2) {
-    if (w.endsWith(from) && w.length - from.length >= 3) {
-      return w.slice(0, -from.length) + to
-    }
-  }
-  for (const suf of STEM_STEP4) {
-    if (w.endsWith(suf) && w.length - suf.length >= 4) {
-      return w.slice(0, -suf.length)
-    }
-  }
-  return w
-}
-
-// Deprecated / TODO-remove markers. SymbolGraph.build sets
-// `node.deprecated` from the 5 lines above each symbol (handles
-// babel's quirky export-wrapper leading-comment attachment). We
-// also fall back to scanning doc/signature for parsers that do
-// surface comments correctly (regex/tree-sitter parsers).
-function isDeprecatedSymbol(node) {
-  if (node.deprecated === true) return true
-  const d = ((node.doc || '') + ' ' + (node.signature || '')).toLowerCase()
-  if (!d) return false
-  return /(\s|^)@?deprecated\b|todo\s*[:_-]?\s*remove|fixme\s*[:_-]?\s*remove/.test(d)
-}
-
-// Public entry detection — symbols that an external caller reaches
-// (a `main`, a route handler, a CLI bin script, an SDK default
-// export) often have in-degree zero in *our* graph because the
-// caller lives outside the codebase (OS shell, HTTP request, npm
-// consumer). Without flagging these, the orphan damping treats
-// them as dead code. We flag only when the symbol is exported AND
-// either the name or the containing file matches an entry pattern
-// — both signals so we don't sweep every exported util into the
-// "entry" bucket.
-const ENTRY_NAMES = new Set([
-  'main', 'run', 'start', 'init', 'handler', 'bootstrap',
-  'setup', 'listen', 'serve', 'cli', 'app', 'default',
-])
-const ENTRY_FILE_RE = /(?:^|\/)(?:main|index|entry|server|app|cli|bin|run)(?:\.[a-z]+)?$/i
-function isPublicEntry(node) {
-  if (!node.exported) return false
-  const name = (node.name || '').toLowerCase()
-  if (ENTRY_NAMES.has(name)) return true
-  if (ENTRY_FILE_RE.test(node.file || '')) return true
-  return false
-}
-
-
-// ─── mode 3 (classify) — ranking-free response ─────────────────
-// Returns symbols grouped by lifecycle classification, no score
-// sort. AI/user picks the group it cares about (active for "what
-// runs in production", deprecated/legacy/orphan for "what's safe
-// to delete"). Same candidate selection as the ranked mode 2 —
-// keyword expansion + optional semantic — but the only ordering
-// inside each group is in-degree DESC (graph signal, not a
-// computed score).
-//
-// Why a separate mode 3 instead of just sorting mode 2's output?
-// Mode 2 collapses everything into a single ranked list, so a
-// deprecated symbol with a perfect keyword match can still beat
-// the live implementation just by score arithmetic. Mode 3 makes
-// the grouping the contract — `groups.active[0]` is always the
-// live answer even if a deprecated dup has the same name.
-async function buildClassifyResponse(g, query, budget = 8000) {
-  const q = (query || '').toLowerCase()
-  const rawTokens = q.split(/[^\p{L}\p{N}_]+/u).filter(Boolean)
-  const expanded = new Set(rawTokens)
-  for (const t of rawTokens) {
-    for (const p of splitCamelCase(t)) if (p.length > 1) expanded.add(p)
-    const s = stem(t)
-    if (s !== t && s.length > 2) expanded.add(s)
-  }
-  const keywords = [...expanded].filter((t) => t.length > 1 && !EXPLORE_STOPWORDS.has(t))
-  if (!keywords.length) {
-    return { query, mode: 'classify', keywords: [], groups: {}, counts: {}, snippets: [], note: 'no usable keywords' }
-  }
-
-  // Candidate selection — same byName / byFile index walk mode 2
-  // does. No scoring; we just collect every symbol whose name or
-  // file path contains at least one keyword as a substring.
-  const candidates = new Set()
-  for (const k of keywords) {
-    for (const [n, ids] of g.byName) {
-      if (n.includes(k)) for (const id of ids) candidates.add(id)
-    }
-    for (const [f, ids] of g.byFile) {
-      if (f.toLowerCase().includes(k)) for (const id of ids) candidates.add(id)
-    }
-  }
-
-  // Optional semantic candidate enrichment — when embeddings are
-  // ready, pull the top 30 symbols by cosine similarity to the
-  // raw query and union them in. Lets a query like "auth" find
-  // `login` / `signIn` even when the keyword set never hits.
-  let semHits = new Map()    // id → similarity
-  if (g._embedded && query) {
-    try {
-      const embedding = require('../packages/core/lib/embedding.cjs')
-      const qVec = await embedding.embed(query)
-      if (qVec) {
-        const sims = []
-        for (const node of g.nodes.values()) {
-          if (!node._embedding) continue
-          const sim = embedding.cosineSim(qVec, node._embedding)
-          if (sim > 0.3) sims.push({ id: node.id, sim })
-        }
-        sims.sort((a, b) => b.sim - a.sim)
-        for (const { id, sim } of sims.slice(0, 30)) {
-          candidates.add(id)
-          semHits.set(id, sim)
-        }
-      }
-    } catch {}
-  }
-
-  // Classify every candidate. Two cross-cutting groups (exact_match
-  // and semantic) take precedence over the lifecycle classification
-  // and are *exclusive* — a symbol that lives in exact_match is
-  // intentionally NOT also listed in active/orphan/etc, so the AI
-  // doesn't have to dedupe. The lifecycle bucket is preserved as a
-  // field on each entry so the consumer still sees "this exact-match
-  // is actually deprecated".
-  const groups = {
-    exact_match: [], semantic: [],
-    active: [], entry: [], deprecated: [], legacy: [],
-    test: [], aux: [], orphan: [], normal: [],
-  }
-  const keywordSet = new Set(keywords)
-  for (const id of candidates) {
-    const node = g.nodes.get(id)
-    if (!node) continue
-    const inD = g.inAdj.get(id)?.size || 0
-    const ouD = g.outAdj.get(id)?.size || 0
-    const mtime = node.mtimeMs || 0
-    const ageMs = mtime ? (Date.now() - mtime) : 0
-    const ONE_YEAR = 365 * 86400_000
-
-    let cls
-    if (isDeprecatedSymbol(node)) cls = 'deprecated'
-    else if (isTestPath(node.file)
-     || /^test[A-Z_]/.test(node.name || '')
-     || /(_test$|spec$|Spec$)/.test(node.name || '')) cls = 'test'
-    else if (isAuxExplorePath(node.file)) cls = 'aux'
-    else if (isPublicEntry(node))         cls = 'entry'
-    else if (inD === 0 && ouD === 0)      cls = 'orphan'
-    else if (ageMs > ONE_YEAR && inD < 2) cls = 'legacy'
-    else if (inD >= 3)                    cls = 'active'
-    else                                  cls = 'normal'
-
-    const reachable = g._reachable ? g._reachable.has(id) : null
-    const semOnly = !rawHasSubstring(node, keywords)
-    const nameLower = (node.name || '').toLowerCase()
-    const isExactName = keywordSet.has(nameLower)
-
-    const entry = {
-      qualifiedName: node.qualifiedName || node.name,
-      name: node.name, kind: node.kind,
-      file: node.file, startLine: node.startLine, endLine: node.endLine,
-      inDegree: inD, outDegree: ouD,
-      ageDays: mtime ? Math.floor(ageMs / 86400_000) : null,
-      reachable,
-      semSim: semHits.get(id) ?? null,
-      classification: cls,    // lifecycle preserved even when bucketed elsewhere
-      semanticOnly: semOnly,
-    }
-    // Routing order: exact_match wins over everything (user typed
-    // the exact name — surface that even if the symbol is orphan).
-    // Then semantic (keyword 0 hit, only the embedding pulled it
-    // in). Then lifecycle classification.
-    if (isExactName)      groups.exact_match.push(entry)
-    else if (semOnly)     groups.semantic.push(entry)
-    else                  groups[cls].push(entry)
-  }
-
-  // Sort each group: in-degree DESC, then semSim DESC (so semantic
-  // candidates surface inside their group when present). Cap per
-  // group to keep responses manageable.
-  const PER_GROUP_CAP = 8
-  for (const g_name of Object.keys(groups)) {
-    groups[g_name].sort((a, b) => (b.inDegree - a.inDegree) || ((b.semSim || 0) - (a.semSim || 0)))
-    groups[g_name] = groups[g_name].slice(0, PER_GROUP_CAP)
-  }
-
-  // Snippets — source bodies for the top members of the most
-  // informative groups. `active` first (real implementation),
-  // then `entry`, then `normal`. Skips test/aux/orphan/deprecated
-  // unless those are the only groups with hits — saves token
-  // budget for code AI actually needs to read.
-  const snippets = []
-  const MAX_LINES_PER_SNIPPET = 40
-  let used = 0
-  const SNIPPET_ORDER = ['exact_match', 'active', 'entry', 'normal', 'semantic', 'legacy', 'deprecated', 'test', 'orphan', 'aux']
-  outer: for (const groupName of SNIPPET_ORDER) {
-    const members = groups[groupName]
-    if (!members.length) continue
-    const perGroupBudget = groupName === 'exact_match' ? 5
-                         : (groupName === 'active' || groupName === 'entry') ? 3
-                         : 1
-    for (const m of members.slice(0, perGroupBudget)) {
-      if (used >= budget) break outer
-      try {
-        const filePath = path.join(currentRoot, m.file)
-        const lines = fs.readFileSync(filePath, 'utf8').split('\n')
-        const end = Math.min(m.endLine, m.startLine + MAX_LINES_PER_SNIPPET - 1)
-        const source = lines.slice(m.startLine - 1, end).join('\n')
-        const cost = Math.ceil(source.length / 4)
-        if (used + cost > budget && snippets.length > 0) break outer
-        snippets.push({
-          group: groupName, file: m.file, line: m.startLine,
-          name: m.name, kind: m.kind, source,
-        })
-        used += cost
-      } catch {}
-    }
-  }
-
-  const counts = {}
-  for (const [k, v] of Object.entries(groups)) if (v.length) counts[k] = v.length
-
-  return {
-    query, mode: 'classify', keywords,
-    groups, counts, snippets,
-    embeddingReady: !!g._embedded,
-  }
-}
-
-// Whether any keyword raw-substring matches the symbol — used to
-// flag entries that came in via semantic similarity only.
-function rawHasSubstring(node, keywords) {
-  const name = (node.name || '').toLowerCase()
-  const qn   = (node.qualifiedName || '').toLowerCase()
-  const file = (node.file || '').toLowerCase()
-  for (const k of keywords) {
-    if (name.includes(k) || qn.includes(k) || file.includes(k)) return true
-  }
-  return false
+function buildClassifyResponse(g, query, budget = 8000) {
+  let embeddingMod = null
+  if (g._embedded) { try { embeddingMod = require('../packages/core/lib/embedding.cjs') } catch {} }
+  return symbolExplore.buildClassifyResponse(g, query, budget, _exploreReadSource, embeddingMod)
 }
 
 // Legacy audit module — lazy-loaded ESM. Cached by snapshotVersion.
@@ -584,7 +299,7 @@ async function startScanner(root) {
 
 function stopScanner() {
   if (scanner) { Promise.resolve(scanner.stop()).catch(() => {}); scanner = null }
-  closeTraceWriteStream()
+  _trace._closeStream()
   currentRoot = null
 }
 
@@ -854,90 +569,14 @@ ipcMain.handle('restore-history', (_e, id, ts) => {
 // session — what AI editing agents (Claude Code, Cursor) write hits
 // this list. Captures first-seen content on first detection so we can
 // generate diffs for the "show all changes" view.
-const sessionChanges = new Map()   // id -> { firstAt, lastAt, count, firstSeen, currentSize, currentLoc }
-function trackChange(id, content) {
-  const existing = sessionChanges.get(id)
-  const now = Date.now()
-  const loc = content ? content.split('\n').length : 0
-  const size = Buffer.byteLength(content || '', 'utf8')
-  if (existing) {
-    existing.lastAt = now
-    existing.count += 1
-    existing.currentSize = size
-    existing.currentLoc = loc
-  } else {
-    // First change we see — we already lost the original "before".
-    // Capture the current content as "firstSeen" so subsequent changes
-    // have something to diff against.
-    sessionChanges.set(id, {
-      firstAt: now, lastAt: now, count: 1,
-      firstSeen: content || '',
-      firstSeenSize: size, firstSeenLoc: loc,
-      currentSize: size, currentLoc: loc,
-    })
-  }
-}
-function listSessionChanges() {
-  const items = []
-  for (const [id, c] of sessionChanges.entries()) {
-    items.push({
-      id,
-      firstAt: c.firstAt, lastAt: c.lastAt, count: c.count,
-      sizeBefore: c.firstSeenSize, sizeAfter: c.currentSize,
-      locBefore: c.firstSeenLoc,   locAfter: c.currentLoc,
-      sizeDelta: c.currentSize - c.firstSeenSize,
-      locDelta:  c.currentLoc  - c.firstSeenLoc,
-    })
-  }
-  items.sort((a, b) => b.lastAt - a.lastAt)
-  return items
-}
-function getChangeDiff(id) {
-  const c = sessionChanges.get(id)
-  if (!c) return null
-  let after = null
-  try {
-    if (!currentRoot) return null
-    const full = path.join(currentRoot, id)
-    if (!isInsideRoot(currentRoot, full)) return null
-    const stat = fs.statSync(full)
-    if (stat.size > 2_000_000) return { error: 'file too large' }
-    after = fs.readFileSync(full, 'utf8')
-  } catch (e) { return { error: e.message } }
-  return {
-    id, firstAt: c.firstAt, lastAt: c.lastAt, count: c.count,
-    before: c.firstSeen,
-    after,
-    lines: makeLineDiff(c.firstSeen, after),
-  }
-}
-// Tiny LCS-based unified diff. Returns array of { tag: 'eq'|'add'|'del', a?: lineNo, b?: lineNo, text }.
-function makeLineDiff(before, after) {
-  const A = (before || '').split('\n')
-  const B = (after  || '').split('\n')
-  const n = A.length, m = B.length
-  // LCS table — bail out if too large to avoid huge allocations.
-  if (n * m > 2_000_000) return [{ tag: 'note', text: 'file too large to diff line-by-line' }]
-  const dp = new Uint32Array((n + 1) * (m + 1))
-  const W = m + 1
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i * W + j] = A[i] === B[j]
-        ? dp[(i + 1) * W + (j + 1)] + 1
-        : Math.max(dp[(i + 1) * W + j], dp[i * W + (j + 1)])
-    }
-  }
-  const out = []
-  let i = 0, j = 0
-  while (i < n && j < m) {
-    if (A[i] === B[j]) { out.push({ tag: 'eq', a: i + 1, b: j + 1, text: A[i] }); i++; j++ }
-    else if (dp[(i + 1) * W + j] >= dp[i * W + (j + 1)]) { out.push({ tag: 'del', a: i + 1, text: A[i] }); i++ }
-    else { out.push({ tag: 'add', b: j + 1, text: B[j] }); j++ }
-  }
-  while (i < n) { out.push({ tag: 'del', a: i + 1, text: A[i] }); i++ }
-  while (j < m) { out.push({ tag: 'add', b: j + 1, text: B[j] }); j++ }
-  return out
-}
+// DATA layer now lives in the shared lib/changes-views.cjs SessionChangeLog
+// (same instance semantics the headless control-server uses). The desktop
+// keeps thin wrappers with its original signatures so every caller (IPC +
+// HTTP) is unchanged. `getChangeDiff` still root-scopes via currentRoot.
+const _changes = new changesViews.SessionChangeLog()
+function trackChange(id, content) { return _changes.track(id, content) }
+function listSessionChanges() { return _changes.list() }
+function getChangeDiff(id) { return _changes.diff(id, currentRoot) }
 
 // ─── File history ──────────────────────────────────────────────
 const HISTORY_DIR_NAME = '.codesynapt'
@@ -1136,40 +775,40 @@ ipcMain.handle('panel:packages',   () => buildPackagesCached())
 ipcMain.handle('panel:package',    (_e, name) => buildPackageDetail(name))
 ipcMain.handle('panel:legacy',     async () => await buildLegacyCached())
 ipcMain.handle('trace:log',        (_e, opts = {}) => {
-  let evs = traceLog
+  let evs = _trace.log
   if (opts.tool) evs = evs.filter((e) => e.tool === opts.tool)
   if (opts.limit) evs = evs.slice(-opts.limit)
-  return { sessionId: traceSessionId, events: evs, totalAvailable: traceLog.length }
+  return { sessionId: _trace.sessionId, events: evs, totalAvailable: _trace.log.length }
 })
-ipcMain.handle('trace:stats',      () => ({ sessionId: traceSessionId, ...computeTraceStats(traceLog) }))
+ipcMain.handle('trace:stats',      () => ({ sessionId: _trace.sessionId, ...computeTraceStats(_trace.log) }))
 ipcMain.handle('trace:sessions',   () => ({
-  sessions: listTraceSessions(currentRoot), currentSessionId: traceSessionId,
+  sessions: listTraceSessions(currentRoot), currentSessionId: _trace.sessionId,
 }))
 ipcMain.handle('trace:session',    (_e, id) => {
   const data = readTraceSession(currentRoot, id)
   if (!data) return null
   return { ...data, stats: computeTraceStats(data.events) }
 })
-ipcMain.handle('trace:clear',      () => { traceLog = []; startTraceSession(); return { newSessionId: traceSessionId } })
+ipcMain.handle('trace:clear',      () => { _trace.log = []; startTraceSession(); return { newSessionId: _trace.sessionId } })
 ipcMain.handle('trace:export',     async (_e, exportPath) => {
   if (!exportPath) {
     const r = await dialog.showSaveDialog(mainWindow, {
       title: 'Export AI trace session',
-      defaultPath: `cs-trace-${traceSessionId}.json`,
+      defaultPath: `cs-trace-${_trace.sessionId}.json`,
       filters: [{ name: 'JSON', extensions: ['json'] }],
     })
     if (r.canceled || !r.filePath) return { canceled: true }
     exportPath = r.filePath
   }
   try {
-    const stats = computeTraceStats(traceLog)
+    const stats = computeTraceStats(_trace.log)
     const out = {
-      sessionId: traceSessionId, root: currentRoot,
-      startedAt: traceSessionStartedAt, exportedAt: Date.now(),
-      stats, events: traceLog,
+      sessionId: _trace.sessionId, root: currentRoot,
+      startedAt: _trace.startedAt, exportedAt: Date.now(),
+      stats, events: _trace.log,
     }
     fs.writeFileSync(exportPath, JSON.stringify(out, null, 2), 'utf8')
-    return { ok: true, path: exportPath, eventCount: traceLog.length }
+    return { ok: true, path: exportPath, eventCount: _trace.log.length }
   } catch (e) { return { error: e.message } }
 })
 
@@ -1508,111 +1147,23 @@ function computeBlastRadius(id, depth = 3, direction = 'users') {
 // Build a per-file "first introduced at" timeline from `git log`.
 // Cached after first build because git log over a large repo is slow.
 // Returns: { points: [{ ts, hash, subject, addedFiles: [...] }], firstAt, lastAt, isGit, error? }
+// DATA layer now lives in the shared lib/changes-views.cjs (buildTimeline /
+// buildTour) — the same code the headless control-server runs. The desktop
+// keeps its no-arg wrappers (and its own module-level timelineCache + the
+// desktop getExternalUrls below) so every caller is unchanged. git is invoked
+// through the same pExecFile the desktop already uses (local tool, offline-safe).
 let timelineCache = { root: null, data: null, building: false }
-async function buildTimeline() {
-  if (!currentRoot) return { error: 'no folder loaded', isGit: false }
-  if (timelineCache.root === currentRoot && timelineCache.data) return timelineCache.data
-  if (timelineCache.building) return { error: 'building', isGit: true, building: true }
-  timelineCache.building = true
-  try {
-    await pExecFile('git', ['rev-parse', '--git-dir'], { cwd: currentRoot })
-  } catch {
-    timelineCache.building = false
-    return { error: 'not a git repository', isGit: false }
-  }
-  try {
-    const { stdout } = await pExecFile(
-      'git',
-      ['log', '--reverse', '--diff-filter=A', '--name-only', '--format=__C__%H|%at|%s'],
-      { cwd: currentRoot, maxBuffer: 100 * 1024 * 1024 }
-    )
-    const points = []
-    let cur = null
-    for (const line of stdout.split('\n')) {
-      if (line.startsWith('__C__')) {
-        const [hash, atStr, ...subj] = line.slice(5).split('|')
-        cur = { hash, ts: parseInt(atStr, 10) * 1000, subject: subj.join('|'), addedFiles: [] }
-        points.push(cur)
-      } else if (line && cur) {
-        // Only keep files we currently track (filters renames + deletes)
-        const id = line.replace(/\\/g, '/')
-        if (scanner?.files?.has(id)) cur.addedFiles.push(id)
-      }
-    }
-    // Drop empty commits (commits that added only files we no longer have)
-    const filtered = points.filter((p) => p.addedFiles.length > 0)
-    const data = {
-      isGit: true,
-      points: filtered,
-      firstAt: filtered[0]?.ts || Date.now(),
-      lastAt:  filtered[filtered.length - 1]?.ts || Date.now(),
-      commitCount: filtered.length,
-    }
-    timelineCache = { root: currentRoot, data, building: false }
-    return data
-  } catch (e) {
-    timelineCache.building = false
-    return { error: e.message, isGit: true }
-  }
+function buildTimeline() {
+  return changesViews.buildTimeline(currentRoot, scanner, pExecFile, timelineCache)
 }
 
-// Heuristic-only onboarding tour. Picks likely entry points (index/
-// main/app/server at the project root or under src/), then the top
-// hub files by incoming-import count. Each stop has a generated
-// human-readable hint. An MCP client can call cs_trace({action:'tour'}) to get
-// the same script for narrating.
+// Heuristic-only onboarding tour. An MCP client can call cs_trace({action:'tour'})
+// to get the same script for narrating. Delegates to the shared builder, passing
+// the desktop's own getExternalUrls() so external-call concentrators are computed
+// once (the shared module falls back to its own if not provided).
 function buildTour() {
   if (!scanner) return null
-  const files = [...scanner.files.values()]
-  const stops = []
-  const seen = new Set()
-  const entryRe = /^(?:src\/)?(?:index|main|app|server|cli|bin)(?:\.[a-z]+)+$/i
-  const entries = files.filter((f) => entryRe.test(f.id)).sort((a, b) => a.id.length - b.id.length).slice(0, 3)
-  for (const f of entries) {
-    if (seen.has(f.id)) continue
-    seen.add(f.id)
-    stops.push({
-      id: f.id,
-      kind: 'entry',
-      hint: `Entry point — likely where execution starts. ${f.ext.toUpperCase()} file, ${f.loc} LOC.`,
-    })
-  }
-  // Inbound count per file
-  const inCount = new Map()
-  for (const e of scanner.edges) inCount.set(e.t, (inCount.get(e.t) || 0) + 1)
-  const hubs = files
-    .map((f) => ({ ...f, inCount: inCount.get(f.id) || 0 }))
-    .filter((f) => f.inCount >= 2 && !seen.has(f.id))
-    .sort((a, b) => b.inCount - a.inCount)
-    .slice(0, 5)
-  for (const f of hubs) {
-    seen.add(f.id)
-    stops.push({
-      id: f.id,
-      kind: 'hub',
-      hint: `Hub file — ${f.inCount} other files import this. Core utility or shared module.`,
-    })
-  }
-  // External-call concentrators
-  const ext = getExternalUrls()
-  const topCallers = new Map()
-  for (const d of ext.domains) {
-    for (const c of d.callers) {
-      topCallers.set(c.file, (topCallers.get(c.file) || 0) + 1)
-    }
-  }
-  const apiFiles = [...topCallers.entries()]
-    .filter(([id]) => !seen.has(id))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-  for (const [id, count] of apiFiles) {
-    seen.add(id)
-    stops.push({
-      id, kind: 'api',
-      hint: `External API integration — calls ${count} different external URL${count === 1 ? '' : 's'}.`,
-    })
-  }
-  return { stops, totalFiles: scanner.files.size }
+  return changesViews.buildTour(scanner, getExternalUrls())
 }
 
 function getExternalUrls() {
@@ -1679,149 +1230,44 @@ function writeJson(res, status, data) {
 // Storage layout: `.codesynapt/traces/session-{startTs}.jsonl`
 // One line per event. Each session ID is the unix-ms timestamp of
 // when the scanner started on that root.
-const TRACE_DIR_NAME = 'traces'
-const TRACE_MEM_CAP = 10000   // in-memory cap to prevent unbounded growth
-let traceSessionId = null      // ms timestamp; set in startScanner
-let traceSessionStartedAt = null
-let traceLog = []              // [{ tool, id, ts }]
-let traceWriteStream = null
+// DATA layer now lives in the shared lib/trace-store.cjs TraceStore — the SAME
+// class the headless control-server uses, so the .jsonl format, session listing,
+// stats, and the in-memory cap can't drift. The desktop keeps its OWN thin
+// wrappers so:
+//   1. every existing caller (IPC + HTTP) is unchanged, and
+//   2. the desktop-only IPC side-effect (Live Trace overlay / 3D node pulse via
+//      'control:trace') is preserved in emitTrace below.
+// `getCurrentRoot` is a live callback (currentRoot is reassigned per project);
+// the scanner ref is re-synced on every scan in startScanner so per-file trust
+// meta (confidence / dynamicPatterns) tracks the active project.
+const _trace = new traceStore.TraceStore({ getCurrentRoot: () => currentRoot, scanner })
 
-function traceDirFor(root) { return path.join(root, HISTORY_DIR_NAME, TRACE_DIR_NAME) }
-function traceFileFor(root, sessionId) {
-  return path.join(traceDirFor(root), `session-${sessionId}.jsonl`)
-}
+// Stats over an event array — re-exported from the shared module unchanged.
+const computeTraceStats = traceStore.computeTraceStats
 
+// Session-listing / -reading delegate to the shared module (identical shape /
+// .jsonl format). isCurrent is keyed off the live session id.
+function listTraceSessions(root) { return traceStore.listTraceSessions(root, _trace.sessionId) }
+function readTraceSession(root, sessionId) { return traceStore.readTraceSession(root, sessionId) }
+
+// Start (or restart) the trace session on the current root. Preserves the
+// desktop's "no root → no-op" guard (the shared startSession would otherwise
+// assign a fileless session id).
 function startTraceSession() {
   if (!currentRoot) return
-  traceSessionId = Date.now()
-  traceSessionStartedAt = traceSessionId
-  traceLog = []
-  closeTraceWriteStream()
-  try {
-    fs.mkdirSync(traceDirFor(currentRoot), { recursive: true })
-    traceWriteStream = fs.createWriteStream(traceFileFor(currentRoot, traceSessionId), { flags: 'a' })
-    // First line: session metadata
-    traceWriteStream.write(JSON.stringify({
-      type: 'meta', sessionId: traceSessionId, root: currentRoot, startedAt: traceSessionStartedAt,
-    }) + '\n')
-  } catch (e) {
-    traceWriteStream = null
-  }
-}
-function closeTraceWriteStream() {
-  if (traceWriteStream) {
-    try { traceWriteStream.end() } catch {}
-    traceWriteStream = null
-  }
-}
-
-// Trust metadata for an AI session-trace event: was the queried/touched file
-// statically confident, or does it use dynamic/reflective/DI patterns the graph
-// can't fully resolve? Logging this per query lets a reviewer judge whether the
-// AI was working from complete data or known-incomplete data.
-function traceMetaFor(id) {
-  const f = scanner && scanner.files && scanner.files.get(id)
-  if (!f) return null
-  const dyn = (f.dynamicPatterns || [])
-  return { conf: f.confidence || 'high', dyn: dyn.length ? dyn : undefined }
+  _trace.scanner = scanner   // keep trust-meta lookups on the active project
+  _trace.startSession()
 }
 
 function emitTrace(tool, id, meta) {
   if (!id) return
-  const ts = Date.now()
-  // Auto-attach per-file trust meta (confidence / dynamic patterns) unless the
-  // caller passed its own richer meta (e.g. blast impact stats).
-  const ev = { tool, id, ts, ...(meta || traceMetaFor(id) || {}) }
-  // In-memory (cap with sliding window)
-  traceLog.push(ev)
-  if (traceLog.length > TRACE_MEM_CAP) traceLog.splice(0, traceLog.length - TRACE_MEM_CAP)
-  // Disk append (best-effort)
-  if (traceWriteStream) {
-    try { traceWriteStream.write(JSON.stringify(ev) + '\n') } catch {}
-  }
-  mainWindow?.webContents.send('control:trace', { ...ev })
-}
-
-function listTraceSessions(root) {
-  if (!root) return []
-  const dir = traceDirFor(root)
-  if (!fs.existsSync(dir)) return []
-  const out = []
-  for (const name of fs.readdirSync(dir)) {
-    const m = name.match(/^session-(\d+)\.jsonl$/)
-    if (!m) continue
-    const sessionId = parseInt(m[1], 10)
-    const full = path.join(dir, name)
-    let stat, size = 0, eventCount = 0, endedAt = sessionId
-    try { stat = fs.statSync(full); size = stat.size; endedAt = stat.mtimeMs } catch {}
-    // Cheap line count for event count (subtract 1 for meta line)
-    try {
-      const data = fs.readFileSync(full, 'utf8')
-      eventCount = Math.max(0, data.split('\n').filter((l) => l.trim()).length - 1)
-    } catch {}
-    out.push({
-      sessionId, startedAt: sessionId, endedAt,
-      eventCount, size,
-      isCurrent: sessionId === traceSessionId,
-    })
-  }
-  return out.sort((a, b) => b.startedAt - a.startedAt)
-}
-
-function readTraceSession(root, sessionId) {
-  if (!root) return null
-  const f = traceFileFor(root, sessionId)
-  if (!fs.existsSync(f)) return null
-  let meta = null
-  const events = []
-  try {
-    const data = fs.readFileSync(f, 'utf8')
-    for (const line of data.split('\n')) {
-      if (!line.trim()) continue
-      try {
-        const j = JSON.parse(line)
-        if (j.type === 'meta') meta = j
-        else events.push(j)
-      } catch {}
-    }
-  } catch { return null }
-  return { sessionId, meta, events, eventCount: events.length }
-}
-
-// Compute stats over an event array. Used by /trace/stats and by the
-// session-detail endpoint.
-function computeTraceStats(events) {
-  const byTool = {}
-  const byFile = new Map()
-  let firstAt = null, lastAt = null
-  for (const e of events) {
-    byTool[e.tool] = (byTool[e.tool] || 0) + 1
-    byFile.set(e.id, (byFile.get(e.id) || 0) + 1)
-    if (firstAt === null || e.ts < firstAt) firstAt = e.ts
-    if (lastAt  === null || e.ts > lastAt)  lastAt = e.ts
-  }
-  const topFiles = [...byFile.entries()]
-    .map(([id, count]) => ({ id, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 20)
-  // Time histogram — 20 buckets across [firstAt, lastAt]
-  let timeline = []
-  if (firstAt !== null && lastAt !== null && lastAt > firstAt) {
-    const buckets = 20
-    timeline = Array(buckets).fill(0)
-    const span = lastAt - firstAt
-    for (const e of events) {
-      const idx = Math.min(buckets - 1, Math.floor((e.ts - firstAt) / span * buckets))
-      timeline[idx]++
-    }
-  }
-  return {
-    eventCount: events.length,
-    fileCount: byFile.size,
-    byTool, topFiles, timeline,
-    firstAt, lastAt,
-    durationMs: (firstAt && lastAt) ? lastAt - firstAt : 0,
-  }
+  // DATA: append to the shared store (in-memory cap + best-effort .jsonl write +
+  // auto trust-meta when the caller didn't pass richer meta). Returns the event.
+  const ev = _trace.emit(tool, id, meta)
+  // DESKTOP-ONLY SIDE EFFECT (must be preserved): drive the Live Trace overlay /
+  // 3D node pulse in the renderer.
+  if (ev) mainWindow?.webContents.send('control:trace', { ...ev })
+  return ev
 }
 
 // ─── lib/control-server delegate (Stage 1+2 endpoints) ────────
@@ -2286,6 +1732,25 @@ async function handleControlRequest(req, res) {
                 }
               }
             }
+            // ─── Sub-engine enrichment (type-checker post-pass) ──
+            // The desktop builds this symbolGraph inline (not via
+            // scanner.buildSymbolGraph), so the sub-engines never ran for
+            // the desktop graph. Apply them here with the SAME tier gates as
+            // packages/core/scanner.js buildSymbolGraph so desktop and headless
+            // resolve the identical extra call edges (generics / field-chains
+            // the fast AST engine can't). Runs BEFORE the cache write so the
+            // enriched edges are persisted (and the cache-load path above gets
+            // them too) and BEFORE reachability so the BFS sees them.
+            if (process.env.CS_SUBENGINE_OFF !== '1') {
+              try {
+                require('../packages/core/lib/subengines.cjs').enrich(g, {
+                  files: [...scanner.files.values()].filter((f) => f.absPath).map((f) => f.absPath),
+                  rootDir: currentRoot,
+                  external: process.env.CS_SUBENGINE === '1',
+                  heavy: process.env.CS_SUBENGINE_HEAVY === '1',
+                })
+              } catch (e) { if (process.env.CS_DBG) console.error('[cs] desktop enrich:', e && e.message) }
+            }
             // ─── Persist symbol graph to cache (opt-in) ──────────
             if (cacheEnabled) {
               try {
@@ -2364,56 +1829,52 @@ async function handleControlRequest(req, res) {
       }
       const g = symbolGraph
 
-      if (req.method === 'GET' && (sub === '' || sub === 'summary')) {
-        return writeJson(res, 200, withMeta(g.stats()))
-      }
-      if (req.method === 'GET' && sub === 'graph') {
-        // Render payload for the 3D function layer (shared with control-server).
-        return writeJson(res, 200, withMeta(symbolViews.symbolGraphPayload(g, url.searchParams.get('limit'))))
-      }
-      if (req.method === 'GET' && sub === 'find') {
-        const q = url.searchParams.get('q') || ''
-        const limit = Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10))
-        const matches = g.findByName(q, limit)
-        return writeJson(res, 200, withMeta({ query: q, matches }))
-      }
-      if (req.method === 'GET' && sub === 'node' && rest[1]) {
-        const id = decodeURIComponent(rest.slice(1).join('/'))
-        const node = g.nodes.get(id)
-        if (!node) return writeJson(res, 404, { error: 'symbol not found', id })
-        // Pull source between startLine and endLine
-        let source = ''
-        try {
-          const filePath = path.join(currentRoot, node.file)
-          const lines = fs.readFileSync(filePath, 'utf8').split('\n')
-          source = lines.slice(node.startLine - 1, node.endLine).join('\n')
-          if (source.length > 4000) source = source.slice(0, 4000) + '\n…'
-        } catch {}
-        return writeJson(res, 200, withMeta({ ...node, source }))
-      }
-      if (req.method === 'GET' && sub === 'callers' && rest[1]) {
-        const id = decodeURIComponent(rest.slice(1).join('/'))
-        return writeJson(res, 200, withMeta({ id, callers: g.callersOf(id) }))
-      }
-      if (req.method === 'GET' && sub === 'callees' && rest[1]) {
-        const id = decodeURIComponent(rest.slice(1).join('/'))
-        return writeJson(res, 200, withMeta({ id, callees: g.calleesOf(id) }))
-      }
-      // Function-level blast: what breaks if this symbol changes (transitive
-      // callers), or what it depends on (callees). Accepts the id either in
-      // the path (/symbol/blast/<id>, this server's style) OR as ?id= (the
-      // control-server / MCP cs_blast{action:'function'} style) so the same
-      // tool call works whether it lands on the desktop or the headless server.
-      if (req.method === 'GET' && sub === 'blast') {
-        // Shared with control-server. id rides path (/symbol/blast/<id>) or ?id=.
-        const id = rest[1] ? decodeURIComponent(rest.slice(1).join('/'))
-                           : decodeURIComponent(url.searchParams.get('id') || '')
-        const r = symbolViews.symbolBlast(
-          g, id,
-          Math.min(6, Math.max(1, parseInt(url.searchParams.get('depth') || '3', 10))),
-          url.searchParams.get('direction') === 'callees' ? 'callees' : 'callers')
-        if (!r) return writeJson(res, 404, { error: 'symbol not found', id })
-        return writeJson(res, 200, withMeta(r))
+      // ── Shared symbol views (summary/graph/find/callers/callees/blast).
+      //    Implemented ONCE in lib/symbol-views.cjs so the desktop and the
+      //    headless control server stay in sync (mirrors control-server's
+      //    dispatch). handleSymbolView returns {status, body} for the shared
+      //    subs and null for the server-specific ones (node-with-source,
+      //    explore, scan), which fall through to the handlers below.
+      //
+      //    Previously the desktop inlined these and:
+      //      - summary returned bare g.stats() (missing topHubs + coverage)
+      //      - node/callers/callees spread raw nodes, leaking the 384-float
+      //        _embedding and omitting candidateCallers/candidateCallees.
+      //    Routing through the shared module fixes all of the above.
+      if (req.method === 'GET') {
+        const params = {
+          q: url.searchParams.get('q') || '',
+          // id rides the path tail (/symbol/callers/<id>) or ?id=.
+          id: (rest.length > 1
+            ? (() => { try { return decodeURIComponent(rest.slice(1).join('/')) } catch { return '' } })()
+            : '') || (() => { try { return decodeURIComponent(url.searchParams.get('id') || '') } catch { return '' } })(),
+          limit: url.searchParams.get('limit'),
+          depth: url.searchParams.get('depth'),
+          direction: url.searchParams.get('direction'),
+        }
+        const r = symbolViews.handleSymbolView(g, sub, params,
+          { files: scanner.files, supportedExts: SUPPORTED_EXTS })
+        if (r) return writeJson(res, r.status, r.status === 200 ? withMeta(r.body) : r.body)
+        if (sub === 'node') {
+          const n = g.nodes.get(params.id)
+          if (!n) return writeJson(res, 404, { error: 'symbol not found', id: params.id })
+          // Desktop-specific: include the symbol's source (file lines
+          // startLine..endLine, capped at 4000 chars) on top of the
+          // allow-listed node shape (which does NOT leak _embedding).
+          let source = ''
+          try {
+            const filePath = path.join(currentRoot, n.file)
+            const lines = fs.readFileSync(filePath, 'utf8').split('\n')
+            source = lines.slice(n.startLine - 1, n.endLine).join('\n')
+            if (source.length > 4000) source = source.slice(0, 4000) + '\n…'
+          } catch {}
+          return writeJson(res, 200, withMeta({
+            ...symbolViews.symbolNodeView(g, n),
+            source,
+            callers: g.callersOf(params.id).map((c) => symbolViews.symbolNodeView(g, c)),
+            callees: g.calleesOf(params.id).map((c) => symbolViews.symbolNodeView(g, c)),
+          }))
+        }
       }
       if (req.method === 'GET' && sub === 'explore') {
         const q = url.searchParams.get('q') || ''
@@ -2672,7 +2133,7 @@ async function handleControlRequest(req, res) {
       const sinceRaw = url.searchParams.get('since')
       const toolFilter = url.searchParams.get('tool')
       const limit = parseInt(url.searchParams.get('limit') || '0', 10)
-      let evs = traceLog
+      let evs = _trace.log
       if (sinceRaw) {
         const since = parseInt(sinceRaw, 10)
         evs = evs.filter((e) => e.ts > since)
@@ -2681,19 +2142,19 @@ async function handleControlRequest(req, res) {
       const totalAvailable = evs.length
       if (limit > 0) evs = evs.slice(-limit)  // most recent N
       return writeJson(res, 200, withMeta({
-        sessionId: traceSessionId,
+        sessionId: _trace.sessionId,
         events: evs,
       }, { totalAvailable, returned: evs.length }))
     }
     if (req.method === 'GET' && seg0 === 'trace' && rest[0] === 'stats') {
       // Stats over current session
-      const stats = computeTraceStats(traceLog)
-      return writeJson(res, 200, withMeta({ sessionId: traceSessionId, ...stats }))
+      const stats = computeTraceStats(_trace.log)
+      return writeJson(res, 200, withMeta({ sessionId: _trace.sessionId, ...stats }))
     }
     if (req.method === 'GET' && seg0 === 'trace' && rest[0] === 'sessions') {
       return writeJson(res, 200, withMeta({
         sessions: listTraceSessions(currentRoot),
-        currentSessionId: traceSessionId,
+        currentSessionId: _trace.sessionId,
       }))
     }
     if (req.method === 'GET' && seg0 === 'trace' && rest[0] === 'session' && rest[1]) {
@@ -2706,9 +2167,9 @@ async function handleControlRequest(req, res) {
     if (req.method === 'POST' && seg0 === 'trace' && rest[0] === 'clear') {
       // Soft clear: drop in-memory log + start a NEW session on disk so
       // old log file is preserved.
-      traceLog = []
+      _trace.log = []
       startTraceSession()
-      return writeJson(res, 200, { ok: true, newSessionId: traceSessionId })
+      return writeJson(res, 200, { ok: true, newSessionId: _trace.sessionId })
     }
     if (req.method === 'POST' && seg0 === 'trace' && rest[0] === 'export') {
       // Write current session to a user-chosen path. Body should be
@@ -2726,17 +2187,17 @@ async function handleControlRequest(req, res) {
         } catch {}
         if (!exportPath) return writeJson(res, 400, { error: 'usage: pass ?path= or { "path": "..." }' })
         try {
-          const stats = computeTraceStats(traceLog)
+          const stats = computeTraceStats(_trace.log)
           const out = {
-            sessionId: traceSessionId,
+            sessionId: _trace.sessionId,
             root: currentRoot,
-            startedAt: traceSessionStartedAt,
+            startedAt: _trace.startedAt,
             exportedAt: Date.now(),
             stats,
-            events: traceLog,
+            events: _trace.log,
           }
           fs.writeFileSync(exportPath, JSON.stringify(out, null, 2), 'utf8')
-          return writeJson(res, 200, { ok: true, path: exportPath, eventCount: traceLog.length })
+          return writeJson(res, 200, { ok: true, path: exportPath, eventCount: _trace.log.length })
         } catch (e) { return writeJson(res, 500, { error: e.message }) }
       })
       return
@@ -2919,7 +2380,7 @@ function pruneOldLogs() {
   const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000
   const auditDir = path.join(app.getPath('home'), '.codesynapt', 'audit')
   const dirs = [auditDir]
-  if (currentRoot) dirs.push(traceDirFor(currentRoot))
+  if (currentRoot) dirs.push(traceStore.traceDirFor(currentRoot))
   for (const dir of dirs) {
     try {
       if (!fs.existsSync(dir)) continue
