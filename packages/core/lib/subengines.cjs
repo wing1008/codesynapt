@@ -16,6 +16,8 @@ function register(engine) { if (engine && engine.available && engine.resolve) EN
 try { register(require('./subengine-ts.cjs')) } catch { /* optional */ }
 try { register(require('./subengine-java.cjs')) } catch { /* optional */ }
 try { register(require('./subengine-cs.cjs')) } catch { /* optional */ }
+// Python = opt-in/background only (jedi is slow); registered but heavy.
+try { register(require('./subengine-python.cjs')) } catch { /* optional */ }
 
 // Smallest graph symbol whose line range encloses `line` in `file` (the calling
 // function/method); falls back to the file's <module> node.
@@ -63,6 +65,7 @@ function enrich(g, opts = {}) {
   let encl = null, tgt = null
   for (const engine of ENGINES) {
     if (!engine.exts.some((e) => exts.has(e))) continue
+    if (engine.heavy && !opts.heavy) continue   // slow blocks (Python/jedi) only on explicit opt-in
     if (!engine.available()) continue
     let records
     try { records = engine.resolve(files, rootDir) || [] } catch { continue }

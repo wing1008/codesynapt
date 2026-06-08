@@ -717,12 +717,13 @@ export class Scanner extends EventEmitter {
   // calls this AFTER build, ideally in the background (the TS block is ~1.5-2s
   // for a few-hundred-file repo). No-op if no sub-engine is available, and it
   // never touches the build path — pure post-pass on the existing graph.
-  enrichSymbolGraph() {
+  // opts.heavy = also run slow opt-in blocks (Python/jedi), off by default.
+  enrichSymbolGraph(opts = {}) {
     if (!this.symbolGraph) return null
     try {
       const files = []
       for (const f of this.files.values()) if (f.absPath) files.push(f.absPath)
-      return enrichSubengines(this.symbolGraph, { files, rootDir: this.root })
+      return enrichSubengines(this.symbolGraph, { files, rootDir: this.root, heavy: !!opts.heavy })
     } catch (e) { if (process.env.CS_DBG) console.error('enrich err', e && e.stack); return null }
   }
 
