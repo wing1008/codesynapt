@@ -40,8 +40,12 @@ const LANG_CONFIG = {
   jsx:   { grammar: 'javascript' },
   mjs:   { grammar: 'javascript' },
   cjs:   { grammar: 'javascript' },
-  // TypeScript wasms aren't in tree-sitter-wasms@0.1.13; fall back to
-  // the JS grammar (works for type annotations as stripped syntax).
+  // tree-sitter-wasms@0.1.13 DOES ship tree-sitter-typescript.wasm /
+  // tree-sitter-tsx.wasm. We deliberately route ts/tsx to the babel parser
+  // (registered in symbol-parsers.cjs) instead — babel is the oracle-validated
+  // path and handles interfaces/types/generics/receiver-type inference. The
+  // 'javascript' grammar mapping here is only a tree-sitter fallback and is not
+  // used for ts/tsx in practice (babel wins the registry).
   ts:    { grammar: 'javascript' },
   tsx:   { grammar: 'javascript' },
   py:    { grammar: 'python' },
@@ -61,15 +65,22 @@ const LANG_CONFIG = {
   sh:    { grammar: 'bash' },
   bash:  { grammar: 'bash' },
   dart:  { grammar: 'dart' },
-  elm:   { grammar: 'elm' },
-  ex:    { grammar: 'elixir' },
-  exs:   { grammar: 'elixir' },
+  // REMOVED (2026-06-08 phantom-config audit) — these were advertised in config
+  // but never scanned/registered, AND verified non-functional when actually
+  // parsed:
+  //   • elm  → tree-sitter-elm.wasm ABI mismatch (language version 12, runtime
+  //            needs 13–14) — throws, 0 symbols.
+  //   • ex/exs (elixir) → def/call share one `call` node, so the macro keywords
+  //            `defmodule`/`def` are themselves extracted as bogus "functions"
+  //            and real defs duplicate; needs special-casing we don't have.
+  //   • hh (Hack) → no tree-sitter-hack grammar exists; routing to the C++
+  //            grammar misparses `<?hh`, async/Awaitable<T>, $vars — emits
+  //            phantom symbols (`public`, mislabeled class) and drops methods.
   c:     { grammar: 'c' },
   h:     { grammar: 'c' },
   cpp:   { grammar: 'cpp' },
   cc:    { grammar: 'cpp' },
   hpp:   { grammar: 'cpp' },
-  hh:    { grammar: 'cpp' },
 }
 
 // Node types per grammar.

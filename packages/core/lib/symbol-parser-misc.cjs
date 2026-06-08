@@ -283,7 +283,7 @@ const JAVA_KEYWORDS = new Set([
   'String','Object','Integer','Long','Boolean','true','false','null','var',
   'import','package','assert','instanceof','default','record','sealed','permits',
   // Kotlin
-  'fun','val','val','val','val','val','val','val','val','val',
+  'fun','val',
 ])
 
 // ─── Swift ──────────────────────────────────────────────────────

@@ -35,7 +35,10 @@ function registerAll() {
   // lua: function-level symbols only (table-OOP — most member calls don't
   // resolve), still better than L1. Ruby/Dart stay out (web-tree-sitter 0.20
   // ↔ grammar-wasm ABI mismatch: dart needs ABI 15, ruby crashes mid-parse).
-  for (const ext of ['go', 'rs', 'java', 'kt', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash', 'scala', 'lua']) {
+  // kts (Kotlin script) parses identically to kt via the kotlin grammar —
+  // verified (2026-06-08): a build.gradle.kts-style snippet yields clean
+  // function/class/method symbols, no phantoms.
+  for (const ext of ['go', 'rs', 'java', 'kt', 'kts', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash', 'scala', 'lua']) {
     const p = makeParser(ext)
     if (p) sg.registerParser([ext], p)
   }
@@ -44,7 +47,7 @@ function registerAll() {
 // Languages we build a symbol graph for (honest coverage reporting in the API).
 const SUPPORTED_EXTS = new Set([
   'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'pyw', 'pyi',
-  'go', 'rs', 'java', 'kt', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash',
+  'go', 'rs', 'java', 'kt', 'kts', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash',
   'scala', 'lua',
 ])
 
