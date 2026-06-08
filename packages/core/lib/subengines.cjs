@@ -15,6 +15,7 @@ function register(engine) { if (engine && engine.available && engine.resolve) EN
 // Built-in blocks. TS = bundled (typescript npm). Java = toolchain-gated (JDK).
 try { register(require('./subengine-ts.cjs')) } catch { /* optional */ }
 try { register(require('./subengine-java.cjs')) } catch { /* optional */ }
+try { register(require('./subengine-cs.cjs')) } catch { /* optional */ }
 
 // Smallest graph symbol whose line range encloses `line` in `file` (the calling
 // function/method); falls back to the file's <module> node.
