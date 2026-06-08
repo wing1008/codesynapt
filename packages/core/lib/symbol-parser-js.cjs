@@ -235,6 +235,32 @@ function extractSymbols(content, fileId) {
         returnType: extractTypeName(n.returnType?.typeAnnotation),
       })
     },
+    // Class-field arrow/function methods: `class X { foo = () => {} }` (incl.
+    // quoted/string keys `"~validate" = ...`). The ClassMethod visitor only
+    // catches `foo() {}` syntax; these field-bound callables were missed (TS
+    // residual audit: 13 class-property arrows + a quoted method).
+    'ClassProperty|ClassPrivateProperty'(path) {
+      const n = path.node
+      if (!n.key || !n.loc) return
+      const v = n.value
+      if (!v || (v.type !== 'ArrowFunctionExpression' && v.type !== 'FunctionExpression')) return
+      const name = n.key.name ?? n.key.value
+      if (name == null) return
+      const qualifiedName = currentClass ? `${currentClass}.${name}` : String(name)
+      symbols.push({
+        id: mkId(fileId, qualifiedName, n.loc.start.line),
+        name: String(name),
+        qualifiedName,
+        kind: 'method',
+        file: fileId,
+        startLine: n.loc.start.line,
+        endLine: n.loc.end.line,
+        signature: signatureOf(n, content),
+        doc: docOf(n),
+        exported: false,
+        returnType: extractTypeName(v.returnType?.typeAnnotation),
+      })
+    },
     VariableDeclarator(path) {
       const n = path.node
       // const foo = () => {} | const foo = function() {}
