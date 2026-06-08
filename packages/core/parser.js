@@ -258,6 +258,12 @@ function staticStringValue(node, scope) {
   return null
 }
 
+// A literal worker/child_process arg is only treated as an in-repo entry
+// script when it is a RELATIVE path (`./`, `../`) ending in a JS module ext.
+// This excludes absolute paths, flags (`--inspect`), and bare binaries
+// (`node`, `python`) — precision-first: we only claim an edge we can resolve.
+const SCRIPT_PATH_RE = /^\.{1,2}\/.*\.(?:js|cjs|mjs|ts|cts|mts|jsx|tsx)$/
+
 // ─── JS / TS via Babel ────────────────────────────────────────
 function parseJS(content) {
   const imports = []
@@ -312,6 +318,50 @@ function parseJS(content) {
           const spec = staticStringValue(args[0], p.scope)
           if (spec) imports.push({ spec, kind: 'mock' })
         }
+        // child_process entry scripts referenced by a literal path. These spawn
+        // ANOTHER file in this repo (a real dependency the graph must show);
+        // without this the spawned script looks like a false orphan.
+        //   fork('./w.js')                      — first arg IS the module path
+        //   spawn('node', ['./w.js'])           — script path inside the args[]
+        //   execFile('node', ['./w.js'])          array literal (after the bin)
+        // Matched bare (`fork(...)`) or as a member (`cp.fork(...)`).
+        const callName = c.type === 'Identifier' ? c.name
+          : (c.type === 'MemberExpression' && c.property?.type === 'Identifier' ? c.property.name : null)
+        if (callName === 'fork') {
+          // fork(modulePath[, args][, options]) — arg0 is the module path.
+          const spec = staticStringValue(args[0], p.scope)
+          if (spec && SCRIPT_PATH_RE.test(spec)) imports.push({ spec, kind: 'process' })
+        } else if (callName === 'spawn' || callName === 'execFile') {
+          // spawn(cmd, [args]) — the script is a literal element of the args
+          // array (e.g. spawn('node', ['./w.js'])). Scan only string-literal
+          // entries that look like an in-repo script path; skip flags/dynamic.
+          const argv = args[1]
+          if (argv?.type === 'ArrayExpression') {
+            for (const el of argv.elements) {
+              const v = staticStringValue(el, p.scope)
+              if (v && SCRIPT_PATH_RE.test(v)) { imports.push({ spec: v, kind: 'process' }); break }
+            }
+          }
+        }
+      },
+      // worker_threads / Web Worker entry scripts referenced by a string
+      // literal: `new Worker('./w.js')`, `new SharedWorker('./w.js')`, and the
+      // Node form `new Worker(new URL('./w.js', import.meta.url))`. The worker
+      // script is a real dependency — without this it is a false orphan (this
+      // repo's own search-worker is the motivating case).
+      NewExpression(p) {
+        const c = p.node.callee
+        if (c.type !== 'Identifier' || (c.name !== 'Worker' && c.name !== 'SharedWorker')) return
+        const arg0 = p.node.arguments[0]
+        if (!arg0) return
+        // Direct string-literal path: new Worker('./w.js')
+        let spec = staticStringValue(arg0, p.scope)
+        // new URL('./w.js', import.meta.url) — the literal lives in URL's arg0.
+        if (!spec && arg0.type === 'NewExpression'
+            && arg0.callee?.type === 'Identifier' && arg0.callee.name === 'URL') {
+          spec = staticStringValue(arg0.arguments?.[0], p.scope)
+        }
+        if (spec && SCRIPT_PATH_RE.test(spec)) imports.push({ spec, kind: 'worker' })
       },
     })
   } catch {
@@ -2039,7 +2089,7 @@ function loadTsconfigPaths(rootAbs) {
         }
       }
     }
-  } catch {}
+  } catch (e) { if (process.env.CS_DBG) console.error('[cs] loadTsconfigPaths:', e && e.message) }
   _tsconfigCache.set(rootAbs, cfg)
   return cfg
 }
@@ -2104,7 +2154,7 @@ function loadComposerPsr4(rootAbs, validIds) {
           }
         }
       }
-    } catch {}
+    } catch (e) { if (process.env.CS_DBG) console.error('[cs] loadComposerPsr4:', e && e.message) }
   }
   maps.sort((a, b) => b.prefix.length - a.prefix.length)  // longest prefix wins
   _composerCache.set(rootAbs, maps)
@@ -2128,7 +2178,7 @@ function loadDartPackages(rootAbs, validIds) {
       if (!fs.existsSync(abs)) continue
       const m = fs.readFileSync(abs, 'utf8').match(/^name:\s*(\S+)/m)
       if (m) byName.set(m[1], pf.includes('/') ? pf.slice(0, pf.lastIndexOf('/')) : '')
-    } catch {}
+    } catch (e) { if (process.env.CS_DBG) console.error('[cs] loadDartPackages:', e && e.message) }
   }
   _pubspecCache.set(rootAbs, byName)
   return byName
@@ -2161,7 +2211,7 @@ function loadJsWorkspace(rootAbs, validIds) {
       }
       entry = entry || parsed.module || parsed.main || null
       byName.set(parsed.name, { dir, entry })
-    } catch {}
+    } catch (e) { if (process.env.CS_DBG) console.error('[cs] loadJsWorkspace:', e && e.message) }
   }
   _jsWsCache.set(rootAbs, byName)
   return byName
@@ -2218,7 +2268,7 @@ function getGoModulePrefix(rootAbs) {
       const m = txt.match(/^\s*module\s+(\S+)/m)
       if (m) prefix = m[1]
     }
-  } catch {}
+  } catch (e) { if (process.env.CS_DBG) console.error('[cs] getGoModulePrefix:', e && e.message) }
   _goModCache.set(rootAbs, prefix)
   return prefix
 }
@@ -2238,7 +2288,7 @@ function loadGoModules(rootAbs, validIds) {
       const txt = fs.readFileSync(path.join(rootAbs, gf.split('/').join(path.sep)), 'utf8')
       const m = txt.match(/^\s*module\s+(\S+)/m)
       if (m) mods.push({ prefix: m[1], dir: gf.includes('/') ? gf.slice(0, gf.lastIndexOf('/')) : '' })
-    } catch {}
+    } catch (e) { if (process.env.CS_DBG) console.error('[cs] loadGoModules:', e && e.message) }
   }
   mods.sort((a, b) => b.prefix.length - a.prefix.length)  // longest module path first
   _goModsCache.set(rootAbs, mods)

@@ -348,6 +348,16 @@ class SymbolGraph {
     }
     const ambiguousMethodCall = methodNameCount > 1
     let sameFile = null, imported = null
+    // Precision-first imported-candidate tracking. The old code set `imported`
+    // to the FIRST imported file bearing the name (byName Set iteration order)
+    // — when ≥2 imported files declare the same name that arbitrary, order-
+    // dependent pick is both possibly-wrong and nondeterministic. Instead we
+    // record EVERY distinct imported-file candidate; only when exactly one
+    // exists do we confidently resolve to it. ≥2 ⇒ decline (fall through to the
+    // production/candidate legs) rather than guess. Single-candidate resolution
+    // (the common, correct case) is unchanged.
+    let importedCand = null, importedCandCount = 0
+    const importedFilesSeen = new Set()
     // Count *production* candidates (not aux: scripts/, test/, build/…).
     // The tightened allowAny fallback resolves only when exactly one
     // production symbol bears the name — more than one is ambiguous and we
@@ -386,14 +396,29 @@ class SymbolGraph {
         // Pinned: a candidate from outside the namespace's module reach is the
         // wrong module's same-named symbol — skip it entirely.
         if (pin.has(node.file) && !imported) imported = node
-      } else if (!imported && importsOf && importsOf.has(node.file)) imported = node
+      } else if (importsOf && importsOf.has(node.file)) {
+        // Count distinct imported FILES that declare this name (multiple symbols
+        // in the same file collapse to one candidate — same resolution target).
+        if (!importedFilesSeen.has(node.file)) {
+          importedFilesSeen.add(node.file)
+          importedCandCount++
+          if (!importedCand) importedCand = node
+        }
+      }
       if (!isAuxPath(node.file)) { prodCount++; if (!prodOne) prodOne = node }
     }
     // Ambiguous bare-name member call (≥2 impls of the method name) — refuse the
     // arbitrary first match; the candidate leg exposes all impls instead.
     if (ambiguousMethodCall) { this.unresolvedAmbiguous++; return null }
     if (sameFile && !importedOnly) return sameFile
+    // Pinned namespace match (single module reach) takes precedence as before.
     if (imported) return imported
+    // Non-pinned imported candidate: confidently resolve ONLY when exactly one
+    // imported file declares the name. ≥2 ⇒ ambiguous; decline here and fall
+    // through to the production/candidate legs rather than pick an arbitrary,
+    // iteration-order-dependent file (the documented nondeterminism bug).
+    if (importedCandCount === 1) return importedCand
+    if (importedCandCount > 1) { this.unresolvedAmbiguous++; return null }
     if (!allowAny) return null
     // Tightened fallback. The old code returned ANY same-named symbol here,
     // which mis-linked `.add()`/`.resolve()` method calls on unknown
@@ -708,7 +733,7 @@ class SymbolGraph {
         const res = JSON.parse(r.stdout)
         if (res.symbols) for (const s of res.symbols) out.push(s)
         if (res.edges) for (const e of res.edges) out.push(e)
-      } catch { /* batch failed — skip its files */ }
+      } catch (e) { if (process.env.CS_DBG) console.error('[cs] _workerParse batch (' + phase + '):', e && e.message) /* batch failed — skip its files */ }
     }
     return out
   }
