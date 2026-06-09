@@ -1453,13 +1453,15 @@ async function main() {
         })
         child.unref()
 
-        // Stage 3: poll /health until root === abs. Cold electron start + the
-        // first scan of a large repo can take well over a minute on Windows,
-        // so give it room (a too-short window made a *successful* launch look
-        // like a failure — the friction users hit).
-        const timeoutMs = 120_000
+        // Stage 3: poll /health until the desktop has loaded `abs` AND finished
+        // its first scan (initialScanComplete). Declaring "ready" at fileCount>0
+        // used to return a half-built graph (edges still resolving) — callers
+        // then saw edgeCount 0. The full first scan of a large repo can take a
+        // couple of minutes on Windows, so give it room.
+        const timeoutMs = 240_000
         const startedAt = Date.now()
         let last = null
+        let lastProgressAt = 0
         while (Date.now() - startedAt < timeoutMs) {
           await new Promise((r) => setTimeout(r, 1000))
           const port = readPortLock() || initialPort
@@ -1467,20 +1469,33 @@ async function main() {
           if (h && h.status === 200) {
             last = { port, ...h.body }
             const root = h.body?.root
-            if (root && path.resolve(root) === abs && (h.body.fileCount || 0) > 0) {
-              process.stdout.write(`✅ desktop ready at :${port} (${h.body.fileCount} files, ${((Date.now()-startedAt)/1000).toFixed(1)}s)\n`)
-              printJson({ ok: true, action: 'spawned', port, root: abs, fileCount: h.body.fileCount, elapsedMs: Date.now()-startedAt })
-              process.exit(0)
+            if (root && path.resolve(root) === abs) {
+              if (h.body.initialScanComplete === true) {
+                process.stdout.write(`✅ desktop ready at :${port} (${h.body.fileCount} files, ${h.body.edgeCount ?? 0} edges, ${((Date.now()-startedAt)/1000).toFixed(1)}s)\n`)
+                printJson({ ok: true, action: 'spawned', port, root: abs, fileCount: h.body.fileCount, edgeCount: h.body.edgeCount, elapsedMs: Date.now()-startedAt })
+                process.exit(0)
+              }
+              // Not done yet — surface what stage it's in, throttled.
+              const now = Date.now()
+              if (now - lastProgressAt > 4000) {
+                lastProgressAt = now
+                const phase = h.body.scanPhase || 'scanning'
+                const msg = phase === 'building'
+                  ? `⏳ building graph (resolving edges)… ${h.body.fileCount} files`
+                  : `⏳ scanning… ${h.body.fileCount} files`
+                process.stdout.write(`${msg}\n`)
+              }
             }
           }
         }
-        // Timed out polling — but distinguish "still scanning" from real
-        // failure. If the desktop is up with the right root (just hasn't
-        // finished its first scan, fileCount 0), that is NOT an error: say so
-        // and exit clean. die()-ing here was the scary false-failure users saw.
+        // Timed out polling — but distinguish "still working" from real failure.
+        // If the desktop is up with the right root (just hasn't finished its
+        // first scan), that is NOT an error: say so and exit clean.
         if (last && last.root && path.resolve(last.root) === abs) {
-          process.stdout.write(`⏳ desktop is up at :${last.port} and still scanning ${abs} — the first scan of a large repo can take a while. It will be ready shortly; just proceed (the MCP connects when the scan finishes) or re-run \`cs ensure\`.\n`)
-          printJson({ ok: true, action: 'loading', port: last.port, root: abs, fileCount: last.fileCount || 0, note: 'scan in progress (not an error)' })
+          const phase = last.scanPhase || 'scanning'
+          const stage = phase === 'building' ? 'building the edge graph' : 'scanning files'
+          process.stdout.write(`⏳ desktop is up at :${last.port} and still ${stage} for ${abs} — the first scan of a large repo can take a while. It will be ready shortly; just proceed (the MCP connects when the scan finishes) or re-run \`cs ensure\`.\n`)
+          printJson({ ok: true, action: 'loading', port: last.port, root: abs, fileCount: last.fileCount || 0, scanPhase: phase, note: 'scan in progress (not an error)' })
           process.exit(0)
         }
         die(`desktop did not load ${abs} within ${timeoutMs/1000}s. last health: ${JSON.stringify(last)}`)

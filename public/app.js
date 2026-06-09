@@ -135,6 +135,11 @@ const T = {
     'more.timelapse':       '타임랩스',
     'more.packages':        '패키지',
     'more.legacy':          '레거시 감사',
+    'more.tour':            '투어',
+    'search.tour.title':    '코드베이스 가이드 투어 — 진입점·허브 순회',
+    'kicker.tour':          '가이드 투어 · 진입점 & 허브',
+    'tour.loading':         '투어 불러오는 중…',
+    'tour.empty':           '투어 항목 없음',
     'more.lang':            '언어 전환',
     'more.settings':        '설정',
     // Panel titles (kickers)
@@ -268,6 +273,12 @@ const T = {
     'badge.leaf.label':      '🟡 no incoming',
     'badge.connected.title': '{n}개 파일이 이 파일을 import함 — 활성 파일',
     'badge.connected.label': '🟢 connected · in:{in} out:{out}',
+    'badge.conf.title':      '그래프 신뢰도 — 이 파일의 import/의존 분석이 얼마나 확실한지',
+    'badge.conf.high':       '🟢 신뢰 높음',
+    'badge.conf.medium':     '🟡 신뢰 중간',
+    'badge.conf.low':        '🔴 신뢰 낮음',
+    'badge.dynamic.title':   '동적 import/호출 감지 — 정적 분석이 일부 의존성을 놓칠 수 있음 (영향범위는 최소치)',
+    'badge.dynamic.label':   '⚡ 동적 {n}',
     // History panel (per-file)
     'history.electron.required': 'Electron 외 환경: 히스토리 비활성',
     'history.off':              '자동 히스토리 OFF — 설정에서 켜기',
@@ -330,6 +341,7 @@ const T = {
     // Drop overlay / scan
     'drop.overlay':        '스캔할 폴더를 놓으세요',
     'scan.scanning':       '스캔 중…',
+    'scan.building':       '그래프 빌드 중…',
     'scan.files':          '파일',
     // Status bar units
     'status.files':        '파일',
@@ -390,6 +402,11 @@ const T = {
     'more.timelapse':       'Time-lapse',
     'more.packages':        'Packages',
     'more.legacy':          'Legacy audit',
+    'more.tour':            'Tour',
+    'search.tour.title':    'guided tour — entry points & hubs',
+    'kicker.tour':          'guided tour · entry & hubs',
+    'tour.loading':         'loading tour…',
+    'tour.empty':           'no tour stops',
     'more.lang':            'Language',
     'more.settings':        'Settings',
     'kicker.ai_work':       'ai work · session changes',
@@ -517,6 +534,12 @@ const T = {
     'badge.leaf.label':      '🟡 no incoming',
     'badge.connected.title': '{n} files import this — active',
     'badge.connected.label': '🟢 connected · in:{in} out:{out}',
+    'badge.conf.title':      "graph confidence — how certain this file's import/dependency analysis is",
+    'badge.conf.high':       '🟢 high conf',
+    'badge.conf.medium':     '🟡 med conf',
+    'badge.conf.low':        '🔴 low conf',
+    'badge.dynamic.title':   'dynamic import/call detected — static analysis may miss some deps (blast radius is a floor)',
+    'badge.dynamic.label':   '⚡ dynamic {n}',
     'history.electron.required': 'Not Electron — history disabled',
     'history.off':              'Auto history OFF — enable in Settings',
     'history.none':             'No versions saved yet — first save creates one',
@@ -571,6 +594,7 @@ const T = {
     'dialog.save':         'Save',
     'drop.overlay':        'drop folder to scan',
     'scan.scanning':       'Scanning…',
+    'scan.building':       'Building graph…',
     'scan.files':          'files',
     'status.files':        'files',
     'status.edges':        'edges',
@@ -2199,6 +2223,12 @@ function applySnapshot(files, edges, root) {
     if (existing) {
       existing.ext = f.ext; existing.loc = f.loc; existing.size = f.size
       existing.pkg = f.pkg || null
+      // Keep confidence/dynamic fresh on re-snapshot — the new-node branch
+      // gets these via the `...f` spread, but updates must refresh them too
+      // or the inspector confidence/dynamic badges go stale.
+      existing.confidence = f.confidence
+      existing.hasDynamicResolution = f.hasDynamicResolution
+      existing.dynamicPatterns = f.dynamicPatterns
       existing.hex = colorFor(f.ext)
       hexToRGB(existing.hex, existing.rgb)
     } else {
@@ -3468,7 +3498,7 @@ function render() {
     const hs = state.showSymbols && state.hoverId ? state.symbols.get(state.hoverId) : null
     if (hs) {
       const nb = state.symbolAdj.get(state.hoverId)?.size || 0
-      symTip.textContent = `${hs.name}  ·  ${hs.kind} · ${nb} call${nb === 1 ? '' : 's'}`
+      symTip.textContent = `${hs.name}${hs.line ? ':' + hs.line : ''}  ·  ${hs.kind} · ${nb} call${nb === 1 ? '' : 's'}`
       symTip.style.left = (state.lastMouseX + 14) + 'px'
       symTip.style.top = (state.lastMouseY + 12) + 'px'
       symTip.style.display = 'block'
@@ -3741,7 +3771,10 @@ function render() {
       symEdgePositions[se*6]   = a.p.x; symEdgePositions[se*6+1] = a.p.y; symEdgePositions[se*6+2] = a.p.z
       symEdgePositions[se*6+3] = b.p.x; symEdgePositions[se*6+4] = b.p.y; symEdgePositions[se*6+5] = b.p.z
       let r, g2, b2
-      if (!hlSym)                                       { r = 0.11; g2 = 0.20; b2 = 0.38 }   // resting: faint
+      // Resting: type-checker-resolved calls (via:'ts') get a teal tint so the
+      // sub-engine enrichment is visible; plain AST-resolved calls stay blue.
+      if (!hlSym && call.via === 'ts')                  { r = 0.10; g2 = 0.36; b2 = 0.30 }   // resting: tsc-enriched (teal)
+      else if (!hlSym)                                  { r = 0.11; g2 = 0.20; b2 = 0.38 }   // resting: heuristic (faint blue)
       else if (call.s === hlSym || call.t === hlSym)    { r = 0.55; g2 = 0.95; b2 = 1.00 }   // hovered fn's edges: bright
       else                                              { r = 0.03; g2 = 0.04; b2 = 0.08 }   // unrelated: near-invisible
       symEdgeColors[se*6]   = r; symEdgeColors[se*6+1] = g2; symEdgeColors[se*6+2] = b2
@@ -4247,10 +4280,22 @@ function renderInspector(id) {
     badge = `<span class="ins-badge connected" title="${t('badge.connected.title', { n: inCount })}">${t('badge.connected.label', { in: inCount, out: outCount })}</span>`
   }
 
+  // Graph-confidence badge (high/medium/low) + dynamic-resolution marker.
+  // Both fields ship in every snapshot (scanner) but were previously unread —
+  // surface them so the user sees how trustworthy this file's edges are and
+  // when blast radius is only a floor (dynamic imports detected).
+  const confBadge = n.confidence
+    ? `<span class="ins-badge conf-${n.confidence}" title="${t('badge.conf.title')}">${t('badge.conf.' + n.confidence)}</span>`
+    : ''
+  const dynPats = Array.isArray(n.dynamicPatterns) ? n.dynamicPatterns : []
+  const dynBadge = n.hasDynamicResolution
+    ? `<span class="ins-badge dynamic" title="${escapeAttr(t('badge.dynamic.title') + (dynPats.length ? ' — ' + dynPats.join(', ') : ''))}">${t('badge.dynamic.label', { n: dynPats.length })}</span>`
+    : ''
+
   inspectorBody.innerHTML = `
     <div class="ins-name">${escapeHTML(n.id)}</div>
     <div class="ins-sub">.${escapeHTML(n.ext)} · ${n.loc} LOC · ${formatBytes(n.size)} · mass ${n.mass.toFixed(1)}</div>
-    <div class="ins-badges">${badge}</div>
+    <div class="ins-badges">${badge}${confBadge}${dynBadge}</div>
     ${actions}
     ${outgoing.length ? `<div class="ins-section">imports (${outCount})</div>
       ${outgoing.map((e) => rowHTML(e, 'out')).join('')}` : ''}
@@ -5494,6 +5539,53 @@ document.getElementById('legacyBtn')?.addEventListener('click', () => {
 })
 document.getElementById('closeLegacy')?.addEventListener('click', closeLegacy)
 
+// ─── Codebase tour panel — guided list of entry points + hubs ──
+// Surfaces the /tour killer feature (entry points + top hubs with hints).
+// The bridge (getTour) existed but had no UI entry point. Clicking a stop
+// flies the camera to that node and selects it.
+const tourPanel  = document.getElementById('tour')
+const tourListEl = document.getElementById('tourList')
+async function openTour() {
+  if (!isElectron) return toast(t('changes.requires_electron'))
+  tourPanel.classList.remove('hidden')
+  inspector.classList.add('hidden')
+  await refreshTour()
+}
+function closeTour() { tourPanel.classList.add('hidden') }
+async function refreshTour() {
+  try {
+    tourListEl.innerHTML = `<div class="changes-empty">${t('tour.loading')}</div>`
+    const data = await window.codesynapt.getTour()
+    const stops = (data && data.stops) || []
+    if (!stops.length) {
+      tourListEl.innerHTML = `<div class="changes-empty">${t('tour.empty')}</div>`
+      return
+    }
+    tourListEl.innerHTML = stops.map((s, i) => `
+      <div class="change-row tour-row" data-id="${escapeAttr(s.id)}">
+        <span class="change-stamp">${i + 1} · ${escapeHTML(s.kind || '')}</span>
+        <span class="change-id" title="${escapeAttr(s.id)}">${escapeHTML(s.id)}</span>
+        <span class="change-meta">${escapeHTML(s.hint || '')}</span>
+      </div>`).join('')
+    tourListEl.querySelectorAll('.tour-row').forEach((el) => {
+      el.addEventListener('click', () => {
+        const id = el.dataset.id
+        const node = state.nodes.get(id)
+        if (!node) return toast('File not in graph: ' + id)
+        cam.targetGoal.copy(node.p)
+        selectNode(id)
+      })
+    })
+  } catch (e) {
+    tourListEl.innerHTML = `<div class="changes-empty">error: ${escapeHTML(e.message)}</div>`
+  }
+}
+document.getElementById('tourBtn')?.addEventListener('click', () => {
+  if (tourPanel.classList.contains('hidden')) openTour()
+  else closeTour()
+})
+document.getElementById('closeTour')?.addEventListener('click', closeTour)
+
 // ─── Project switcher (★ pinned + recent) ────────────────────
 const pswPanel       = document.getElementById('projectSwitcher')
 const pswPinnedList  = document.getElementById('pswPinnedList')
@@ -6102,9 +6194,23 @@ window.addEventListener('drop', async (e) => {
 // ═══════════════════════════════════════════════════════════════
 const scanToast = document.getElementById('scanToast')
 const scanCount = document.getElementById('scanCount')
+const scanLabel = scanToast?.querySelector('.scan-label')
+const scanLabelDefault = scanLabel?.innerHTML
 let scanHideTimer = null
-function handleScanProgress({ count, done }) {
-  scanCount.textContent = count.toLocaleString()
+function handleScanProgress({ count, done, phase }) {
+  if (scanLabel && phase === 'building' && !done) {
+    // Walk finished; heavy edge-resolution runs silently for tens of
+    // seconds — show a label so the frozen count doesn't look hung.
+    scanLabel.textContent = t('scan.building')
+  } else {
+    if (scanLabel && scanLabelDefault != null && scanLabel.innerHTML !== scanLabelDefault) {
+      // Restore the normal "Scanning… N files" composition (re-creates #scanCount).
+      scanLabel.innerHTML = scanLabelDefault
+    }
+    // Re-resolve in case the label was just restored, swapping the count node.
+    const countEl = document.getElementById('scanCount') || scanCount
+    countEl.textContent = count.toLocaleString()
+  }
   scanToast.classList.remove('hidden')
   if (scanHideTimer) clearTimeout(scanHideTimer)
   if (done) {
@@ -6934,7 +7040,7 @@ async function buildSymbolGraph() {
       const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
       const len = off.length() || 1
       off.multiplyScalar((1.8 + Math.random() * 3.4) / len)
-      state.symbols.set(s.id, { id: s.id, file: s.file, name: s.name, kind: s.kind, off, p: new THREE.Vector3(), shown: false })
+      state.symbols.set(s.id, { id: s.id, file: s.file, name: s.name, kind: s.kind, line: s.line, off, p: new THREE.Vector3(), shown: false })
     }
     state.symbolCalls = j.calls || []
     // Adjacency for hover focus (so hovering a function can highlight only

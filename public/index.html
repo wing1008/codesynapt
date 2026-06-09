@@ -85,6 +85,9 @@
     <button id="legacyBtn" class="more-item" data-i18n-title="search.legacy.title">
       <span class="more-icon">🧹</span><span class="more-label" data-i18n="more.legacy">Legacy audit</span>
     </button>
+    <button id="tourBtn" class="more-item" data-i18n-title="search.tour.title">
+      <span class="more-icon">🧭</span><span class="more-label" data-i18n="more.tour">Tour</span>
+    </button>
     <button id="langToggle" class="more-item" data-i18n-title="lang.toggle.title">
       <span class="more-icon" id="langCurrent">A文</span><span class="more-label" data-i18n="more.lang">Language</span>
     </button>
@@ -113,6 +116,15 @@
       <button id="closeChanges">✕</button>
     </div>
     <div id="changesList" class="changes-list"></div>
+  </aside>
+
+  <!-- Codebase tour panel — guided list of entry points + hubs -->
+  <aside id="tour" class="hidden">
+    <div class="changes-head">
+      <div class="kicker" data-i18n="kicker.tour">guided tour · entry &amp; hubs</div>
+      <button id="closeTour">✕</button>
+    </div>
+    <div id="tourList" class="changes-list"></div>
   </aside>
 
 

@@ -204,6 +204,12 @@ export class Scanner extends EventEmitter {
     // Used by /search to refuse work while the event loop is still saturated
     // by add events — returning 503 instead of hanging.
     this.initialScanComplete = false
+    // Coarse scan lifecycle for progress UIs / readiness gating:
+    //   'scanning' → initial file walk in flight
+    //   'building' → walk done, draining parse queue + resolving edges (the
+    //                heavy ~tens-of-seconds phase on big trees, no add events)
+    //   'ready'    → edges built, graph queryable
+    this.scanPhase = 'scanning'
     this.gitignoreRules = loadGitignoreRules(root)
     this.fg3dIgnoreRules = loadFg3dIgnoreRules(root)
     this.envFiles = []  // [{ id, keys: [...] }] — populated on first ready
@@ -373,6 +379,11 @@ export class Scanner extends EventEmitter {
       .on('unlink', (p) => this.handleRemove(p))
       .on('ready', async () => {
         initial = false
+        // Walk finished, but the heavy work (queue drain + edge resolution)
+        // is still ahead and emits no 'add' events — surface a 'building'
+        // phase so progress UIs don't look frozen at the final file count.
+        this.scanPhase = 'building'
+        this.emit('scan-progress', { count: scanCount, done: false, phase: 'building' })
         // Finish draining the cooperative parse queue before resolving edges.
         if (this._initialDrain) { try { await this._initialDrain } catch {} }
         while (this._initialQueue && this._initialQueue.length) {
@@ -384,12 +395,15 @@ export class Scanner extends EventEmitter {
           try { const f = this.parseOne(p); if (f) this.files.set(f.id, f) }
           catch (e) { process.stderr.write(`[scanner] parse ${p}: ${e && e.message}\n`) }
         }
-        this.initialScanComplete = true
-        this.emit('scan-progress', { count: scanCount, done: true })
         this.scanEnvFiles()
         this.scanVendorCandidates()
         this.rebuildEdges()
+        // Mark ready only now that edges exist — initialScanComplete is the
+        // signal external callers (cs ensure, /search) gate on.
+        this.initialScanComplete = true
+        this.scanPhase = 'ready'
         this.emitSnapshot()
+        this.emit('scan-progress', { count: scanCount, done: true, phase: 'ready' })
         this.emit('stats', { initialScanComplete: true, fileCount: this.files.size })
       })
       .on('error', (e) => console.error('watcher error:', e.message))

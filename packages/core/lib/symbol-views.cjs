@@ -100,7 +100,10 @@ function symbolGraphPayload(g, limit = 12000) {
   const calls = []; const maxCalls = limit * 3
   for (const e of g.edges) {
     if (e.kind !== 'call') continue
-    if (ids.has(e.source) && ids.has(e.target)) calls.push({ s: e.source, t: e.target })
+    // Carry `via` (sub-engine provenance, e.g. 'ts') so the UI can distinguish
+    // type-checker-resolved edges from heuristic ones. Undefined for plain
+    // AST-resolved calls — JSON drops it, so the payload stays compact.
+    if (ids.has(e.source) && ids.has(e.target)) calls.push({ s: e.source, t: e.target, via: e.via })
     if (calls.length >= maxCalls) break
   }
   return { symbols, calls, truncated: g.nodes.size > symbols.length, total: { symbols: g.nodes.size, calls: g.edges.filter((e) => e.kind === 'call').length } }

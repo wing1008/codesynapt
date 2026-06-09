@@ -413,17 +413,26 @@ function createControlServer(opts) {
       if (conf[c] != null) conf[c]++
       else conf.high++
     }
+    // Split code-structure edges from asset edges (HTML→image/script/style),
+    // matching the desktop /summary + /health so a docs/asset-heavy repo can't
+    // inflate the reported code-graph size — both backends now report the same.
+    let codeEdges = 0, assetEdges = 0
+    for (const e of scanner.edges) {
+      if (e.kind === 'asset' || e.k === 'asset') assetEdges++
+      else codeEdges++
+    }
     return {
       root: getCurrentRoot(),
       fileCount: files.length,
-      edgeCount: scanner.edges.length,
+      edgeCount: codeEdges,
+      assetEdgeCount: assetEdges,
       extMix, topFolders, topHubs,
       orphanCount,
       dynamicPatternFileCount: dynamicCount,
       confidence: conf,
       externalDomainCount: ext.domains.length,
       externalDomainsTop: ext.domains.slice(0, 5).map((d) => d.domain),
-      historyEnabled: false,  // headless daemon does not write history
+      historyEnabled: _historyEnabled,  // opt-in via CS_HISTORY=1 (default off, like desktop)
     }
   }
   function buildSummaryCached() {
@@ -474,6 +483,10 @@ function createControlServer(opts) {
   // The headless server records the SAME trace .jsonl + session-change log the
   // desktop does, so an AI on the MCP/`cs serve` path is no longer silent.
   const _trace = new traceStore.TraceStore({ getCurrentRoot, scanner })
+  // Navigation endpoints that should record an AI-exploration trace, mirroring
+  // the desktop's blanket traceId() (electron/main.cjs). blast + write already
+  // record their own trace, so they're excluded here to avoid double-counting.
+  const _NAV_TRACED = { GET: new Set(['node', 'file', 'deps', 'users', 'package']), POST: new Set(['focus', 'open']) }
   const _changes = new changesViews.SessionChangeLog()
   let _timelineCache = { root: null, data: null, building: false }
   // Read a symbol's source lines, root-scoped — injected into the explore view.
@@ -492,6 +505,52 @@ function createControlServer(opts) {
   function recordWrite(id, content) {
     try { _trace.emit('write', id) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite trace.emit:', e && e.message) }
     try { _changes.track(id, content) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite changes.track:', e && e.message) }
+    try { snapshotHistory(getCurrentRoot(), id, content) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite snapshotHistory:', e && e.message) }
+  }
+
+  // ─── File history (version snapshots) — parity with the desktop. Same on-disk
+  // format (<root>/.codesynapt/history/<safe-id>/<ts>.snap) so a project opened
+  // in both the app and `cs serve` shares one history. Writing snapshots is
+  // opt-in (CS_HISTORY=1), matching the desktop's default-OFF setting; the read
+  // endpoint (/history) always works.
+  const _historyEnabled = process.env.CS_HISTORY === '1'
+  const HISTORY_MAX_PER_FILE = 3
+  function historyDirFor(root, id) {
+    const safe = id.replace(/[\\/:]/g, '__').replace(/[^A-Za-z0-9._-]/g, '_')
+    return path.join(root, '.codesynapt', 'history', safe)
+  }
+  function snapshotHistory(root, id, content) {
+    if (!_historyEnabled || !root || !id) return
+    try {
+      const dir = historyDirFor(root, id)
+      fs.mkdirSync(dir, { recursive: true })
+      const snaps = () => fs.readdirSync(dir).filter((f) => f.endsWith('.snap'))
+        .map((f) => ({ name: f, ts: parseInt(f, 10) })).filter((f) => !isNaN(f.ts))
+        .sort((a, b) => b.ts - a.ts)
+      const newest = snaps()[0]
+      if (newest) { try { if (fs.readFileSync(path.join(dir, newest.name), 'utf8') === content) return } catch {} }
+      fs.writeFileSync(path.join(dir, `${Date.now()}.snap`), content, 'utf8')
+      for (const f of snaps().slice(HISTORY_MAX_PER_FILE)) { try { fs.unlinkSync(path.join(dir, f.name)) } catch {} }
+    } catch {}
+  }
+  function listHistory(root, id) {
+    if (!root || !id) return []
+    try {
+      const dir = historyDirFor(root, id)
+      if (!fs.existsSync(dir)) return []
+      return fs.readdirSync(dir).filter((f) => f.endsWith('.snap'))
+        .map((f) => { const ts = parseInt(f, 10); if (isNaN(ts)) return null
+          try { return { ts, size: fs.statSync(path.join(dir, f)).size } } catch { return null } })
+        .filter(Boolean).sort((a, b) => b.ts - a.ts)
+    } catch { return [] }
+  }
+  function readHistorySnap(root, id, ts) {
+    if (!root || !id || !ts) return null
+    try {
+      const file = path.join(historyDirFor(root, id), `${ts}.snap`)
+      if (!fs.existsSync(file)) return null
+      return fs.readFileSync(file, 'utf8')
+    } catch { return null }
   }
 
   // ── Blast radius ──────────────────────────────────────────────
@@ -1507,6 +1566,12 @@ function createControlServer(opts) {
     const idFromRest = () => safeDecode(rest.join('/'))
 
     try {
+      // Blanket AI-exploration trace (data only — the desktop also pulses the
+      // 3D view; there's no window here). Keeps `cs serve` / MCP trace coverage
+      // identical to the desktop instead of recording only blast + writes.
+      if (rest.length > 0 && _NAV_TRACED[req.method] && _NAV_TRACED[req.method].has(seg0)) {
+        try { _trace.emit(seg0, idFromRest()) } catch (e) { if (process.env.CS_DBG) console.error('[cs] nav trace:', e && e.message) }
+      }
       if (req.method === 'GET' && parts.length === 0) {
         return writeJson(res, 200, {
           name: 'codesynapt',
@@ -1538,6 +1603,8 @@ function createControlServer(opts) {
           root: getCurrentRoot(),
           fileCount: scanner.files.size,
           edgeCount: scanner.edges.length,
+          initialScanComplete: scanner.initialScanComplete === true,
+          scanPhase: scanner.scanPhase || (scanner.initialScanComplete ? 'ready' : 'scanning'),
         })
       }
       if (req.method === 'GET' && seg0 === 'summary') {
@@ -2069,6 +2136,50 @@ function createControlServer(opts) {
           return writeJson(res, 200, withMeta({ ...r, id, replacements: replaceAll ? count : 1 }))
         })
         return
+      }
+      if (req.method === 'GET' && seg0 === 'history' && rest.length > 0) {
+        // Bare array, matching the desktop /history shape (MCP cs_change:history).
+        return writeJson(res, 200, listHistory(getCurrentRoot(), idFromRest()))
+      }
+      if (req.method === 'POST' && seg0 === 'refresh' && rest.length > 0) {
+        const id = idFromRest()
+        const root = getCurrentRoot()
+        const absPath = path.join(root, id)
+        if (!isInsideRoot(root, absPath)) return writeJson(res, 400, { error: 'outside root' })
+        try {
+          if (!fs.existsSync(absPath)) {
+            if (scanner.files.delete(id)) { scanner.rebuildEdges(); scanner.emitSnapshot() }
+            return writeJson(res, 200, withMeta({ ok: true, action: 'removed', id }))
+          }
+          const file = scanner.parseOne(absPath)
+          if (!file) return writeJson(res, 500, { error: 'parse failed' })
+          scanner.files.set(file.id, file)
+          scanner.rebuildEdges()
+          scanner.emitSnapshot()
+          return writeJson(res, 200, withMeta({ ok: true, action: 'refreshed', id }))
+        } catch (e) { return writeJson(res, 500, { error: e.message }) }
+      }
+      if (req.method === 'POST' && seg0 === 'restore' && rest.length > 0) {
+        // Mutating — gate behind the same auth as /write (desktop is trusted-local
+        // so it doesn't, but a headless daemon must).
+        const auth = String(req.headers['authorization'] || '')
+        if (!authToken) return writeJson(res, 403, { error: 'restore disabled: start the server with CS_AUTH_TOKEN to enable writes' })
+        if (!auth.startsWith('Bearer ') || auth.slice(7) !== authToken) {
+          return writeJson(res, 401, { error: 'restore requires Authorization: Bearer <token>' })
+        }
+        const id = idFromRest()
+        const root = getCurrentRoot()
+        const full = path.join(root, id)
+        if (!isInsideRoot(root, full)) return writeJson(res, 400, { error: 'outside root' })
+        const ts = parseInt(url.searchParams.get('ts') || '0', 10)
+        if (!ts) return writeJson(res, 400, { error: 'missing ts (POST /restore/:id?ts=<snapshot-ts>)' })
+        const content = readHistorySnap(root, id, ts)
+        if (content === null) return writeJson(res, 404, { error: 'snapshot not found' })
+        try {
+          fs.writeFileSync(full, content, 'utf8')
+          recordWrite(id, content)
+          return writeJson(res, 200, { ok: true, id, ts })
+        } catch (e) { return writeJson(res, 500, { error: e.message }) }
       }
       return writeJson(res, 404, { error: 'unknown endpoint', path: url.pathname })
     } catch (e) {

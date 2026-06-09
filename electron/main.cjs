@@ -1,6 +1,14 @@
 // Electron main process — desktop app shell for CodeSynapt
 const { app, BrowserWindow, ipcMain, dialog, Menu, shell, protocol, net } = require('electron')
 
+// [GPU] Force ANGLE onto the D3D11 backend. On some newer NVIDIA cards/drivers
+// (observed: RTX 50-series, driver 32.x) the bundled ANGLE falls back to the
+// ancient Direct3D9Ex path and then fails outright ("BindToCurrentSequence
+// failed" → "A WebGL context could not be created"), so the 3D scene + view
+// cube never render. Pinning d3d11 (which every D3D11-class GPU supports)
+// avoids the broken d3d9 fallback. Must be set before app is ready.
+try { app.commandLine.appendSwitch('use-angle', 'd3d11') } catch {}
+
 // Renderer loads over a custom app:// scheme (standard + secure) instead of
 // file://. `<script type="module">` + importmap are blocked under file:// by
 // CORS (origin 'null'), so app.js never loads in the packaged app. Registering
@@ -859,6 +867,21 @@ function getGraphState() {
   if (!scanner) return null
   return { root: currentRoot, ...scanner.snapshot() }
 }
+// SHA-256 of a file's bytes, cached on the file object (O(1) on repeat).
+// Mirrors the headless control-server so an AI can compare its own Read
+// hash against this for freshness — previously desktop-only callers had no
+// such hash, so freshness verification silently failed against the app.
+function fileContentHash(f) {
+  if (!f || !f.absPath) return null
+  if (f._cachedHash && f._cachedHashAt === f.lastSeenAt) return f._cachedHash
+  try {
+    const buf = fs.readFileSync(f.absPath)
+    const h = require('crypto').createHash('sha256').update(buf).digest('hex')
+    f._cachedHash = h
+    f._cachedHashAt = f.lastSeenAt
+    return h
+  } catch { return null }
+}
 function findNode(id) {
   if (!scanner) return null
   const f = scanner.files.get(id)
@@ -870,6 +893,7 @@ function findNode(id) {
     dynamicPatterns: f.dynamicPatterns || [],
     confidence: f.confidence || 'high',
     pkg: f.pkg || null,
+    contentHash: fileContentHash(f),
     lastSeenAt: f.lastSeenAt,
   }
 }
@@ -1482,6 +1506,11 @@ async function handleControlRequest(req, res) {
         edgeCount: codeEdges,
         assetEdgeCount: assetEdges,
         historyEnabled,
+        // Scan-completion signals so `cs ensure` (and any MCP caller) can tell a
+        // half-built graph from a finished one. Mirrors the headless
+        // control-server /health. scanPhase: 'scanning' | 'building' | 'ready'.
+        initialScanComplete: scanner ? scanner.initialScanComplete === true : false,
+        scanPhase: scanner ? (scanner.scanPhase || (scanner.initialScanComplete ? 'ready' : 'scanning')) : 'scanning',
       })
     }
 
@@ -1987,8 +2016,14 @@ async function handleControlRequest(req, res) {
         const stat = fs.statSync(full)
         if (!stat.isFile()) return writeJson(res, 404, { error: 'not a file' })
         if (stat.size > 2_000_000) return writeJson(res, 413, { error: 'file too large', size: stat.size })
-        return writeJson(res, 200, { id, content: fs.readFileSync(full, 'utf8') })
-      } catch (e) { return writeJson(res, 500, { error: e.message }) }
+        const buf = fs.readFileSync(full)
+        // contentHash + size for AI freshness checks — parity with headless /file.
+        const contentHash = require('crypto').createHash('sha256').update(buf).digest('hex')
+        return writeJson(res, 200, { id, content: buf.toString('utf8'), contentHash, size: stat.size })
+      } catch (e) {
+        if (e.code === 'ENOENT') return writeJson(res, 404, { error: 'not found', id })
+        return writeJson(res, 500, { error: e.message })
+      }
     }
     if (req.method === 'GET' && seg0 === 'deps' && rest.length > 0) {
       return writeJson(res, 200, getDeps(traceId()))

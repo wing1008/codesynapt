@@ -1048,7 +1048,7 @@ body.no-folder #legend { display: none; }
 .tl-meta { font-family: var(--font-mono); font-size: 10px; color: var(--fg-mute); }
 
 /* ─── AI changes panel (sits in canvas grid, like inspector) ──── */
-#changes {
+#changes, #tour {
   grid-area: can;
   align-self: stretch;
   justify-self: stretch;
@@ -1063,7 +1063,14 @@ body.no-folder #legend { display: none; }
   overflow: hidden;
   box-shadow: 0 0 0 1px rgba(0,0,0,0.4), 0 16px 48px rgba(0,0,0,0.5);
 }
-#changes.hidden { display: none; }
+#changes.hidden, #tour.hidden { display: none; }
+/* Tour and AI-work panels are navigation aids: dock them as a narrow left
+   card (not full-width) so the 3D graph stays visible while you click rows
+   and watch the camera fly to each node. */
+#changes, #tour {
+  justify-self: start;
+  width: min(340px, 40%);
+}
 .changes-head {
   display: flex; justify-content: space-between; align-items: center;
   padding: 12px 16px;
