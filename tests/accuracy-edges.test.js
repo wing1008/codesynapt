@@ -87,6 +87,42 @@ describe('parser — package.json subpath exports (Layer-1)', () => {
   })
 })
 
+// ───────────────────────────────────────────────────────────────────
+// Layer-2 — a function used ONLY as a callback (`arr.map(fn)`) has zero
+// confirmed CALL edges, so callers is empty. The `ref` edge still records
+// the usage; surface it as refCallersOf / referencedBy so the symbol is
+// not misread as dead code. The confident call graph stays unchanged.
+// ───────────────────────────────────────────────────────────────────
+describe('symbol graph — callback (ref) usage is not false-dead (Layer-2)', () => {
+  it('a callback-only function has 0 callers but is referencedBy its user', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-cb-'))
+    fs.mkdirSync(path.join(root, 'src'))
+    fs.writeFileSync(path.join(root, 'src/cb.ts'),
+      'function onlyCallback(x) { return x * 2 }\n' +
+      'function direct(x) { return x + 1 }\n' +
+      'function user() { return [1, 2].map(onlyCallback).concat(direct(3)) }\n' +
+      'export { user }\n')
+
+    const s = new Scanner(root)
+    await new Promise((resolve) => { s.once('snapshot', resolve); s.start() })
+    const g = await s.getSymbolGraph()
+    try { s.stop() } catch {}
+
+    const idOf = (q) => { for (const [id, n] of g.nodes) if ((n.qualifiedName || n.name) === q) return id; return null }
+    const cb = idOf('onlyCallback'); const dr = idOf('direct')
+    expect(cb).toBeTruthy(); expect(dr).toBeTruthy()
+
+    // callback-only: no confirmed callers, but referenced (used) — not dead.
+    expect(g.callersOf(cb).length).toBe(0)
+    expect(g.refCallersOf(cb).map((n) => n.qualifiedName || n.name)).toContain('user')
+    // directly-called: confirmed caller, no spurious ref — call graph unchanged.
+    expect(g.callersOf(dr).map((n) => n.qualifiedName || n.name)).toContain('user')
+    expect(g.refCallersOf(dr).length).toBe(0)
+
+    try { fs.rmSync(root, { recursive: true, force: true }) } catch {}
+  })
+})
+
 describe('scanner — spawned scripts are NOT orphans (end-to-end)', () => {
   let root
   beforeAll(() => {

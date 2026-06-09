@@ -108,6 +108,12 @@ class SymbolGraph {
     // "could be one of these" set is queried on demand via candidate*Of().
     this.candOut = new Map()    // symbolId → Set<candidateCalleeId>
     this.candIn  = new Map()    // symbolId → Set<candidateCallerId>
+    // Reference adjacency (kind === 'ref'): a symbol passed as a VALUE — a
+    // callback (`arr.map(fn)`), an assignment, an argument — not directly
+    // invoked. Kept OUT of the call graph (callers/blast/reachability stay
+    // precise) but indexed so a callback-ONLY function isn't misread as
+    // "0 callers / dead code". Surfaced via refCallersOf().
+    this.refIn = new Map()      // symbolId → Set<referencingSymbolId>
     this.extendsOut = new Map() // classId → Set<baseId>      (extends/implements)
     // Dedup guard for the raw edge log: (source␞target␞kind) seen-set so a
     // symbol called from two sites (foo() on line 5 AND line 9) yields ONE
@@ -154,6 +160,7 @@ class SymbolGraph {
     this.inAdj.clear()
     this.callOut.clear()
     this.callIn.clear()
+    this.refIn.clear()
     this.candOut.clear()
     this.candIn.clear()
     this._edgeKeys.clear()
@@ -549,6 +556,16 @@ class SymbolGraph {
       this.candIn.get(target).add(source)
       return true
     }
+    // Reference adjacency (value-use / callback) — indexed but deliberately NOT
+    // part of the call graph, so it surfaces usage without inflating callers /
+    // blast / reachability. Both endpoints must be real nodes.
+    if (kind === 'ref') {
+      if (this.nodes.has(source) && this.nodes.has(target)) {
+        if (!this.refIn.has(target)) this.refIn.set(target, new Set())
+        this.refIn.get(target).add(source)
+      }
+      return true
+    }
     if (kind !== 'call') return true
     if (!this.nodes.has(source) || !this.nodes.has(target)) return true
     // inAdj/outAdj back callersOf()/calleesOf() (call graph only, per above).
@@ -678,6 +695,14 @@ class SymbolGraph {
   }
   candidateCallersOf(id) {
     const set = this.candIn.get(id)
+    if (!set) return []
+    return [...set].map((sid) => this.nodes.get(sid)).filter(Boolean)
+  }
+  // Symbols that REFERENCE this one as a value (callback / passed-as-arg /
+  // assigned) without directly invoking it. Lets a caller surface "used, just
+  // not called here" so a callback-only symbol isn't read as dead. (kind 'ref')
+  refCallersOf(id) {
+    const set = this.refIn.get(id)
     if (!set) return []
     return [...set].map((sid) => this.nodes.get(sid)).filter(Boolean)
   }
