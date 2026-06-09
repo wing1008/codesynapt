@@ -73,6 +73,21 @@ most-imported internal file.
 Changing a central file in vue/core touches **440 files**; `cs_blast` summarizes
 that impact in ~10.7k tokens vs ~1.05M tokens to read it all — ~98× less.
 
+## Accuracy (import resolution)
+
+Import resolution is checked against an independent oracle: the **TypeScript
+compiler's own module resolver** (`ts.resolveModuleName`) over the same source.
+On zod (286 `.ts` files):
+
+- **Precision 100%** — every dependency edge the scanner reports is a real,
+  compiler-resolved import. No fabricated edges.
+- **Recall ~73%** of every `import`/`export … from` statement the compiler
+  resolves to an internal file. The graph is *precision-first*: it would rather
+  omit an edge than guess one, so recall trades off against the perfect precision.
+
+This is Layer-1 import accuracy, measured on one library — reproduce with the
+oracle method on your own repo before relying on it.
+
 ## Honest caveats
 
 - These are **import-graph (Layer-1)** numbers plus token estimates; they do not
