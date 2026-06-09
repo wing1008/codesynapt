@@ -2305,6 +2305,7 @@ function resolveTsconfigPath(spec, rootAbs, validIds) {
       if (spec === prefix || spec.startsWith(prefix + '/')) {
         const rest = spec === prefix ? '' : spec.slice(prefix.length + 1)
         for (const tgt of targets) {
+          if (typeof tgt !== 'string') continue   // malformed tsconfig paths value — skip, don't crash
           const tgtRel = tgt.endsWith('/*') ? tgt.slice(0, -2) : tgt
           const cand = rest
             ? path.join(baseDir, tgtRel, rest)
@@ -2315,6 +2316,7 @@ function resolveTsconfigPath(spec, rootAbs, validIds) {
       }
     } else if (spec === pattern) {
       for (const tgt of targets) {
+        if (typeof tgt !== 'string') continue   // malformed tsconfig paths value — skip
         const cand = path.join(baseDir, tgt)
         const r = tryResolve(cand, rootAbs, validIds)
         if (r) return r
