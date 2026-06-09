@@ -250,6 +250,10 @@ async function apiReq(method, pathStr, query, body) {
     // The in-process backend we auto-start reads the same env var, so without
     // this header every cs_* tool 401s the moment a user sets the token to
     // enable edits. (SEC-002)
+    // [③/3b] Tag every backend request with this MCP's session id so a shared
+    // per-project daemon attributes traces to this session (isolated per-session
+    // view; the graph stays shared). Harmless against backends that ignore it.
+    headers['X-CS-Session'] = SESSION_ID
     if (process.env.CS_AUTH_TOKEN) headers['Authorization'] = `Bearer ${process.env.CS_AUTH_TOKEN}`
     let payload = null
     if (body !== undefined && body !== null) {

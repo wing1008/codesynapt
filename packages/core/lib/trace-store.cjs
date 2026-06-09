@@ -182,11 +182,13 @@ class TraceStore {
   // Append one event. Mirrors desktop emitTrace EXACTLY (same field order /
   // meta-merge semantics). `meta` overrides the auto file-trust meta when the
   // caller has richer data (e.g. blast impact stats).
-  emit(tool, id, meta) {
+  emit(tool, id, meta, extra) {
     if (!id) return
     this._ensureSession()
     const ts = Date.now()
-    const ev = { tool, id, ts, ...(meta || this._metaFor(id) || {}) }
+    // `extra` is always merged (e.g. { csSession } for per-session attribution),
+    // unlike `meta` which replaces the auto _metaFor() when provided.
+    const ev = { tool, id, ts, ...(meta || this._metaFor(id) || {}), ...(extra || {}) }
     this.log.push(ev)
     if (this.log.length > TRACE_MEM_CAP) this.log.splice(0, this.log.length - TRACE_MEM_CAP)
     if (this.writeStream) {

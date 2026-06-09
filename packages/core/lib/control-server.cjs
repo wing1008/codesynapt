@@ -507,8 +507,8 @@ function createControlServer(opts) {
   // Record a successful write/edit into BOTH the trace log and the session
   // change log (mirrors desktop writeFileToRoot → emitTrace('write') +
   // trackChange). `content` is the post-write content.
-  function recordWrite(id, content) {
-    try { _trace.emit('write', id) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite trace.emit:', e && e.message) }
+  function recordWrite(id, content, csSession) {
+    try { _trace.emit('write', id, null, { csSession }) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite trace.emit:', e && e.message) }
     try { _changes.track(id, content) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite changes.track:', e && e.message) }
     try { snapshotHistory(getCurrentRoot(), id, content) } catch (e) { if (process.env.CS_DBG) console.error('[cs] recordWrite snapshotHistory:', e && e.message) }
   }
@@ -1574,8 +1574,13 @@ function createControlServer(opts) {
       // Blanket AI-exploration trace (data only — the desktop also pulses the
       // 3D view; there's no window here). Keeps `cs serve` / MCP trace coverage
       // identical to the desktop instead of recording only blast + writes.
+      // [③/3b] Per-session attribution: the MCP tags every request with its
+      // session id (X-CS-Session). Traces carry it so a shared per-project
+      // daemon can serve each session ONLY its own trace view (the graph stays
+      // shared). null for legacy/untagged callers → visible to everyone.
+      const csSession = req.headers['x-cs-session'] || null
       if (rest.length > 0 && _NAV_TRACED[req.method] && _NAV_TRACED[req.method].has(seg0)) {
-        try { _trace.emit(seg0, idFromRest()) } catch (e) { if (process.env.CS_DBG) console.error('[cs] nav trace:', e && e.message) }
+        try { _trace.emit(seg0, idFromRest(), null, { csSession }) } catch (e) { if (process.env.CS_DBG) console.error('[cs] nav trace:', e && e.message) }
       }
       if (req.method === 'GET' && parts.length === 0) {
         return writeJson(res, 200, {
@@ -1628,7 +1633,7 @@ function createControlServer(opts) {
         const traceVersion = _trace.log.length
         const graphVersion = scanner.snapshotVersion || 0
         let traces = traceVersion > sinceTrace ? _trace.log.slice(sinceTrace) : []
-        if (sid) traces = traces.filter((e) => !e.sessionId || e.sessionId === sid)
+        if (sid) traces = traces.filter((e) => !e.csSession || e.csSession === sid)
         return writeJson(res, 200, { epoch, graphVersion, traceVersion, graphChanged: graphVersion > sinceGraph, traces })
       }
       if (req.method === 'GET' && seg0 === 'summary') {
@@ -2054,12 +2059,12 @@ function createControlServer(opts) {
         const depth = Math.max(1, Math.min(10, parseInt(url.searchParams.get('depth') || '3', 10)))
         const dir = url.searchParams.get('dir') === 'deps' ? 'deps' : 'users'
         const r = computeBlastRadius(id, depth, dir)
-        if (!r) { try { _trace.emit('blast', id) } catch {} ; return writeJson(res, 404, { error: 'not found' }) }
+        if (!r) { try { _trace.emit('blast', id, null, { csSession }) } catch {} ; return writeJson(res, 404, { error: 'not found' }) }
         // Trace the blast with impact-level trust meta (parity with desktop:
         // how many impacted files use dynamic patterns → true blast may be larger).
         try {
           const dynHits = r.files.filter((f) => (scanner.files.get(f.id)?.dynamicPatterns || []).length).length
-          _trace.emit('blast', id, { n: r.totalFiles, dyn: dynHits || undefined })
+          _trace.emit('blast', id, { n: r.totalFiles, dyn: dynHits || undefined }, { csSession })
         } catch {}
         // IPC highlight always uses the full file set (desktop UI unaffected).
         if (onBlast) { try { onBlast({ seed: id, ids: r.files.map((f) => f.id) }) } catch {} }
@@ -2130,7 +2135,7 @@ function createControlServer(opts) {
             if (typeof body.content !== 'string') return writeJson(res, 400, { error: 'usage: { "content": "..." }' })
             const r = writeFile(id, body.content)
             if (!r.ok) return writeJson(res, 500, r)
-            recordWrite(id, body.content)
+            recordWrite(id, body.content, csSession)
             return writeJson(res, 200, withMeta({ ...r, id }))
           }
           if (typeof body.find !== 'string' || typeof body.replace !== 'string') {
@@ -2156,7 +2161,7 @@ function createControlServer(opts) {
             : content.replace(findStr, body.replace)
           const r = writeFile(id, next)
           if (!r.ok) return writeJson(res, 500, r)
-          recordWrite(id, next)
+          recordWrite(id, next, csSession)
           return writeJson(res, 200, withMeta({ ...r, id, replacements: replaceAll ? count : 1 }))
         })
         return
@@ -2201,7 +2206,7 @@ function createControlServer(opts) {
         if (content === null) return writeJson(res, 404, { error: 'snapshot not found' })
         try {
           fs.writeFileSync(full, content, 'utf8')
-          recordWrite(id, content)
+          recordWrite(id, content, csSession)
           return writeJson(res, 200, { ok: true, id, ts })
         } catch (e) { return writeJson(res, 500, { error: e.message }) }
       }
