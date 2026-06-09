@@ -98,23 +98,26 @@ describe('parser — package.json subpath exports (Layer-1)', () => {
     mk('packages/lib/package.json', JSON.stringify({
       name: '@acme/lib',
       exports: {
+        '.': { import: { node: './src/index.ts' } },                // NESTED main entry (crashed vue/core)
         './helper': { node: { import: './internal/helper.ts' } },   // NESTED conditions
         './arr': ['./missing.ts', './internal/arrtgt.ts'],          // ARRAY fallback (1st absent)
         './*': './internal/*.ts',                                   // less specific
         './shapes/*': './shapes-internal/*.ts',                     // more specific
       },
     }))
+    mk('packages/lib/src/index.ts', 'export const idx = 1\n')
     mk('packages/lib/internal/helper.ts', 'export const help = 1\n')
     mk('packages/lib/internal/arrtgt.ts', 'export const a = 1\n')
     mk('packages/lib/internal/foo.ts', 'export const f = 1\n')
     mk('packages/lib/internal/shapes/circle.ts', 'export const c1 = 1\n')   // where './*' WOULD map
     mk('packages/lib/shapes-internal/circle.ts', 'export const c2 = 1\n')   // where './shapes/*' maps
     mk('packages/app/src/a.ts',
-      "import { help } from '@acme/lib/helper'\nimport { a } from '@acme/lib/arr'\n"
+      "import { idx } from '@acme/lib'\nimport { help } from '@acme/lib/helper'\nimport { a } from '@acme/lib/arr'\n"
       + "import { f } from '@acme/lib/foo'\nimport { c2 } from '@acme/lib/shapes/circle'\n")
 
     const { snap } = await scanOnce(root)   // must not hang/throw on nested conditions
     const targets = snap.edges.filter((e) => e.s === 'packages/app/src/a.ts').map((e) => e.t)
+    expect(targets).toContain('packages/lib/src/index.ts')                // nested MAIN entry
     expect(targets).toContain('packages/lib/internal/helper.ts')          // nested conditions
     expect(targets).toContain('packages/lib/internal/arrtgt.ts')          // array fallback (2nd)
     expect(targets).toContain('packages/lib/internal/foo.ts')             // './*'

@@ -13,7 +13,7 @@
 
 > **MCP-native code graph for AI agents — see blast radius live.**
 > The dependency map Claude Code / Cursor / any MCP agent should be
-> reading before it edits your code. Live-updating (~300 ms after a
+> reading before it edits your code. Live-updating (~0.4 s after a
 > save), no re-indexing, no cloud. Same scanner ships as MCP server
 > (11 `cs_*` tools: 8 file-level + 3 symbol-level), CLI (`cs`), and a 3D desktop window that
 > pulses every node the AI touches.
@@ -41,7 +41,7 @@ All three share the same scanner: imports across JS/TS, Python, Go, Rust, Java/K
 - **AI-aware response envelope** — every response includes `meta: { scannedAt, tokenEstimate, totalAvailable, truncated }`. The agent budgets tokens before drilling deeper.
 - **Blast radius before edit** — `cs_blast({action:'safety', id})` returns 🟢/🟡/🔴 verdict + reasons in one call; `action:'bundle'` packs the closest neighbours into a token budget so the agent reads the right context first.
 - **Precision-first dependency graph** — import resolution favors precision over recall: an ambiguous edge is declined and surfaced as a *candidate* rather than guessed. JS/TS resolve via the Babel AST (with optional TypeScript-Compiler checks); Python, Ruby, PHP, Swift, Kotlin, Go, Rust, C#, C/C++ via language-native rules. For Go, C# and Swift the *import* edge is module/namespace-level (one import links the importing file to the imported unit). The function-level call graph (Layer 2) is built for ~19 languages (JS/TS, Python, Go, Rust, Java/Kotlin, Swift, C#, PHP, C/C++, Scala, …), but only JS/TS + Python (+ Scala) are validated against an independent oracle — the rest are best-effort and unmeasured. Honest limit: it follows *static imports*, so autoload / DI / reflection-implicit dependencies (Rails/Zeitwerk, Spring) carry no import statement to resolve — those are surfaced as `caveat` markers, not silently dropped. **Blast counts are a floor, not a ceiling.**
-- **Live updates ~300 ms** — chokidar file-watcher + 60 ms snapshot debounce. No re-indexing, no manual refresh, no cloud round-trip. (Most code-intelligence tools require an explicit re-index step — this one doesn't.)
+- **Live updates (~0.4 s after a save)** — chokidar file-watcher + snapshot debounce; a fresh graph lands in ~0.35–0.46 s on real repos ([measured](./docs/benchmarks.md)). No re-indexing, no manual refresh, no cloud round-trip. (Most code-intelligence tools require an explicit re-index step — this one doesn't.)
 - **Live agent visualization** — when the desktop window is open, every MCP call pulses the touched node in 3D. You see the AI navigate.
 - **Full-stack route↔fetch matching** — JS/TS, Python, Next.js file-system API routes auto-detected. Frontend `fetch('/api/billing')` linked to `app/api/billing/route.ts` automatically.
 - **Headless + CI** — `cs scan`, `cs serve`, `cs ci-diff main..HEAD`, `cs ci-gate --max-blast 50`. No Electron required for CI / SSH / Docker.
@@ -295,6 +295,7 @@ For OS-specific installation notes, see **[docs/installation.md](./docs/installa
 | Features and what it does | [docs/features.md](./docs/features.md) |
 | Keyboard / mouse controls | [docs/controls.md](./docs/controls.md) |
 | How the internals work | [docs/architecture.md](./docs/architecture.md) |
+| Speed & token benchmarks (reproducible) | [docs/benchmarks.md](./docs/benchmarks.md) |
 | Building a plugin or theme | [plugin-api/README.md](./plugin-api/README.md) |
 | What changed in each release | [CHANGELOG.md](./CHANGELOG.md) |
 | Reporting a security issue | [SECURITY.md](./SECURITY.md) |

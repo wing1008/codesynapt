@@ -1888,7 +1888,7 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
       const tryAt = (rel) => rel == null ? null : tryResolve(path.join(rootAbs, rel.split('/').join(path.sep)), rootAbs, validIds)
       const pfx = dir ? dir + '/' : ''
       if (spec === best) {
-        const r = tryAt(entry ? pfx + entry.replace(/^\.\//, '') : null) || tryAt(pfx + 'src') || tryAt(dir || '.')
+        const r = tryAt(typeof entry === 'string' ? pfx + entry.replace(/^\.\//, '') : null) || tryAt(pfx + 'src') || tryAt(dir || '.')
         if (r) return r
       } else {
         const sub = spec.slice(best.length + 1)
@@ -2208,14 +2208,18 @@ function loadJsWorkspace(rootAbs, validIds) {
       const dir = pf.includes('/') ? pf.slice(0, pf.lastIndexOf('/')) : ''
       // Source entry: prefer exports['.'] / module / main (these may point at a
       // built dist/, which simply won't resolve → we fall back to src/index).
+      // Use exportsTarget so a NESTED conditions object on `.` (e.g.
+      // {"import":{"node":"./x"}}) resolves to a string instead of leaking an
+      // object that later throws `entry.replace is not a function` (crashed the
+      // scan on real repos like vue/core). exportsTarget always returns string|null.
       let entry = null
       const exp = parsed.exports
       if (typeof exp === 'string') entry = exp
-      else if (exp && typeof exp === 'object') {
-        const dot = exp['.']
-        entry = typeof dot === 'string' ? dot : (dot && (dot.import || dot.default || dot.require || dot.types))
-      }
-      entry = entry || parsed.module || parsed.main || null
+      else if (Array.isArray(exp)) entry = exportsTarget(exp)
+      else if (exp && typeof exp === 'object') entry = exportsTarget(exp['.'])
+      entry = (typeof entry === 'string' ? entry : null)
+        || (typeof parsed.module === 'string' ? parsed.module : null)
+        || (typeof parsed.main === 'string' ? parsed.main : null)
       // Keep the raw `exports` map so a SUBPATH import (`@scope/pkg/helper`)
       // can be resolved through it — a package may remap subpaths to a
       // non-`src/` location that the src/ heuristic in resolveImport can't find.

@@ -1263,10 +1263,12 @@ async function main() {
           const p95 = samples[Math.min(samples.length - 1, Math.floor(samples.length * 0.95))]
           process.stdout.write(`  ${label.padEnd(30)}  ${String(median).padStart(8)}    ${String(p95).padStart(5)}        10\n`)
         }
-        // 3. Live-update SLA (chokidar event → snapshot emit)
-        process.stdout.write(`\n  live-update SLA: ~300 ms (chokidar awaitWriteFinish 200ms + emitSnapshot debounce 60ms)\n`)
+        // 3. Live-update latency — for a MEASURED number (save → snapshot) plus
+        // token benchmarks, run the standalone harness, which actually times the
+        // watcher path instead of asserting the debounce config.
+        process.stdout.write(`\n  live-update: ~0.35–0.46 s on real repos (file saved → new snapshot)\n`)
         process.stdout.write(`  ${'-'.repeat(60)}\n`)
-        process.stdout.write(`  README claim: ~300 ms incremental — verified.\n`)
+        process.stdout.write(`  full speed + token benchmark:  node scripts/benchmark.mjs <repo>\n`)
         break
       }
       case 'vendors': {
