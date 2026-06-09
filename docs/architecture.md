@@ -99,28 +99,29 @@ codesynapt/
 │
 ├── public/                   Renderer (HTML/CSS/JS)
 │   ├── index.html
-│   ├── style.css             ~2,200 lines, 7 themes
-│   ├── app.js                ~3,500 lines, the main renderer
+│   ├── style.css             7 themes (~4.4k lines)
+│   ├── app.js                the main renderer (~7.3k lines)
 │   ├── backend.js            CPU/GPU dispatcher for layout
 │   ├── plugin-host.js        Plugin lifecycle + sandbox
 │   └── vendor/               Three.js (regenerated via postinstall)
 │
-├── parser.js                 Pure-JS file parser (no Electron deps)
-├── scanner.js                Chokidar-based file watcher
-├── server.js                 Browser dev mode (HTTP + WebSocket)
+├── packages/core/            Engine — no Electron deps (shared by CLI + MCP)
+│   ├── parser.js             Pure-JS file parser
+│   ├── scanner.js            Chokidar-based file watcher
+│   ├── bin/                  cs CLI + codesynapt-mcp entrypoints
+│   └── lib/                  control-server, symbol-graph, registry, viewer-client, …
 │
+├── server.js                 Browser dev mode (HTTP + WebSocket)
 ├── plugin-api/               Plugin API package (MIT)
 ├── scripts/                  Build scripts (vendor copy, license check)
 ├── build/                    Build resources (mac entitlements)
 ├── .github/workflows/        CI/CD (multi-OS builds on tag push)
-│
-├── test.js                   Parser smoke test
-└── perf-test.js              Layout benchmark
+└── tests/                    Vitest suite (parser, scanner, control-server, …)
 ```
 
 ## The parser
 
-Located at `parser.js`. **No Electron dependency** so it can be reused
+Located at `packages/core/parser.js`. **No Electron dependency** so it can be reused
 in CLI tools or workers.
 
 ### Languages
@@ -141,20 +142,24 @@ For new languages, write a [parser plugin](../plugin-api/docs/types/exporter.md)
 
 After extracting raw import strings, we resolve them to file IDs:
 
-1. Strip extension from raw path
-2. Try matching against known file IDs
-3. Try common extensions (`.js`, `.ts`, `.jsx`, `.tsx`, etc.)
-4. Try `<path>/index.<ext>`
-5. If no match → keep as "external" reference (visible in inspector,
-   doesn't create a graph edge)
+1. Relative paths → resolve against the importing file's directory, trying
+   common extensions (`.js`, `.ts`, `.jsx`, `.tsx`, …) and `<path>/index.<ext>`
+2. Bare specifiers → resolve through **tsconfig `paths` / `baseUrl`** (and
+   `jsconfig.json`), then monorepo **workspace package names** (`@scope/pkg`),
+   honoring the package's `package.json` **`exports`** map for both the main
+   entry and subpaths (`@scope/pkg/helper`)
+3. Language-native rules for non-JS specifiers (Python dotted modules, Go
+   packages, C# namespaces, PHP PSR-4 via `composer.json`, Dart `package:`, …)
+4. If nothing resolves → kept as an "external" reference (visible in the
+   inspector, no graph edge)
 
-This is intentionally simpler than a full module resolver — we don't
-read `tsconfig.json`, `webpack.config.js`, or `package.json`'s exports
-field. Plugins can override this if you need precision.
+What it intentionally does **not** read: `webpack.config.js` / Vite aliases that
+aren't mirrored in tsconfig, and package `imports` (`#`-specifiers). Resolution
+is precision-first: an ambiguous candidate is declined, not guessed.
 
 ## The scanner
 
-Located at `scanner.js`. Uses [chokidar v3](https://github.com/paulmillr/chokidar)
+Located at `packages/core/scanner.js`. Uses [chokidar v3](https://github.com/paulmillr/chokidar)
 to watch the filesystem.
 
 - Reads `.gitignore` and applies it to file enumeration
