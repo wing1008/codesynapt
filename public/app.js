@@ -7119,6 +7119,11 @@ function leftSetTab(name) {
   })
   let saved = 'files'
   try { saved = localStorage.getItem(LEFT_TAB_KEY) || 'files' } catch {}
+  // Don't restore onto a tab whose button is absent or hidden (e.g. the
+  // CS_REGISTRY-only "sessions" tab when registry mode is now off) — that would
+  // show an empty pane with no active tab. Fall back to the default.
+  const savedBtn = rail.querySelector(`.left-tab[data-tab="${saved}"]`)
+  if (!savedBtn || savedBtn.classList.contains('hidden')) saved = 'files'
   leftSetTab(saved)
 })()
 

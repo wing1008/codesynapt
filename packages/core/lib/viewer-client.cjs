@@ -89,6 +89,11 @@ class ViewerClient {
     this.onStatus = onStatus || (() => {})
     this.pollMs = pollMs
     this.leaseTtl = leaseTtl
+    // Monotonic attachment generation. Bumped on every detach so an in-flight
+    // async poll/bootstrap from a previous attach can detect it is stale (after
+    // an await) and bail without firing callbacks, poisoning the cursor, or
+    // scheduling a duplicate timer. Lives OUTSIDE _reset so it never rewinds.
+    this._gen = 0
     this._reset()
   }
 
@@ -115,9 +120,18 @@ class ViewerClient {
     this.phash = session.projectHash
       || (() => { try { return registry.projectHash(session.projectRoot) } catch { return null } })()
     this.port = session.daemonPort || session.port
-    if (!this.port) throw new Error('attach: no daemon port for session')
-    this._writeLease()
-    await this._bootstrap()
+    // Bootstrap can fail (daemon down / 404). If it does, tear the half-built
+    // attachment down — otherwise the viewer lease is orphaned AND isAttached()
+    // stays true, which (in the desktop) permanently suppresses the local
+    // scanner's snapshots and freezes the canvas. Clean up, then rethrow.
+    try {
+      if (!this.port) throw new Error('attach: no daemon port for session')
+      this._writeLease()
+      await this._bootstrap()
+    } catch (e) {
+      await this.detach()
+      throw e
+    }
     if (this._stopped) return null   // detached during bootstrap
     this._scheduleNext()
     return { epoch: this.epoch, port: this.port, cursor: { ...this.cursor } }
@@ -134,17 +148,19 @@ class ViewerClient {
   // Cold attach = full snapshot fetch (graph is *state*, not a log → no since=0
   // delta). Records (epoch, cursor) for subsequent delta polling.
   async _bootstrap() {
+    const gen = this._gen
+    const stale = () => this._stopped || gen !== this._gen
     const health = await httpJson(this.port, '/health')
-    if (this._stopped) return
+    if (stale()) return
     this.epoch = health.epoch
     this.cursor.graph = health.graphVersion || 0
     this.cursor.trace = health.traceVersion || 0
     const graph = await httpJson(this.port, '/graph')
-    if (this._stopped) return
+    if (stale()) return
     this.onGraph(graph)
     try {
       const sym = await httpJson(this.port, '/symbol/graph')
-      if (this._stopped) return
+      if (stale()) return
       this.onSymbol(sym)
     } catch (e) { /* symbol graph may 404 (no L2 yet) — non-fatal */ }
     this.onStatus({ phase: 'attached', epoch: this.epoch, port: this.port, sessionId: this.session && this.session.sessionId })
@@ -159,6 +175,11 @@ class ViewerClient {
   async _poll() {
     if (this._stopped) return
     if (this._polling) { this._scheduleNext(); return }
+    // Capture the attachment generation. After any await, if a detach/re-attach
+    // bumped it, this poll is stale: bail without firing callbacks, touching the
+    // cursor, or rescheduling (the fresh attach owns the loop now).
+    const gen = this._gen
+    const stale = () => this._stopped || gen !== this._gen
     this._polling = true
     try {
       this._writeLease()   // heartbeat rides the poll (design ③)
@@ -166,7 +187,7 @@ class ViewerClient {
       const q = `/delta?sinceGraph=${this.cursor.graph}&sinceTrace=${this.cursor.trace}`
         + (sid != null ? `&sessionId=${encodeURIComponent(sid)}` : '')
       const d = await httpJson(this.port, q, { sessionId: sid })
-      if (this._stopped) return
+      if (stale()) return
       // epoch mismatch = daemon restarted → cursors are meaningless, re-bootstrap.
       if (d.epoch && this.epoch && d.epoch !== this.epoch) {
         this.onStatus({ phase: 're-bootstrap', reason: 'epoch-changed', epoch: d.epoch })
@@ -184,20 +205,21 @@ class ViewerClient {
       // Graph is shared state: a single bit (graphChanged) → re-fetch the snapshot.
       if (d.graphChanged) {
         const graph = await httpJson(this.port, '/graph')
-        if (this._stopped) return
+        if (stale()) return
         this.onGraph(graph)
         try {
           const sym = await httpJson(this.port, '/symbol/graph')
-          if (this._stopped) return
+          if (stale()) return
           this.onSymbol(sym)
         } catch (e) { /* symbol 404 — non-fatal */ }
         this.cursor.graph = d.graphVersion || this.cursor.graph
       }
     } catch (e) {
-      this.onStatus({ phase: 'error', error: e && e.message })
+      if (!stale()) this.onStatus({ phase: 'error', error: e && e.message })
     } finally {
-      this._polling = false
-      this._scheduleNext()
+      // Only the live generation owns the poll state / reschedules. A stale poll
+      // must not reset _polling or schedule a second timer.
+      if (!stale()) { this._polling = false; this._scheduleNext() }
     }
   }
 
@@ -206,6 +228,7 @@ class ViewerClient {
   async detach() {
     const had = this.session
     this._stopped = true
+    this._gen++          // invalidate any in-flight poll/bootstrap from this attach
     if (this._timer) { clearTimeout(this._timer); this._timer = null }
     if (this.viewerId) {
       try { registry.remove('viewer', this.viewerId) }

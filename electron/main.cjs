@@ -1900,11 +1900,15 @@ async function handleControlRequest(req, res) {
             source = lines.slice(n.startLine - 1, n.endLine).join('\n')
             if (source.length > 4000) source = source.slice(0, 4000) + '\n…'
           } catch {}
+          const refBy = (g.refCallersOf ? g.refCallersOf(params.id) : []).map((c) => symbolViews.symbolNodeView(g, c))
           return writeJson(res, 200, withMeta({
             ...symbolViews.symbolNodeView(g, n),
             source,
             callers: g.callersOf(params.id).map((c) => symbolViews.symbolNodeView(g, c)),
             callees: g.calleesOf(params.id).map((c) => symbolViews.symbolNodeView(g, c)),
+            // Value-use refs (callback/arg/assignment) so a callback-only symbol
+            // with 0 callers isn't read as dead. (mirrors the callers view)
+            referencedBy: refBy.length ? refBy : undefined,
           }))
         }
       }

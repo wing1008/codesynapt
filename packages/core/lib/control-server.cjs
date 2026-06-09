@@ -1750,11 +1750,15 @@ function createControlServer(opts) {
             } catch (e) {
               if (process.env.CS_DBG) console.error('[cs] symbol/node source:', e && e.message)
             }
+            const refBy = (g.refCallersOf ? g.refCallersOf(params.id) : []).map((c) => sv.symbolNodeView(g, c))
             return writeJson(res, 200, withMeta({
               ...sv.symbolNodeView(g, n),
               source,
               callers: g.callersOf(params.id).map((c) => sv.symbolNodeView(g, c)),
               callees: g.calleesOf(params.id).map((c) => sv.symbolNodeView(g, c)),
+              // Value-use references (callback/arg/assignment) — so a callback-only
+              // symbol with 0 callers isn't read as dead. (mirrors the callers view)
+              referencedBy: refBy.length ? refBy : undefined,
             }))
           }
           if (sub === 'explore') {

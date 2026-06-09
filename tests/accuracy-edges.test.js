@@ -85,6 +85,44 @@ describe('parser — package.json subpath exports (Layer-1)', () => {
 
     try { fs.rmSync(root, { recursive: true, force: true }) } catch {}
   })
+
+  // Audit regressions: nested conditions must NOT throw (it once aborted the
+  // whole scan); wildcards must pick the MOST specific; array targets fall back.
+  it('handles nested conditions, most-specific wildcard, and array fallbacks', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-exports2-'))
+    const mk = (p, c) => {
+      fs.mkdirSync(path.dirname(path.join(root, p)), { recursive: true })
+      fs.writeFileSync(path.join(root, p), c)
+    }
+    mk('package.json', JSON.stringify({ name: 'root', private: true, workspaces: ['packages/*'] }))
+    mk('packages/lib/package.json', JSON.stringify({
+      name: '@acme/lib',
+      exports: {
+        './helper': { node: { import: './internal/helper.ts' } },   // NESTED conditions
+        './arr': ['./missing.ts', './internal/arrtgt.ts'],          // ARRAY fallback (1st absent)
+        './*': './internal/*.ts',                                   // less specific
+        './shapes/*': './shapes-internal/*.ts',                     // more specific
+      },
+    }))
+    mk('packages/lib/internal/helper.ts', 'export const help = 1\n')
+    mk('packages/lib/internal/arrtgt.ts', 'export const a = 1\n')
+    mk('packages/lib/internal/foo.ts', 'export const f = 1\n')
+    mk('packages/lib/internal/shapes/circle.ts', 'export const c1 = 1\n')   // where './*' WOULD map
+    mk('packages/lib/shapes-internal/circle.ts', 'export const c2 = 1\n')   // where './shapes/*' maps
+    mk('packages/app/src/a.ts',
+      "import { help } from '@acme/lib/helper'\nimport { a } from '@acme/lib/arr'\n"
+      + "import { f } from '@acme/lib/foo'\nimport { c2 } from '@acme/lib/shapes/circle'\n")
+
+    const { snap } = await scanOnce(root)   // must not hang/throw on nested conditions
+    const targets = snap.edges.filter((e) => e.s === 'packages/app/src/a.ts').map((e) => e.t)
+    expect(targets).toContain('packages/lib/internal/helper.ts')          // nested conditions
+    expect(targets).toContain('packages/lib/internal/arrtgt.ts')          // array fallback (2nd)
+    expect(targets).toContain('packages/lib/internal/foo.ts')             // './*'
+    expect(targets).toContain('packages/lib/shapes-internal/circle.ts')   // most-specific './shapes/*'
+    expect(targets).not.toContain('packages/lib/internal/shapes/circle.ts') // NOT the './*' mapping
+
+    try { fs.rmSync(root, { recursive: true, force: true }) } catch {}
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────

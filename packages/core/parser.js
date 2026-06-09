@@ -1894,8 +1894,11 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
         const sub = spec.slice(best.length + 1)
         // Subpath `exports` first (exact or `*` wildcard) — covers packages that
         // remap a subpath off the src/ mirror; then the src/ heuristic fallback.
-        const mapped = resolveExportsSubpath(ws.get(best).exports, sub)
-        const r = (mapped && tryAt(pfx + mapped)) || tryAt(pfx + 'src/' + sub) || tryAt(pfx + sub)
+        // resolveExportsSubpath returns candidate paths (array fallbacks → many);
+        // try each against the real file set before the heuristic.
+        let r = null
+        for (const m of resolveExportsSubpath(ws.get(best).exports, sub)) { r = tryAt(pfx + m); if (r) break }
+        r = r || tryAt(pfx + 'src/' + sub) || tryAt(pfx + sub)
         if (r) return r
       }
     }
@@ -2223,40 +2226,65 @@ function loadJsWorkspace(rootAbs, validIds) {
   return byName
 }
 
-// Pick a usable file target from a package.json `exports` value, which may be a
-// bare string or a conditions object ({ import, require, default, types, … }).
-// We prefer source-ish conditions; a built `dist/` target simply won't resolve
-// and the caller falls back to its src/ heuristic.
+// Pick a usable string file-target from a package.json `exports` value, which
+// may be a bare string, an ARRAY of fallbacks, or a (possibly NESTED) conditions
+// object ({ import, require, default, node, … } whose values may themselves be
+// condition objects). Recurses into nested conditions and falls through array
+// fallbacks; always returns a string or null (never a bare object — that earlier
+// leaked through and threw `t.replace is not a function`, aborting the scan).
 function exportsTarget(v) {
   if (typeof v === 'string') return v
-  if (v && typeof v === 'object' && !Array.isArray(v)) {
-    return v.import || v.module || v.default || v.require || v.types || v.node || null
+  if (Array.isArray(v)) {
+    for (const e of v) { const t = exportsTarget(e); if (t) return t }
+    return null
+  }
+  if (v && typeof v === 'object') {
+    for (const cond of ['import', 'module', 'default', 'require', 'types', 'node']) {
+      if (cond in v) { const t = exportsTarget(v[cond]); if (t) return t }
+    }
   }
   return null
 }
 
 // Resolve a workspace package SUBPATH (`helper`, `shapes/circle`) through that
 // package's `exports` map. Handles exact subpath keys (`"./helper"`) and a
-// single `*` wildcard (`"./shapes/*": "./internal/shapes/*.ts"`). Returns a path
-// relative to the package dir (no leading `./`), or null if no key matches.
+// single `*` wildcard (`"./shapes/*": "./internal/shapes/*.ts"`). Among matching
+// wildcards, picks the MOST SPECIFIC (longest prefix before `*`, then longest
+// suffix) per Node's resolution rules — NOT the first in insertion order, which
+// could otherwise pick a wrong (less-specific) target. Returns a path relative
+// to the package dir (no leading `./`), or null if no key matches.
 function resolveExportsSubpath(exp, sub) {
-  if (!exp || typeof exp !== 'object' || Array.isArray(exp)) return null
+  if (!exp || typeof exp !== 'object' || Array.isArray(exp)) return []
   const key = './' + sub
+  const rel = (t) => typeof t === 'string' ? t.replace(/^\.\//, '') : null
   if (Object.prototype.hasOwnProperty.call(exp, key)) {
-    const t = exportsTarget(exp[key])
-    return t ? t.replace(/^\.\//, '') : null
+    // Exact key. The value may be a string, a conditions object, or an ARRAY of
+    // fallbacks — return every string candidate so the caller can try each in
+    // order against the real file set.
+    const v = exp[key]
+    const out = []
+    for (const e of (Array.isArray(v) ? v : [v])) { const r = rel(exportsTarget(e)); if (r) out.push(r) }
+    return out
   }
-  for (const [k, v] of Object.entries(exp)) {
+  let best = null   // { pre, post, k } — most-specific wildcard match so far
+  for (const k of Object.keys(exp)) {
     if (!k.startsWith('./') || k.indexOf('*') === -1) continue
     const star = k.indexOf('*')
     const pre = k.slice(0, star), post = k.slice(star + 1)
     if (!key.startsWith(pre) || !key.endsWith(post) || key.length < pre.length + post.length) continue
-    const captured = key.slice(pre.length, key.length - post.length)
-    const tgt = exportsTarget(v)
-    if (!tgt || tgt.indexOf('*') === -1) continue
-    return tgt.replace('*', captured).replace(/^\.\//, '')
+    if (best && (pre.length < best.pre.length
+        || (pre.length === best.pre.length && post.length <= best.post.length))) continue
+    best = { pre, post, k }
   }
-  return null
+  if (!best) return []
+  const captured = key.slice(best.pre.length, key.length - best.post.length)
+  const out = []
+  const v = exp[best.k]
+  for (const e of (Array.isArray(v) ? v : [v])) {
+    const t = exportsTarget(e)
+    if (typeof t === 'string' && t.indexOf('*') !== -1) out.push(t.replace('*', captured).replace(/^\.\//, ''))
+  }
+  return out
 }
 
 // Resolve an import spec via tsconfig path mapping. Returns the

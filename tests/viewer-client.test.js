@@ -186,4 +186,13 @@ describe('viewer-client: attach lifecycle', () => {
     expect(mine.length).toBe(1)
     registry.remove('session', 'sess-B')
   })
+
+  it('cleans up (rejects, not attached, no lease) when bootstrap fails', async () => {
+    vc = makeVC()
+    // Session pointing at a dead port → /health connect refused → bootstrap throws.
+    const dead = { sessionId: 'sess-dead', projectRoot: registry.canonicalRoot(tmpRoot), projectHash: phash, daemonPort: 59991 }
+    await expect(vc.attach(dead)).rejects.toThrow()
+    expect(vc.isAttached()).toBe(false)                  // no zombie attached state
+    expect(registry.readLive('viewer', { ttlMs: 15_000 }).some((v) => v.viewerId === 'view-1')).toBe(false) // no orphan lease
+  })
 })
