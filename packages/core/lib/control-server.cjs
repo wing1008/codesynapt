@@ -171,6 +171,11 @@ function createControlServer(opts) {
     auditLogDir,             // optional absolute path. If set, every request is appended to <dir>/YYYY-MM-DD.jsonl
     requestTimeoutMs,        // optional number (ms). Per-request wall-clock cap; <=0 disables. Default 30000.
   } = opts
+  // [③] Daemon/control-server instance id. Clients store (epoch, cursors) and
+  // re-bootstrap if epoch changes (a restarted daemon resets the cursors).
+  // Cursors reuse existing monotonic counters: graph = scanner.snapshotVersion,
+  // trace = _trace.log.length. No new counter to keep in sync.
+  const epoch = (() => { try { return crypto.randomUUID() } catch { return Date.now() + '-' + Math.random().toString(36).slice(2) } })()
   // Per-request timeout. A long-lived daemon must not let one pathological
   // request (e.g. a giant symbol build) pin the event loop indefinitely.
   const REQUEST_TIMEOUT_MS = Number.isFinite(requestTimeoutMs) ? requestTimeoutMs : 30_000
@@ -1605,7 +1610,26 @@ function createControlServer(opts) {
           edgeCount: scanner.edges.length,
           initialScanComplete: scanner.initialScanComplete === true,
           scanPhase: scanner.scanPhase || (scanner.initialScanComplete ? 'ready' : 'scanning'),
+          // [③] bootstrap cursor: client reads these, fetches /graph + /symbol,
+          // then polls /delta?sinceGraph=&sinceTrace= from here.
+          epoch,
+          graphVersion: scanner.snapshotVersion || 0,
+          traceVersion: _trace.log.length,
         })
+      }
+      // [③] Delta poll. Returns trace events since the trace cursor (filtered to
+      // the caller's sessionId once tagged) and whether the graph changed since
+      // the graph cursor. A stale `epoch` means the daemon restarted → the client
+      // re-bootstraps. The viewer's poll doubles as its heartbeat.
+      if (req.method === 'GET' && seg0 === 'delta') {
+        const sinceTrace = Math.max(0, parseInt(url.searchParams.get('sinceTrace') || '0', 10) || 0)
+        const sinceGraph = Math.max(0, parseInt(url.searchParams.get('sinceGraph') || '0', 10) || 0)
+        const sid = url.searchParams.get('sessionId') || null
+        const traceVersion = _trace.log.length
+        const graphVersion = scanner.snapshotVersion || 0
+        let traces = traceVersion > sinceTrace ? _trace.log.slice(sinceTrace) : []
+        if (sid) traces = traces.filter((e) => !e.sessionId || e.sessionId === sid)
+        return writeJson(res, 200, { epoch, graphVersion, traceVersion, graphChanged: graphVersion > sinceGraph, traces })
       }
       if (req.method === 'GET' && seg0 === 'summary') {
         return writeJson(res, 200, withMeta(buildSummaryCached()))
@@ -2221,7 +2245,7 @@ function createControlServer(opts) {
     })
   }
 
-  return { handleControlRequest, startControlServer, stopControlServer }
+  return { handleControlRequest, startControlServer, stopControlServer, epoch }
 }
 
 module.exports = { createControlServer }

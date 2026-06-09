@@ -359,7 +359,7 @@ async function runHeadlessServe(args) {
 
   let currentRoot = abs
   const scanner = new Scanner(abs)
-  const { startControlServer, stopControlServer } = createControlServer({
+  const { startControlServer, stopControlServer, epoch: csEpoch } = createControlServer({
     scanner,
     getCurrentRoot: () => currentRoot,
     // No IPC callbacks in headless mode — onBlast/onFocus/onOpen omitted
@@ -406,7 +406,7 @@ async function runHeadlessServe(args) {
     try {
       const registry = require('../lib/registry.cjs')
       const phash = registry.projectHash(abs)
-      const epoch = (() => { try { return require('crypto').randomUUID() } catch { return Date.now() + '-' + process.pid } })()
+      const epoch = csEpoch   // [③] same id the control-server reports on /health + /delta
       registry.touch('daemon', phash, { projectRoot: registry.canonicalRoot(abs), port: actualPort, epoch, pid: process.pid, startedAt: Date.now() })
       // [②] heartbeat + self-exit. Refcount = live session/viewer leases that
       // reference THIS project (NOT a counter). Self-exit only after a startup
