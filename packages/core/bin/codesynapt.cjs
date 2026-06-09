@@ -388,6 +388,22 @@ async function runHeadlessServe(args) {
   try {
     const { port: actualPort } = await startControlServer(port)
     boundPort = actualPort
+    // [multi-session ②/2a] Register in the daemon registry keyed by canonical
+    // projectHash so the new attach-or-spawn path can discover this daemon by
+    // project. Purely ADDITIVE — the single ~/.codesynapt/port lock below stays
+    // for the legacy discovery path during migration. `epoch` lets a client
+    // detect a daemon restart (→ re-bootstrap). Heartbeat is unref'd so it never
+    // keeps the process alive on its own; abnormal exit is covered by the TTL
+    // (the entry simply goes stale and gets reaped — no +1/-1 counter to break).
+    try {
+      const registry = require('../lib/registry.cjs')
+      const phash = registry.projectHash(abs)
+      const epoch = (() => { try { return require('crypto').randomUUID() } catch { return Date.now() + '-' + process.pid } })()
+      registry.touch('daemon', phash, { projectRoot: registry.canonicalRoot(abs), port: actualPort, epoch, pid: process.pid, startedAt: Date.now() })
+      const hb = setInterval(() => { try { registry.touch('daemon', phash, { port: actualPort, epoch }) } catch {} }, 5000)
+      if (hb.unref) hb.unref()
+      process.stderr.write(`[cs] registry: daemons/${phash}.json (epoch ${String(epoch).slice(0, 8)})\n`)
+    } catch (e) { process.stderr.write(`[cs] warning: registry register failed: ${e.message}\n`) }
     // Advertise the ACTUAL bound port so the CLI / MCP server auto-discover
     // this instance (they read ~/.codesynapt/port). Without this, `cs serve`
     // on any port is invisible to the MCP integration. But NEVER clobber a lock
