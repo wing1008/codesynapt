@@ -34,6 +34,65 @@ const HOST = '127.0.0.1'
 // setup is a single `claude mcp add` with nothing else to keep running.
 let _backendReady = null
 
+// [multi-session ②/2b] Registry-based attach-or-spawn, behind CS_REGISTRY=1.
+// Default OFF → the legacy port-scan path below is unchanged. When on, this MCP
+// is a pure client: it attaches to the per-project detached `cs serve` daemon
+// (discovered via daemons/<projectHash>.json) or spawns one, then registers its
+// own session lease + heartbeat. See docs/design-multi-session.md.
+let _registry = null
+try { _registry = require('../lib/registry.cjs') } catch { /* optional during migration */ }
+const USE_REGISTRY = process.env.CS_REGISTRY === '1' && !!_registry
+const SESSION_ID = (() => { try { return require('crypto').randomUUID() } catch { return Date.now() + '-' + process.pid } })()
+const _DAEMON_TTL_MS = 15000   // = poll(5s) × 3
+const _HEARTBEAT_MS = 5000
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+let _sessionHb = null
+function _registerSession(root, port) {
+  try {
+    _registry.touch('session', SESSION_ID, {
+      sessionId: SESSION_ID, projectRoot: _registry.canonicalRoot(root),
+      port, pid: process.pid, label: path.basename(root) || root, startedAt: Date.now(),
+    })
+    if (!_sessionHb) {
+      _sessionHb = setInterval(() => { try { _registry.touch('session', SESSION_ID, { port }) } catch {} }, _HEARTBEAT_MS)
+      if (_sessionHb.unref) _sessionHb.unref()
+    }
+  } catch { /* lease is best-effort */ }
+}
+function _spawnDaemon(root) {
+  const cp = require('child_process')
+  const serveBin = path.join(__dirname, 'codesynapt.cjs')
+  const child = cp.spawn(process.execPath, [serveBin, 'serve', root], { detached: true, stdio: 'ignore', env: { ...process.env } })
+  child.unref()
+}
+// Discover-or-spawn the per-project daemon, then register our session lease.
+async function _ensureViaRegistry() {
+  const want = _intendedRoot()
+  const phash = _registry.projectHash(want)
+  let spawned = false
+  for (let i = 0; i < 60; i++) {   // ~30s budget (cold start of a daemon)
+    const d = _registry.readDaemon(phash, _DAEMON_TTL_MS)
+    if (d && d.port && await _ping(d.port) && _sameRoot(await _backendRoot(d.port), want)) {
+      PORT = d.port
+      _registerSession(want, d.port)
+      return
+    }
+    if (!spawned) {
+      // No live daemon serving this project → race to spawn exactly one. The
+      // O_EXCL lock serialises concurrent MCPs; winner spawns, loser polls.
+      const lock = _registry.acquireDaemonLock(phash, { pid: process.pid }, _DAEMON_TTL_MS)
+      if (lock.won) { _spawnDaemon(want); spawned = true }
+      // The winner's `cs serve` writes its real port post-bind (②/2a) — poll
+      // readDaemon for it on the next iterations (whether we won or lost).
+    }
+    await _sleep(500)
+  }
+  // Registry path didn't converge → don't leave the agent blind; self-host.
+  process.stderr.write('[cs-mcp] registry attach-or-spawn timed out; self-hosting in-process\n')
+  await _startInProcessBackend()
+  _registerSession(want, PORT)
+}
+
 function _lockPort() {
   try {
     const lp = path.join(os.homedir(), '.codesynapt', 'port')
@@ -73,6 +132,7 @@ function _backendRoot(port) {
 function ensureBackend() {
   if (_backendReady) return _backendReady
   _backendReady = (async () => {
+    if (USE_REGISTRY) return _ensureViaRegistry()
     const want = _intendedRoot()
     // Reuse an already-running backend that serves THIS project — the desktop
     // app open on this repo, or a `cs serve` — so the agent's calls flow there

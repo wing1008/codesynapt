@@ -386,7 +386,15 @@ async function runHeadlessServe(args) {
   let lockWritten = false
   let boundPort = port
   try {
-    const { port: actualPort } = await startControlServer(port)
+    // Scan for a free port from `port` upward (default 7707) instead of dying on
+    // EADDRINUSE — a desktop or another daemon may hold the base port. The actual
+    // bound port is advertised via the registry + lock so clients discover it.
+    let actualPort = null
+    for (let p = port; p < port + 25 && actualPort === null; p++) {
+      try { const r = await startControlServer(p); actualPort = r.port }
+      catch (e) { if (e.code !== 'EADDRINUSE') throw e }
+    }
+    if (actualPort === null) return die(`no free port in ${port}..${port + 24}`)
     boundPort = actualPort
     // [multi-session ②/2a] Register in the daemon registry keyed by canonical
     // projectHash so the new attach-or-spawn path can discover this daemon by
@@ -400,7 +408,27 @@ async function runHeadlessServe(args) {
       const phash = registry.projectHash(abs)
       const epoch = (() => { try { return require('crypto').randomUUID() } catch { return Date.now() + '-' + process.pid } })()
       registry.touch('daemon', phash, { projectRoot: registry.canonicalRoot(abs), port: actualPort, epoch, pid: process.pid, startedAt: Date.now() })
-      const hb = setInterval(() => { try { registry.touch('daemon', phash, { port: actualPort, epoch }) } catch {} }, 5000)
+      // [②] heartbeat + self-exit. Refcount = live session/viewer leases that
+      // reference THIS project (NOT a counter). Self-exit only after a startup
+      // grace AND several consecutive empty ticks, so a just-spawned daemon
+      // never reaps itself before its spawning client has attached.
+      const _LEASE_TTL = 15000, _GRACE_MS = 20000, _EMPTY_LIMIT = 3
+      const _bornAt = Date.now()
+      let _emptyTicks = 0
+      const hb = setInterval(() => {
+        try {
+          registry.touch('daemon', phash, { port: actualPort, epoch })
+          registry.cleanStale('session', _LEASE_TTL); registry.cleanStale('viewer', _LEASE_TTL)
+          const sess = registry.readLive('session', { ttlMs: _LEASE_TTL, filter: (s) => { try { return registry.projectHash(s.projectRoot) === phash } catch { return false } } })
+          const view = registry.readLive('viewer', { ttlMs: _LEASE_TTL, filter: (v) => v.attachedProjectHash === phash })
+          _emptyTicks = (sess.length + view.length === 0) ? _emptyTicks + 1 : 0
+          if (Date.now() - _bornAt > _GRACE_MS && _emptyTicks >= _EMPTY_LIMIT) {
+            process.stderr.write('[cs] no live sessions/viewers — daemon self-exit\n')
+            try { registry.remove('daemon', phash) } catch {}
+            process.exit(0)
+          }
+        } catch {}
+      }, 5000)
       if (hb.unref) hb.unref()
       process.stderr.write(`[cs] registry: daemons/${phash}.json (epoch ${String(epoch).slice(0, 8)})\n`)
     } catch (e) { process.stderr.write(`[cs] warning: registry register failed: ${e.message}\n`) }
@@ -428,7 +456,6 @@ async function runHeadlessServe(args) {
     process.stderr.write(`[cs] try: curl http://127.0.0.1:${actualPort}/summary\n`)
     process.stderr.write(`[cs] Ctrl-C to stop.\n`)
   } catch (e) {
-    if (e.code === 'EADDRINUSE') return die(`port ${port} in use — pass --port N`)
     return die(`server error: ${e.message}`)
   }
 
