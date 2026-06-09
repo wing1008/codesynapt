@@ -53,6 +53,40 @@ fork('node')                         // bare binary, no ext — skip
   })
 })
 
+// ───────────────────────────────────────────────────────────────────
+// package.json subpath `exports` — a workspace package may remap a
+// subpath OFF its src/ mirror (e.g. `@acme/lib/helper` → ./internal/...).
+// The src/ heuristic alone can't find it; honor the exports map so the
+// import is a real edge, not a false orphan.
+// ───────────────────────────────────────────────────────────────────
+describe('parser — package.json subpath exports (Layer-1)', () => {
+  it('resolves remapped subpaths via exports (exact + * wildcard)', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-exports-'))
+    const mk = (p, c) => {
+      fs.mkdirSync(path.dirname(path.join(root, p)), { recursive: true })
+      fs.writeFileSync(path.join(root, p), c)
+    }
+    mk('package.json', JSON.stringify({ name: 'root', private: true, workspaces: ['packages/*'] }))
+    mk('packages/lib/package.json', JSON.stringify({
+      name: '@acme/lib',
+      exports: { '.': './src/index.ts', './helper': './internal/helper.ts', './shapes/*': './internal/shapes/*.ts' },
+    }))
+    mk('packages/lib/src/index.ts', 'export const idx = 1\n')
+    mk('packages/lib/internal/helper.ts', 'export const help = 1\n')
+    mk('packages/lib/internal/shapes/circle.ts', 'export const circle = 1\n')
+    mk('packages/app/src/a.ts',
+      "import { idx } from '@acme/lib'\nimport { help } from '@acme/lib/helper'\nimport { circle } from '@acme/lib/shapes/circle'\n")
+
+    const { snap } = await scanOnce(root)
+    const targets = snap.edges.filter((e) => e.s === 'packages/app/src/a.ts').map((e) => e.t).sort()
+    expect(targets).toContain('packages/lib/src/index.ts')             // exports['.'] main
+    expect(targets).toContain('packages/lib/internal/helper.ts')        // exact subpath export
+    expect(targets).toContain('packages/lib/internal/shapes/circle.ts') // wildcard subpath export
+
+    try { fs.rmSync(root, { recursive: true, force: true }) } catch {}
+  })
+})
+
 describe('scanner — spawned scripts are NOT orphans (end-to-end)', () => {
   let root
   beforeAll(() => {

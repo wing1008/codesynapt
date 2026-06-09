@@ -1892,7 +1892,10 @@ export function resolveImport(fromAbsPath, spec, rootAbs, validIds, fromExt) {
         if (r) return r
       } else {
         const sub = spec.slice(best.length + 1)
-        const r = tryAt(pfx + 'src/' + sub) || tryAt(pfx + sub)
+        // Subpath `exports` first (exact or `*` wildcard) — covers packages that
+        // remap a subpath off the src/ mirror; then the src/ heuristic fallback.
+        const mapped = resolveExportsSubpath(ws.get(best).exports, sub)
+        const r = (mapped && tryAt(pfx + mapped)) || tryAt(pfx + 'src/' + sub) || tryAt(pfx + sub)
         if (r) return r
       }
     }
@@ -2210,11 +2213,50 @@ function loadJsWorkspace(rootAbs, validIds) {
         entry = typeof dot === 'string' ? dot : (dot && (dot.import || dot.default || dot.require || dot.types))
       }
       entry = entry || parsed.module || parsed.main || null
-      byName.set(parsed.name, { dir, entry })
+      // Keep the raw `exports` map so a SUBPATH import (`@scope/pkg/helper`)
+      // can be resolved through it — a package may remap subpaths to a
+      // non-`src/` location that the src/ heuristic in resolveImport can't find.
+      byName.set(parsed.name, { dir, entry, exports: parsed.exports || null })
     } catch (e) { if (process.env.CS_DBG) console.error('[cs] loadJsWorkspace:', e && e.message) }
   }
   _jsWsCache.set(rootAbs, byName)
   return byName
+}
+
+// Pick a usable file target from a package.json `exports` value, which may be a
+// bare string or a conditions object ({ import, require, default, types, … }).
+// We prefer source-ish conditions; a built `dist/` target simply won't resolve
+// and the caller falls back to its src/ heuristic.
+function exportsTarget(v) {
+  if (typeof v === 'string') return v
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    return v.import || v.module || v.default || v.require || v.types || v.node || null
+  }
+  return null
+}
+
+// Resolve a workspace package SUBPATH (`helper`, `shapes/circle`) through that
+// package's `exports` map. Handles exact subpath keys (`"./helper"`) and a
+// single `*` wildcard (`"./shapes/*": "./internal/shapes/*.ts"`). Returns a path
+// relative to the package dir (no leading `./`), or null if no key matches.
+function resolveExportsSubpath(exp, sub) {
+  if (!exp || typeof exp !== 'object' || Array.isArray(exp)) return null
+  const key = './' + sub
+  if (Object.prototype.hasOwnProperty.call(exp, key)) {
+    const t = exportsTarget(exp[key])
+    return t ? t.replace(/^\.\//, '') : null
+  }
+  for (const [k, v] of Object.entries(exp)) {
+    if (!k.startsWith('./') || k.indexOf('*') === -1) continue
+    const star = k.indexOf('*')
+    const pre = k.slice(0, star), post = k.slice(star + 1)
+    if (!key.startsWith(pre) || !key.endsWith(post) || key.length < pre.length + post.length) continue
+    const captured = key.slice(pre.length, key.length - post.length)
+    const tgt = exportsTarget(v)
+    if (!tgt || tgt.indexOf('*') === -1) continue
+    return tgt.replace('*', captured).replace(/^\.\//, '')
+  }
+  return null
 }
 
 // Resolve an import spec via tsconfig path mapping. Returns the
