@@ -7,7 +7,7 @@
 [![Version](https://img.shields.io/github/package-json/v/wing1008/codesynapt?label=version&color=informational)](./CHANGELOG.md)
 [![Node 20|22](https://img.shields.io/badge/Node-20%20%7C%2022-339933?logo=node.js&logoColor=white)](./package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](./docs/installation.md)
-[![Tests](https://img.shields.io/badge/tests-100%20passing-brightgreen)](./tests/)
+[![Tests](https://img.shields.io/badge/tests-172%20passing-brightgreen)](./tests/)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/wing1008?label=Sponsor&logo=GitHub&style=social)](https://github.com/sponsors/wing1008)
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/wing1008)
 
@@ -40,7 +40,7 @@ All three share the same scanner: imports across JS/TS, Python, Go, Rust, Java/K
 - **11 `cs_*` MCP tools** (not 37 narrow ones) — 8 file-level: `cs_summary`, `cs_query`, `cs_blast`, `cs_intent`, `cs_health`, `cs_change`, `cs_trace`, `cs_ui` (each takes an `action` enum); plus 3 symbol-level: `cs_symbol_summary`, `cs_symbol_search`, `cs_symbol_explore` for the Layer-2 function-call graph. Designed so the agent picks the right one with a glance, not by scanning a wall of tool names.
 - **AI-aware response envelope** — every response includes `meta: { scannedAt, tokenEstimate, totalAvailable, truncated }`. The agent budgets tokens before drilling deeper.
 - **Blast radius before edit** — `cs_blast({action:'safety', id})` returns 🟢/🟡/🔴 verdict + reasons in one call; `action:'bundle'` packs the closest neighbours into a token budget so the agent reads the right context first.
-- **Verified dependency accuracy** — import resolution is checked against independent ground truth (TypeScript Compiler API, Python `ast`, language-native rules) at precision/recall ≈ 1.0 across 11 languages on real codebases (VS Code ~6.8k files; Django), measured on library/app source (tests/generated code excluded). For Go, C# and Swift the edge is module/namespace-level (one import links the importing file to the imported unit). Honest limit: it follows *static imports*, so it does **not** see autoload / DI / reflection-implicit dependencies (Rails/Zeitwerk, Spring) — those carry no import statement to resolve, and are surfaced as `caveat` markers rather than silently dropped.
+- **Precision-first dependency graph** — import resolution favors precision over recall: an ambiguous edge is declined and surfaced as a *candidate* rather than guessed. JS/TS resolve via the Babel AST (with optional TypeScript-Compiler checks); Python, Ruby, PHP, Swift, Kotlin, Go, Rust, C#, C/C++ via language-native rules. For Go, C# and Swift the edge is module/namespace-level (one import links the importing file to the imported unit); function-level call edges (Layer 2) cover JS/TS + Python. Honest limit: it follows *static imports*, so autoload / DI / reflection-implicit dependencies (Rails/Zeitwerk, Spring) carry no import statement to resolve — those are surfaced as `caveat` markers, not silently dropped. **Blast counts are a floor, not a ceiling.**
 - **Live updates ~300 ms** — chokidar file-watcher + 60 ms snapshot debounce. No re-indexing, no manual refresh, no cloud round-trip. (Most code-intelligence tools require an explicit re-index step — this one doesn't.)
 - **Live agent visualization** — when the desktop window is open, every MCP call pulses the touched node in 3D. You see the AI navigate.
 - **Full-stack route↔fetch matching** — JS/TS, Python, Next.js file-system API routes auto-detected. Frontend `fetch('/api/billing')` linked to `app/api/billing/route.ts` automatically.
@@ -254,21 +254,18 @@ segments handled).
 external API integration spots. Or ask Claude: "give me the guided
 tour" → `cs_trace({action:'tour'})`.
 
-**7. Watching project evolution.** Hit the ⏱ **Time-lapse** button.
+**9. Watching project evolution.** Hit the ⏱ **Time-lapse** button.
 The slider scrubs through git history — files appear at their first
-commit. Press play to watch the project grow over 25 seconds. Pairs
-well with screen recordings for `r/dataisbeautiful`.
+commit. Press play to watch the project grow.
 
-**8. Recovering AI-edited files.** Turn on **Auto history** in
+**10. Recovering AI-edited files.** Turn on **Auto history** in
 Settings. Every save (yours or the AI's) snapshots the previous
 version. Roll back from the inspector if Claude edits the wrong
 thing.
 
 ## Desktop app — visual surface
 
-![screenshot placeholder — add screenshot.png here]
-
-Built on Electron + Three.js. Scales to 100k+ files. Features:
+Built on Electron + Three.js. Features:
 
 - **Real-time** — drop a folder, watch the graph form in seconds; live updates as you edit
 - **Scales** — 300k node smoke test runs at 50fps active / 100fps idle
@@ -285,6 +282,7 @@ Built on Electron + Three.js. Scales to 100k+ files. Features:
 - **Extensible** — plugin API for themes, exporters, parsers, layouts, panels, and context actions
 - **Cross-platform** — macOS (Intel + Apple Silicon), Windows, Linux
 - **Private by design** — local-only HTTP control API on 127.0.0.1, no telemetry, code never leaves your machine
+- **Multi-session** *(experimental — set `CS_REGISTRY=1`)* — attach the desktop to another Claude Code session's per-project daemon and watch *its* graph + live trace, from a left-rail session picker. Off by default.
 
 For OS-specific installation notes, see **[docs/installation.md](./docs/installation.md)**.
 

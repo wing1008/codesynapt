@@ -92,11 +92,12 @@ class SymbolGraph {
     this.edges = []             // SymbolEdge[]
     this.byFile = new Map()     // fileId → Set<symbolId>
     this.byName = new Map()     // lowercased name → Set<symbolId>
-    // Adjacency for fast callers/callees lookup. Holds EVERY edge kind
-    // (call / extends / implements / ref / type-ref / jsx-ref) — used by
-    // callersOf/calleesOf and the structural blast radius.
-    this.outAdj = new Map()     // symbolId → Set<targetId>
-    this.inAdj  = new Map()     // symbolId → Set<sourceId>
+    // Call-graph adjacency for fast callers/callees lookup. Built from
+    // kind==='call' edges ONLY (see addEdge) — structural edges (extends /
+    // implements / ref / type-ref / jsx-ref) are indexed separately so they
+    // can't inflate callers/callees/blast. Backs callersOf()/calleesOf().
+    this.outAdj = new Map()     // symbolId → Set<calleeId>
+    this.inAdj  = new Map()     // symbolId → Set<callerId>
     // Call-ONLY adjacency. Reachability (dead-code detection) must walk the
     // *call* graph, not structural edges: a `type-ref`/`extends`/`ref` to a
     // symbol does not mean it is invoked, so it must not keep dead code alive.
