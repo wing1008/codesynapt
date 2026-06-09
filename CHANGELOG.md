@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.0.1
+## 0.0.1 — beta (2026-06-09)
+
+> Beta / pre-release — APIs and formats may still change.
 
 ### Added
 - **Multi-session (experimental, off by default — set `CS_REGISTRY=1`).** The
