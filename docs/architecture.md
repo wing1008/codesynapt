@@ -61,6 +61,33 @@ Standard Electron split:
 `sandbox: false` (preload uses `require`). External URLs are
 intercepted and opened in the user's OS browser instead of the app.
 
+## Multi-session (experimental)
+
+*Off by default. Enabled with `CS_REGISTRY=1`.* Full contract and rationale:
+[design-multi-session.md](./design-multi-session.md).
+
+The default model is one desktop, one loaded project. The experimental
+multi-session model lets several Claude Code sessions share a per-project
+backend and lets the desktop view any of them as a **pure client**:
+
+- **Detached daemon** — each project root is served by a singleton detached
+  `cs serve` daemon instead of an in-process backend. MCP sessions and the
+  viewer are pure clients; the daemon outlives any one of them.
+- **Registry** (`~/.codesynapt/`) — three lease dirs: `sessions/`, `daemons/`,
+  `viewers/`. Each participant rewrites its own file's `lastSeen` every few
+  seconds; liveness is file-based (no shared counter). A daemon self-exits once
+  no live session or viewer references it.
+- **Cursor delta** — clients bootstrap the full graph once, then poll
+  `/delta?sinceGraph=&sinceTrace=` for `(epoch, seq)` deltas. Trace is filtered
+  per session; the graph is shared. An `epoch` change (daemon restart) triggers
+  a re-bootstrap.
+- **Viewer** — the desktop reads the `sessions/` registry, lets you pick one
+  from a left-rail tab, attaches to that session's daemon, and re-emits its
+  graph + trace through the same renderer channels the local scanner uses.
+
+The legacy single-port path (`~/.codesynapt/port`) stays in place; the registry
+path is layered behind the flag for incremental rollout.
+
 ## Project structure
 
 ```

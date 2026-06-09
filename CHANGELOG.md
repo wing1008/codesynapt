@@ -2,6 +2,13 @@
 
 ## 0.0.1
 
+### Added
+- **Multi-session (experimental, off by default — set `CS_REGISTRY=1`).** The
+  desktop can attach to another Claude Code session's per-project daemon and
+  watch *its* dependency graph + live trace from a left-rail session picker,
+  acting as a pure client (no second scan). Detach hands the view back to the
+  local project.
+
 ### Changed
 - **MCP setup is now one step.** `codesynapt-mcp` auto-starts its own backend
   in-process (scanning `CS_ROOT` or the working directory) when no desktop
@@ -26,6 +33,14 @@
 - A `symbolModeState` temporal-dead-zone `ReferenceError` aborted renderer
   init (declaration moved to module top).
 - Startup white flash removed (window shown on `ready-to-show`).
+- **Graph accuracy — monorepo `exports` subpaths.** Workspace imports that go
+  through a package's `exports` subpath map (e.g. `@scope/lib/helper` →
+  `./internal/helper.ts`, including `*` wildcards) now resolve instead of being
+  dropped as missing edges / false orphans.
+- **Symbol graph — callbacks are no longer false dead code.** A function used
+  only as a callback (passed as a value, e.g. `arr.map(fn)`) is surfaced under
+  `referencedBy` in `cs_symbol` callers, so it isn't misread as unused when it
+  has zero direct callers. The confident call graph (callers/blast) is unchanged.
 
 ## 0.0.0 — initial public demo
 
