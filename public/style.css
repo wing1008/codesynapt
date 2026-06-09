@@ -2695,6 +2695,64 @@ body.rail-collapsed #statsPanel {
   opacity: 0.7;
 }
 
+/* ─── [④] Multi-session viewer panel ─────────────────── */
+#sessionsPanel { padding: 8px 6px; }
+.sp-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.sp-attached {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; margin-bottom: 8px;
+  border: 1px solid var(--border-hot); border-radius: 5px;
+  background: rgba(126, 207, 207, 0.06);
+  font-size: 10.5px; color: var(--fg-dim);
+}
+.sp-attached b { color: var(--accent); font-weight: 600; }
+.sp-attached .sp-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 6px var(--accent);
+  flex-shrink: 0; animation: sp-pulse 1.8s ease-in-out infinite;
+}
+@keyframes sp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.sp-list { display: flex; flex-direction: column; gap: 4px; }
+.sp-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px; border-radius: 5px;
+  border: 1px solid var(--border-edge);
+  transition: background 0.12s, border-color 0.12s;
+}
+.sp-item:hover { background: rgba(126, 207, 207, 0.05); border-color: var(--border); }
+.sp-item.attached { border-color: var(--border-hot); background: rgba(126, 207, 207, 0.08); }
+.sp-item.dead { opacity: 0.5; }
+.sp-item-main { flex: 1; min-width: 0; }
+.sp-label {
+  font-size: 11px; color: var(--fg); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sp-root {
+  font-size: 9.5px; color: var(--fg-mute);
+  font-family: 'SF Mono', Menlo, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;
+}
+.sp-btn {
+  flex-shrink: 0;
+  padding: 3px 9px; border-radius: 4px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--fg-dim); font-size: 10px; cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.sp-btn:hover { color: var(--accent); border-color: var(--border-hot); }
+.sp-btn:disabled { opacity: 0.4; cursor: default; }
+.sp-detach { color: var(--accent-pink); }
+.sp-detach:hover { color: var(--accent-pink); border-color: var(--accent-pink); }
+.sp-dead { flex-shrink: 0; font-size: 9.5px; color: var(--fg-faint); }
+.sp-empty {
+  padding: 16px 12px; color: var(--fg-mute);
+  font-size: 10.5px; text-align: center; opacity: 0.7; line-height: 1.5;
+}
+
 /* ─── Left sidebar shell — fills grid area "lft" ──────── */
 #leftRail {
   display: flex;

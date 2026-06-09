@@ -390,6 +390,8 @@
       <button class="left-tab"        data-tab="pipelines" role="tab" data-i18n="kicker.pipelines">pipelines</button>
       <button class="left-tab"        data-tab="recent"    role="tab" data-i18n="kicker.recent">recent</button>
       <button class="left-tab"        data-tab="legend"    role="tab" data-i18n="kicker.legend">extensions</button>
+      <!-- [④] only shown in multi-session viewer mode (CS_REGISTRY) -->
+      <button class="left-tab hidden" data-tab="sessions"  role="tab" id="sessionsTab" data-i18n="kicker.sessions">sessions</button>
     </div>
     <div class="left-tab-pane" data-pane="files">
       <section id="fileTreePanel">
@@ -429,6 +431,17 @@
       <section id="legend">
         <div class="legend-title" data-i18n="kicker.legend">extensions</div>
         <div id="legend-items"></div>
+      </section>
+    </div>
+    <!-- [④] Multi-session viewer: pick a live Claude Code session to watch. -->
+    <div class="left-tab-pane hidden" data-pane="sessions">
+      <section id="sessionsPanel">
+        <div class="sp-head">
+          <span class="kicker" data-i18n="kicker.sessions">sessions</span>
+          <button id="spRefresh" class="micro-btn" data-i18n-title="sessions.refresh.title">⟳</button>
+        </div>
+        <div id="sessionsAttached" class="sp-attached hidden"></div>
+        <div id="sessionsList" class="sp-list"></div>
       </section>
     </div>
   </aside>

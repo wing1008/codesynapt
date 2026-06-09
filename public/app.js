@@ -176,6 +176,14 @@ const T = {
     'kicker.files':         '파일',
     'kicker.pipelines':     '파이프라인',
     'kicker.recent':        '최근',
+    'kicker.sessions':      '세션',
+    'sessions.refresh.title': '세션 목록 새로고침',
+    'sessions.empty':       '활성 세션 없음 — Claude Code에서 /codesynapt 실행 시 표시됨',
+    'sessions.view':        '보기',
+    'sessions.detach':      '분리',
+    'sessions.viewing':     '보는 중',
+    'sessions.dead_daemon': '데몬 꺼짐',
+    'sessions.attach_failed': '연결 실패',
     'recent.empty':         '최근 본 파일이 없음',
     'inspector.empty':      '파일을 선택하면 정보가 표시됩니다',
     'kicker.legend':        '확장자',
@@ -442,6 +450,14 @@ const T = {
     'kicker.files':         'files',
     'kicker.pipelines':     'pipelines',
     'kicker.recent':        'recent',
+    'kicker.sessions':      'sessions',
+    'sessions.refresh.title': 'Refresh session list',
+    'sessions.empty':       'No active sessions — they appear when /codesynapt runs in Claude Code',
+    'sessions.view':        'view',
+    'sessions.detach':      'detach',
+    'sessions.viewing':     'viewing',
+    'sessions.dead_daemon': 'daemon off',
+    'sessions.attach_failed': 'attach failed',
     'recent.empty':         'No recently viewed files',
     'inspector.empty':      'Select a file to see its info',
     'kicker.legend':        'extensions',
@@ -7104,6 +7120,105 @@ function leftSetTab(name) {
   let saved = 'files'
   try { saved = localStorage.getItem(LEFT_TAB_KEY) || 'files' } catch {}
   leftSetTab(saved)
+})()
+
+// ═══════════════════════════════════════════════════════════════
+//  [④] Multi-session viewer panel (left-rail "sessions" tab)
+//
+//  Only active in viewer mode (CS_REGISTRY=1). Lists live Claude Code
+//  sessions from the registry; clicking "view" attaches the desktop to that
+//  session's daemon as a pure client — its graph + trace then arrive through
+//  the same snapshot/control:trace channels the local scanner uses (wired in
+//  electron/main.cjs). "detach" hands the canvas back to the local scanner.
+// ═══════════════════════════════════════════════════════════════
+;(function initSessionsPanel() {
+  if (!isElectron || !window.codesynapt || !window.codesynapt.viewerEnabled) return
+  const tabBtn = document.getElementById('sessionsTab')
+  const listEl = document.getElementById('sessionsList')
+  const attachedEl = document.getElementById('sessionsAttached')
+  const refreshBtn = document.getElementById('spRefresh')
+  if (!tabBtn || !listEl) return
+
+  let enabled = false
+  let attachedId = null
+  let attachedLabel = null
+
+  function paneVisible() {
+    const pane = document.querySelector('.left-tab-pane[data-pane="sessions"]')
+    return pane && !pane.classList.contains('hidden')
+  }
+
+  function renderAttached() {
+    if (!attachedEl) return
+    if (attachedId == null) { attachedEl.classList.add('hidden'); attachedEl.innerHTML = ''; return }
+    attachedEl.classList.remove('hidden')
+    attachedEl.innerHTML = `<span class="sp-dot"></span>${escapeHTML(t('sessions.viewing'))}: <b>${escapeHTML(String(attachedLabel || attachedId))}</b>`
+  }
+
+  async function refresh() {
+    if (!enabled) return
+    let data
+    try { data = await window.codesynapt.viewerSessions() } catch { return }
+    const sessions = (data && data.sessions) || []
+    renderAttached()
+    if (!sessions.length) {
+      listEl.innerHTML = `<div class="sp-empty">${escapeHTML(t('sessions.empty'))}</div>`
+      return
+    }
+    listEl.innerHTML = sessions.map((s) => {
+      const isMe = String(s.sessionId) === String(attachedId)
+      const dead = !s.daemonAlive
+      const cls = 'sp-item' + (isMe ? ' attached' : '') + (dead ? ' dead' : '')
+      const label = escapeHTML(s.label || s.projectRoot || s.sessionId)
+      const root = escapeHTML(s.projectRoot || '')
+      const action = isMe
+        ? `<button class="sp-btn sp-detach" data-id="${escapeAttr(s.sessionId)}">${escapeHTML(t('sessions.detach'))}</button>`
+        : dead
+          ? `<span class="sp-dead">${escapeHTML(t('sessions.dead_daemon'))}</span>`
+          : `<button class="sp-btn sp-attach" data-id="${escapeAttr(s.sessionId)}">${escapeHTML(t('sessions.view'))}</button>`
+      return `<div class="${cls}" title="${root}">`
+        + `<div class="sp-item-main"><div class="sp-label">${label}</div><div class="sp-root">${root}</div></div>`
+        + action + `</div>`
+    }).join('')
+  }
+
+  listEl.addEventListener('click', async (ev) => {
+    const aBtn = ev.target.closest('.sp-attach')
+    const dBtn = ev.target.closest('.sp-detach')
+    if (aBtn) {
+      aBtn.disabled = true
+      const id = aBtn.dataset.id
+      let r
+      try { r = await window.codesynapt.viewerAttach(id) } catch (e) { r = { ok: false, error: e.message } }
+      if (r && r.ok) { attachedId = r.sessionId; attachedLabel = r.label; toast(`${t('sessions.viewing')}: ${r.label || id}`) }
+      else { toast(`${t('sessions.attach_failed')}: ${(r && r.error) || ''}`); aBtn.disabled = false }
+      refresh()
+    } else if (dBtn) {
+      try { await window.codesynapt.viewerDetach() } catch {}
+      attachedId = null; attachedLabel = null
+      refresh()
+    }
+  })
+
+  if (refreshBtn) refreshBtn.addEventListener('click', refresh)
+
+  if (window.codesynapt.onViewerStatus) {
+    window.codesynapt.onViewerStatus((st) => {
+      if (!st) return
+      if (st.phase === 'detached') { attachedId = null; attachedLabel = null; refresh() }
+      else if (st.phase === 'error') toast('viewer: ' + (st.error || 'error'))
+      // 're-bootstrap' is silent — the graph simply refreshes via the snapshot channel.
+    })
+  }
+
+  window.codesynapt.viewerEnabled().then((on) => {
+    enabled = !!on
+    if (!enabled) return
+    tabBtn.classList.remove('hidden')
+    refresh()
+    // Poll liveness only while the pane is open (cheap; sessions come/go).
+    setInterval(() => { if (paneVisible()) refresh() }, 3000)
+  }).catch(() => {})
 })()
 
 // ═══════════════════════════════════════════════════════════════

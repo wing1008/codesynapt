@@ -191,6 +191,18 @@ const csApi = {
   traceClear:    () => ipcRenderer.invoke('trace:clear'),
   traceExport:   (path) => ipcRenderer.invoke('trace:export', path),
 
+  // [④] Multi-session viewer (flag-gated CS_REGISTRY) — attach to another
+  // Claude Code session's daemon and watch its graph/trace as a pure client.
+  viewerEnabled:  () => ipcRenderer.invoke('viewer:enabled'),
+  viewerSessions: () => ipcRenderer.invoke('viewer:list-sessions'),
+  viewerAttach:   (sessionId) => ipcRenderer.invoke('viewer:attach', sessionId),
+  viewerDetach:   () => ipcRenderer.invoke('viewer:detach'),
+  onViewerStatus: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('viewer:status', handler)
+    return () => ipcRenderer.off('viewer:status', handler)
+  },
+
   // Pinned projects (multi-folder workspace)
   listProjects:   () => ipcRenderer.invoke('list-projects'),
   pinProject:     (path, name, color) => ipcRenderer.invoke('pin-project', { path, name, color }),

@@ -265,6 +265,9 @@ async function startScanner(root) {
   scanner = new Scanner(root)
 
   scanner.on('snapshot', (data) => {
+    // [④] While the desktop is attached to a remote session's daemon, that
+    // session's graph owns the canvas — don't let the local scanner overwrite it.
+    if (viewerAttached()) return
     mainWindow?.webContents.send('snapshot', { ...data, root })
   })
   scanner.on('stats', (s) => {
@@ -2405,6 +2408,64 @@ function stopControlServer() {
   clearLockFile()
 }
 ipcMain.handle('control-port', () => controlPort)
+
+// ─── [④] Multi-session viewer client (flag-gated: CS_REGISTRY=1) ─
+// The desktop, as a PURE CLIENT, can attach to another Claude Code session's
+// per-project daemon (`cs serve`) and watch ITS graph + trace — without running
+// its own scanner for that project. The heavy lifting (registry discovery,
+// daemon HTTP client, bootstrap, (epoch,seq) delta polling, viewer lease +
+// heartbeat, re-bootstrap) lives in the headless-testable lib/viewer-client.cjs.
+// Here we just pipe its callbacks into the SAME renderer ipc channels the local
+// scanner already uses (`snapshot`, `control:trace`) — /graph's payload is shape-
+// identical to scanner.snapshot(), so the renderer renders it unchanged.
+//
+// ADDITIVE & gated: with CS_REGISTRY unset the whole block is inert and the
+// in-process scanner path is untouched (design: 점진 교체, 옛 경로 살려둠).
+const USE_VIEWER = process.env.CS_REGISTRY === '1'
+let _viewer = null
+const _viewerLib = (() => {
+  try { return require('../packages/core/lib/viewer-client.cjs') } catch { return null }
+})()
+function viewerAttached() { return !!(_viewer && _viewer.isAttached()) }
+function getViewer() {
+  if (_viewer || !_viewerLib) return _viewer
+  _viewer = new _viewerLib.ViewerClient({
+    viewerId: 'desktop-' + process.pid,
+    // The remote graph rides the SAME channel the local scanner uses. While a
+    // viewer is attached, the local scanner's own snapshots are suppressed (see
+    // the scanner.on('snapshot') guard) so the two don't fight over the canvas.
+    onGraph: (g) => { try { mainWindow?.webContents.send('snapshot', g) } catch {} },
+    onTraces: (evs) => {
+      try { for (const ev of evs) mainWindow?.webContents.send('control:trace', { ...ev }) } catch {}
+    },
+    onStatus: (st) => { try { mainWindow?.webContents.send('viewer:status', st) } catch {} },
+  })
+  return _viewer
+}
+ipcMain.handle('viewer:enabled', () => USE_VIEWER)
+ipcMain.handle('viewer:list-sessions', () => {
+  if (!USE_VIEWER || !_viewerLib) return { enabled: false, sessions: [] }
+  try { return { enabled: true, sessions: _viewerLib.listSessions() } }
+  catch (e) { return { enabled: true, sessions: [], error: e.message } }
+})
+ipcMain.handle('viewer:attach', async (_e, sessionId) => {
+  if (!USE_VIEWER || !_viewerLib) return { ok: false, error: 'viewer mode disabled' }
+  const s = _viewerLib.listSessions().find((x) => String(x.sessionId) === String(sessionId))
+  if (!s) return { ok: false, error: 'session not found (it may have ended)' }
+  if (!s.daemonAlive) return { ok: false, error: 'daemon for this session is not running' }
+  try {
+    const r = await getViewer().attach(s)
+    return { ok: true, sessionId: s.sessionId, label: s.label, projectRoot: s.projectRoot, epoch: r && r.epoch }
+  } catch (e) { return { ok: false, error: e.message } }
+})
+ipcMain.handle('viewer:detach', async () => {
+  if (_viewer) { try { await _viewer.detach() } catch {} }
+  // Hand the canvas back to the local scanner: emit its current snapshot now so
+  // the renderer doesn't sit on the detached remote graph until the next change.
+  try { if (scanner && mainWindow) mainWindow.webContents.send('snapshot', { root: currentRoot, ...scanner.snapshot() }) } catch {}
+  return { ok: true }
+})
+app.on('before-quit', () => { if (_viewer) { try { _viewer.detach() } catch {} } })
 
 // ─── Log retention (audit + per-project traces) ────────────────
 // Default 30 days; configurable via env. Prevents unbounded growth of
