@@ -8,11 +8,46 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 
+// Walk up from `start` to the project root. Mirrors codesynapt-mcp.cjs's
+// _findProjectRoot so the CLI and MCP agree on which project a directory
+// belongs to — STRONG markers (repo/workspace root) win over WEAK (a package),
+// nearest WEAK used only when no STRONG found further up.
+function _findProjectRoot(start) {
+  const STRONG = ['.git', '.hg', '.svn', 'pnpm-workspace.yaml', 'lerna.json', 'go.work', '.codesynaptignore']
+  const WEAK = ['package.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'composer.json', 'pubspec.yaml']
+  const home = path.resolve(os.homedir())
+  const fsRoot = path.parse(start).root
+  let dir = start, nearestWeak = null
+  while (true) {
+    for (const m of STRONG) { try { if (fs.existsSync(path.join(dir, m))) return dir } catch {} }
+    if (!nearestWeak) { for (const m of WEAK) { try { if (fs.existsSync(path.join(dir, m))) { nearestWeak = dir; break } } catch {} } }
+    if (dir === fsRoot || dir === home) break
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return nearestWeak
+}
+// The project this CLI invocation targets — cwd walked up to its root. Used to
+// resolve the RIGHT per-project daemon and to detect cross-project misroutes.
+const PROJECT_ROOT = (() => {
+  try { return _findProjectRoot(process.cwd()) || process.cwd() } catch { return process.cwd() }
+})()
+
 // Resolve which port the running server is on.
-// Priority: explicit env var > lock file (written by server) > default 7707.
+// Priority: explicit env var > THIS project's registered daemon > global lock
+// file > default 7707. Preferring the per-project registry entry over the single
+// global ~/.codesynapt/port lock is what stops a `cs` command in project A from
+// silently hitting project B's daemon that happens to own that lock (the lock is
+// last-writer-wins across ALL projects). Registry miss → legacy lock fallback.
 function resolvePort() {
   const envPort = process.env.CS_PORT || process.env.FG3D_PORT
   if (envPort) return parseInt(envPort, 10)
+  try {
+    const registry = require('../lib/registry.cjs')
+    const d = registry.readDaemon(registry.projectHash(PROJECT_ROOT), 60000)
+    if (d && d.port > 0 && d.port < 65536) return d.port
+  } catch { /* registry optional during migration → fall through */ }
   try {
     const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
     if (fs.existsSync(lockPath)) {
@@ -25,8 +60,45 @@ function resolvePort() {
 const PORT = resolvePort()
 const HOST = '127.0.0.1'
 
+// One-time safety net: even after preferring the registry, a stale entry / global
+// lock / port reuse could still point us at another project's daemon. Before the
+// first real request, check the daemon's /health.root against our project root and
+// warn LOUDLY on mismatch — results would otherwise be silently for the wrong
+// project. Warn only (never block); memoized so it costs one /health per process.
+let _projectGuard = null
+function guardProjectMatch() {
+  if (_projectGuard) return _projectGuard
+  _projectGuard = new Promise((resolve) => {
+    if (process.env.CS_PORT || process.env.FG3D_PORT) return resolve() // user pinned the port on purpose
+    const r = http.get({ host: HOST, port: PORT, path: '/health', timeout: 1000 }, (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        try {
+          const h = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          if (h && h.root && PROJECT_ROOT) {
+            const a = path.resolve(h.root), b = path.resolve(PROJECT_ROOT)
+            const same = process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+            if (!same) {
+              process.stderr.write(
+                `\n⚠️  codesynapt: daemon on :${PORT} is serving a DIFFERENT project — results are NOT for your cwd.\n` +
+                `      daemon root: ${h.root}\n` +
+                `      your project: ${PROJECT_ROOT}\n` +
+                `   Fix: run \`cs ensure\` here to start this project's daemon, or set CS_PORT to its port.\n\n`)
+            }
+          }
+        } catch { /* health unparriseable — skip the guard */ }
+        resolve()
+      })
+    })
+    r.on('error', () => resolve())
+    r.on('timeout', () => { r.destroy(); resolve() })
+  })
+  return _projectGuard
+}
+
 function req(method, pathStr, query, body) {
-  return new Promise((resolve, reject) => {
+  return guardProjectMatch().then(() => new Promise((resolve, reject) => {
     let qs = ''
     if (query) {
       const parts = []
@@ -63,7 +135,7 @@ function req(method, pathStr, query, body) {
     })
     if (payload) r.write(payload)
     r.end()
-  })
+  }))
 }
 
 // Cheap liveness probe for an arbitrary port (used to avoid clobbering a
@@ -1425,7 +1497,86 @@ async function main() {
           r.write(payload); r.end()
         })
 
-        // Stage 1: is the desktop alive?
+        // ── [B] Registry/daemon mode — DEFAULT ON (set CS_REGISTRY=0 to force the
+        // legacy desktop-spawn path below). Ensure the per-project HEADLESS
+        // `cs serve` daemon, NOT the desktop: the desktop is now opened separately
+        // by the human as a pure viewer. One daemon per project (registry O_EXCL
+        // lock) makes /codesynapt deterministic regardless of launch order, and the
+        // MCP attaches to the SAME daemon. See docs/design-multi-session.md.
+        //
+        // NOTE: the daemon self-exits when no MCP session / viewer lease references
+        // it (idle-reap, by design). `cs ensure` only pre-warms it; the MCP that
+        // follows (steps 2-3 of /codesynapt) registers the session lease that keeps
+        // it alive. Running `cs ensure` ALONE will spin a daemon that reaps itself
+        // shortly after — that is expected, not a failure.
+        let _registry = null
+        try { _registry = require('../lib/registry.cjs') } catch { /* optional during migration */ }
+        if (_registry && process.env.CS_REGISTRY !== '0') {
+          const DAEMON_TTL_MS = 15000
+          const phash = _registry.projectHash(abs)
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+          const sameRoot = (a) => {
+            if (!a) return false
+            const A = path.resolve(a)
+            return process.platform === 'win32' ? A.toLowerCase() === abs.toLowerCase() : A === abs
+          }
+          const spawnDaemon = () => {
+            const child = cp.spawn(process.execPath, [__filename, 'serve', abs], {
+              detached: true, stdio: 'ignore', env: { ...process.env },
+            })
+            child.unref()
+          }
+
+          const budgetMs = 240_000
+          const startedAt = Date.now()
+          let spawned = false
+          let lastProgressAt = 0
+          while (Date.now() - startedAt < budgetMs) {
+            const d = _registry.readDaemon(phash, DAEMON_TTL_MS)
+            if (d && d.port) {
+              const h = await pingHealth(d.port)
+              if (h && h.status === 200 && sameRoot(h.body?.root)) {
+                if (h.body.initialScanComplete === true) {
+                  process.stdout.write(`✅ daemon ready at :${d.port} (${h.body.fileCount} files, ${h.body.edgeCount ?? 0} edges, ${((Date.now()-startedAt)/1000).toFixed(1)}s)\n`)
+                  printJson({ ok: true, action: spawned ? 'spawned' : 'attached', mode: 'daemon', port: d.port, root: abs, fileCount: h.body.fileCount, edgeCount: h.body.edgeCount })
+                  process.exit(0)
+                }
+                const now = Date.now()
+                if (now - lastProgressAt > 4000) {
+                  lastProgressAt = now
+                  const phase = h.body.scanPhase || 'scanning'
+                  process.stdout.write((phase === 'building'
+                    ? `⏳ building graph (resolving edges)… ${h.body.fileCount} files`
+                    : `⏳ scanning… ${h.body.fileCount} files`) + '\n')
+                }
+              }
+            }
+            if (!spawned) {
+              // No live daemon serving this project → race to spawn exactly one.
+              // The O_EXCL lock serialises concurrent ensures/MCPs: winner spawns,
+              // losers keep polling readDaemon for the winner's published port.
+              const lock = _registry.acquireDaemonLock(phash, { pid: process.pid }, DAEMON_TTL_MS)
+              if (lock.won) {
+                spawnDaemon(); spawned = true
+                process.stdout.write(`🚀 starting headless daemon (cs serve ${abs})\n`)
+              }
+            }
+            await sleep(500)
+          }
+          // Timed out polling — a daemon that's up but still scanning is NOT an error.
+          const d2 = _registry.readDaemon(phash, DAEMON_TTL_MS)
+          if (d2 && d2.port) {
+            const h = await pingHealth(d2.port)
+            if (h && h.status === 200 && sameRoot(h.body?.root)) {
+              process.stdout.write(`⏳ daemon up at :${d2.port} and still scanning ${abs} — proceed (the MCP connects when the scan finishes) or re-run \`cs ensure\`.\n`)
+              printJson({ ok: true, action: 'loading', mode: 'daemon', port: d2.port, root: abs, note: 'scan in progress (not an error)' })
+              process.exit(0)
+            }
+          }
+          die(`daemon did not become ready for ${abs} within ${budgetMs/1000}s. Set CS_REGISTRY=0 to use the legacy desktop launch.`)
+        }
+
+        // Stage 1 (legacy desktop-spawn path — only when CS_REGISTRY=0): desktop alive?
         const initialPort = readPortLock() || PORT
         const h1 = await pingHealth(initialPort)
         if (h1 && h1.status === 200) {
