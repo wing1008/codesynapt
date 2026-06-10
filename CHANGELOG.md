@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.0.2 — beta (2026-06-10)
+
+> Beta / pre-release — APIs and formats may still change.
+
+### Added
+- **Desktop UI overhaul.** The left toolbar is now a vertical icon
+  activity-bar (collapsible, state persisted); settings moved into a left-rail
+  accordion; panels were flattened and the file panel is a collapsible
+  accordion. Adds a folder-region opacity slider, larger dependency arrows, and
+  a proper "ungroup folders" toggle.
+- **Legacy desktop registers in the per-project daemon registry**, so the CLI
+  and MCP discover the desktop's backend the same way they discover `cs serve`
+  — one provider per project, no port guessing.
+
+### Fixed
+- **`cs scan` no longer hangs for ~60 s on exit** — a stray safety timer kept
+  the event loop alive after the snapshot was emitted (60 s → ~0.9 s).
+- **More edges resolved.** `require()` / `import()` specifiers built from
+  `path.resolve` / `path.join(__dirname, …)` literals are now extracted.
+- **Symbol `callers` surfaces value references.** A function passed as a
+  callback (referenced, not called) is shown as used — not reported as dead.
+- `cs symbol` accepts a symbol id directly (ids round-trip through resolve).
+- Top-hub lists no longer include Markdown / doc files.
+- `cs init` backs up an existing `CLAUDE.md` before writing.
+
+### Docs
+- MCP setup no longer claims the desktop app must be running first — the MCP
+  server auto-starts its own backend; the desktop app is optional.
+
 ## 0.0.1 — beta (2026-06-09)
 
 > Beta / pre-release — APIs and formats may still change.
