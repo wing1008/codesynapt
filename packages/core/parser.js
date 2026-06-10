@@ -336,14 +336,15 @@ function parseJS(content) {
       CallExpression(p) {
         const c = p.node.callee
         const args = p.node.arguments
-        // require('...')  or  require(`./foo`)  or  require(CONST)
+        // require('...') / require(`./foo`) / require(CONST) / and the computed
+        // form require(path.resolve(__dirname, …'lit')) / require(path.join(…))
         if (c.type === 'Identifier' && c.name === 'require') {
-          const spec = staticStringValue(args[0], p.scope)
+          const spec = staticStringValue(args[0], p.scope) || staticPathJoinValue(args[0], p.scope)
           if (spec) imports.push({ spec, kind: 'import' })
         }
-        // import('...') — JS dynamic import
+        // import('...') — JS dynamic import (literal or path.resolve/join form)
         if (c.type === 'Import') {
-          const spec = staticStringValue(args[0], p.scope)
+          const spec = staticStringValue(args[0], p.scope) || staticPathJoinValue(args[0], p.scope)
           if (spec) imports.push({ spec, kind: 'dynamic' })
         }
         // jest.mock('./x') / vi.mock('./x') / proxyquire('./x', ...)

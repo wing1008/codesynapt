@@ -9,10 +9,12 @@ small while behavior stays rich.
 
 ## Prerequisites
 
-1. **CodeSynapt desktop app (or `cs serve`) must be running.** The MCP server
-   is a thin bridge to the control API on `127.0.0.1:7707`. If nothing is
-   listening, every tool call returns `ECONNREFUSED`. The `cs ensure` CLI
-   makes this one command — see the slash-command flow below.
+1. **Nothing to pre-start — the MCP server auto-starts its own backend.** On the
+   first tool call it either attaches to a CodeSynapt daemon/desktop already
+   running for this project, or spawns a headless backend itself (scanning
+   `CS_ROOT` or the cwd) — so `cs_*` tools work out of the box with no daemon and
+   no desktop. The **desktop app is optional** and only adds the live 3D view.
+   (`cs ensure` can pre-warm a shared daemon; `CS_PORT` pins a specific one.)
 2. **A folder loaded.** Open via the welcome screen / `File → Open Folder…`,
    pass `--root` to `cs serve`, or set `CS_INITIAL_ROOT` before launching
    the desktop. `/codesynapt` runs `cs ensure` which auto-loads the cwd.
@@ -333,9 +335,10 @@ you compare against your own Read result to confirm freshness.
 
 ## Limitations / gotchas
 
-- **The desktop (or `cs serve`) must be running.** The control API on
-  `127.0.0.1:7707` is the source of truth. `cs ensure` auto-launches the
-  desktop if dead.
+- **No manual backend needed — it auto-starts.** The MCP server attaches to a
+  running daemon/desktop for the project or spawns a headless one on first use;
+  the desktop is optional (3D view only). `cs ensure` can pre-warm a shared
+  daemon, and `CS_PORT` pins a specific backend.
 - **One folder at a time.** Whatever's loaded in the desktop is what the
   agent sees. `POST /load` (via `cs ensure <path>`) swaps it atomically.
 - **Auto-history is opt-in.** Toggle it in Settings → file history before
