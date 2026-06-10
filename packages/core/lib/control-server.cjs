@@ -391,9 +391,13 @@ function createControlServer(opts) {
       byExt[f.ext || 'other'] = (byExt[f.ext || 'other'] || 0) + 1
       if ((f.dynamicPatterns || []).length > 0) dynamicCount++
     }
+    // Exclude documentation files — their cross-links inflate "incoming" and
+    // crowd the real CODE hubs out of the top-N (a .md with many doc-links is
+    // not a structural hub).
+    const DOC_EXTS = new Set(['md', 'mdx', 'markdown', 'rst', 'txt', 'adoc'])
     const topHubs = files
       .map((f) => ({ id: f.id, incoming: incoming.get(f.id) || 0, ext: f.ext }))
-      .filter((h) => h.incoming >= 2)
+      .filter((h) => h.incoming >= 2 && !DOC_EXTS.has(h.ext))
       .sort((a, b) => b.incoming - a.incoming).slice(0, 10)
     const folderCount = new Map()
     for (const f of files) {

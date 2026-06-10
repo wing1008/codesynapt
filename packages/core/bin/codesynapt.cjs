@@ -339,9 +339,21 @@ async function runHeadlessScan(args) {
   const s = new Scanner(abs)
   return new Promise((resolve) => {
     let emitted = false
+    // Safety timeout (CI). MUST be cleared on snapshot — otherwise this pending
+    // timer keeps the Node event loop alive for the full 60s AFTER the result is
+    // already printed, so every `cs scan` appears to hang for a minute.
+    const safety = setTimeout(() => {
+      if (!emitted) {
+        process.stderr.write('scan timed out after 60s\n')
+        try { s.stop() } catch {}
+        resolve()
+        process.exit(2)
+      }
+    }, 60_000)
     s.on('snapshot', (snap) => {
       if (emitted) return
       emitted = true
+      clearTimeout(safety)
       let files = snap.files
       if (extFilter) {
         const exts = new Set(extFilter.split(',').map(x => x.trim()))
@@ -368,9 +380,11 @@ async function runHeadlessScan(args) {
         for (const e of snap.edges) inc.set(e.t, (inc.get(e.t) || 0) + 1)
         const byExt = {}
         for (const f of files) byExt[f.ext || 'other'] = (byExt[f.ext || 'other'] || 0) + 1
+        // Exclude doc files (.md cross-links inflate mass and crowd out code hubs)
+        const DOC_EXTS = new Set(['md', 'mdx', 'markdown', 'rst', 'txt', 'adoc'])
         const topHubs = files
-          .map((f) => ({ id: f.id, mass: inc.get(f.id) || 0 }))
-          .filter((h) => h.mass >= 2)
+          .map((f) => ({ id: f.id, mass: inc.get(f.id) || 0, ext: f.ext }))
+          .filter((h) => h.mass >= 2 && !DOC_EXTS.has(h.ext))
           .sort((a, b) => b.mass - a.mass)
           .slice(0, 10)
         const orphans = files.filter((f) => (inc.get(f.id) || 0) === 0 && f.importCount === 0).length
@@ -398,15 +412,6 @@ async function runHeadlessScan(args) {
       resolve()
     })
     s.start()
-    // Safety timeout — fail loud if scan hangs (shouldn't, but CI safety)
-    setTimeout(() => {
-      if (!emitted) {
-        process.stderr.write('scan timed out after 60s\n')
-        try { s.stop() } catch {}
-        resolve()
-        process.exit(2)
-      }
-    }, 60_000)
   })
 }
 
@@ -1089,6 +1094,10 @@ async function main() {
         // Ambiguous bare names → print candidates and exit so the user re-runs
         // with the precise id.
         const resolveSymbol = async (nameOrId) => {
+          // A full symbol id (file#name@line) — exactly what find/callers/the
+          // picker print — passes straight through. /symbol/find searches by
+          // NAME, so feeding it a full id matched nothing ("no symbol matching").
+          if (/#.+@\d+$/.test(nameOrId)) return nameOrId
           const fr = await req('GET', '/symbol/find', { q: nameOrId })
           if (fr.status !== 200) die(fr.json?.error || `symbol find failed (status ${fr.status})`)
           const matches = (fr.json && fr.json.matches) || []
@@ -1172,6 +1181,18 @@ async function main() {
             process.stdout.write(`\ncandidate* (possible dynamic-dispatch, not confirmed):\n`)
             for (const s of cand) fmtSym(s)
             if (j.candidateNote) process.stdout.write(`\n  ${j.candidateNote}\n`)
+          }
+          // For callers, ALSO surface referencedBy (the symbol passed as a VALUE —
+          // event listener, .map(fn), setTimeout(fn,…)). Without this, a callback-
+          // only function shows "callers (none)" and is misread as dead code even
+          // though the graph tracks the usage (and never marks it dead).
+          if (sub === 'callers') {
+            const nodeRes = await req('GET', '/symbol/node', { id })
+            const refs = nodeRes.json?.referencedBy || []
+            if (refs.length) {
+              process.stdout.write(`\nreferenced as a value by (passed as callback/arg — used, NOT dead):\n`)
+              for (const s of refs) fmtSym(s)
+            }
           }
           break
         }
@@ -1735,6 +1756,17 @@ async function main() {
         // Re-invoke ourselves to generate CLAUDE.md
         const { spawnSync } = require('child_process')
         const outFile = path.join(abs, outputName)
+        // Don't silently destroy an existing CLAUDE.md/AGENTS.md — it may hold
+        // hand-written agent instructions. Back it up before regenerating.
+        if (fs.existsSync(outFile)) {
+          const bak = outFile + '.bak'
+          try {
+            fs.copyFileSync(outFile, bak)
+            process.stderr.write(`ℹ existing ${outputName} backed up to ${path.basename(bak)}\n`)
+          } catch (e) {
+            die(`refusing to overwrite ${outputName}: could not back it up — ${e.message}`)
+          }
+        }
         const r = spawnSync(process.execPath, [__filename, 'context', '--output', outFile], { stdio: 'inherit' })
         if (r.status !== 0) die('context generation failed')
 
