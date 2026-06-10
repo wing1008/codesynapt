@@ -251,6 +251,7 @@ async function startScanner(root) {
 
   // Stop any in-flight scanner cleanly before installing a new one
   currentRoot = root
+  registerDesktopDaemon()   // (re)register this project in the daemon registry
   timelineCache = { root: null, data: null, building: false }   // invalidate
   // Drop every scanner-version-keyed cache so the next /summary, /packages,
   // /legacy call recomputes against the freshly-loaded project instead of
@@ -317,6 +318,7 @@ function stopScanner() {
   if (scanner) { Promise.resolve(scanner.stop()).catch(() => {}); scanner = null }
   _trace._closeStream()
   currentRoot = null
+  unregisterDesktopDaemon()   // project unloaded — drop its registry entry
 }
 
 // ─── Window ─────────────────────────────────────────────────────
@@ -2410,6 +2412,39 @@ function writeLockFile(port) {
 function clearLockFile() {
   try { fs.unlinkSync(getLockFilePath()) } catch {}
 }
+// ─── Desktop → per-project daemon registry ───────────────────────
+// Register the desktop's own control-server in the SAME registry `cs serve`
+// uses, so the CLI/MCP discover it by projectHash — not just via the legacy
+// single global ~/.codesynapt/port lock (last-writer-wins across projects).
+// NOT idle-reaped: the user owns the desktop's lifetime, so a heartbeat keeps
+// the entry fresh and we remove it on folder swap / quit. Pure-client mode
+// skips this (its attached `cs serve` daemon self-registers). This makes the
+// registry the single source of truth for discovery.
+const _deskRegistry = (() => { try { return require('../packages/core/lib/registry.cjs') } catch { return null } })()
+const DESKTOP_EPOCH = (() => { try { return require('crypto').randomUUID() } catch { return 'desk-' + Date.now() } })()
+let _deskRegPhash = null
+let _deskRegHb = null
+function registerDesktopDaemon() {
+  if (PURE_CLIENT || !_deskRegistry || !controlPort || !currentRoot) return
+  try {
+    const phash = _deskRegistry.projectHash(currentRoot)
+    if (_deskRegPhash && _deskRegPhash !== phash) {   // folder swapped → drop old entry
+      try { _deskRegistry.remove('daemon', _deskRegPhash) } catch {}
+    }
+    _deskRegPhash = phash
+    const touch = () => { try { _deskRegistry.touch('daemon', phash, {
+      projectRoot: _deskRegistry.canonicalRoot(currentRoot), port: controlPort,
+      epoch: DESKTOP_EPOCH, pid: process.pid, startedAt: Date.now(), desktop: true,
+    }) } catch {} }
+    touch()
+    if (!_deskRegHb) { _deskRegHb = setInterval(touch, 5000); if (_deskRegHb.unref) _deskRegHb.unref() }
+  } catch {}
+}
+function unregisterDesktopDaemon() {
+  if (_deskRegHb) { clearInterval(_deskRegHb); _deskRegHb = null }
+  if (_deskRegistry && _deskRegPhash) { try { _deskRegistry.remove('daemon', _deskRegPhash) } catch {} }
+  _deskRegPhash = null
+}
 function startControlServer(startPort = controlPort, attempt = 0) {
   if (controlServer) return
   const port = startPort + attempt
@@ -2431,6 +2466,7 @@ function startControlServer(startPort = controlPort, attempt = 0) {
     controlServer = server
     controlPort = port
     writeLockFile(port)
+    registerDesktopDaemon()   // advertise in the per-project registry (if a folder is loaded)
     if (port !== startPort) {
       log.info('control API listening (fallback)', { port, requestedPort: startPort, host: '127.0.0.1' })
       console.log(`[cs] control API listening on http://127.0.0.1:${port}  (fallback — ${startPort} was in use)`)
@@ -2446,6 +2482,7 @@ function stopControlServer() {
     controlServer = null
   }
   clearLockFile()
+  unregisterDesktopDaemon()
 }
 ipcMain.handle('control-port', () => (PURE_CLIENT && _ownDaemonPort) ? _ownDaemonPort : controlPort)
 
@@ -2505,7 +2542,7 @@ ipcMain.handle('viewer:detach', async () => {
   try { if (scanner && mainWindow) mainWindow.webContents.send('snapshot', { root: currentRoot, ...scanner.snapshot() }) } catch {}
   return { ok: true }
 })
-app.on('before-quit', () => { if (_viewer) { try { _viewer.detach() } catch {} } })
+app.on('before-quit', () => { if (_viewer) { try { _viewer.detach() } catch {} } ; unregisterDesktopDaemon() })
 
 // ─── [gap#2] Pure-client mode (dev-gated: CS_PURE_CLIENT=1) ──────
 // The desktop runs NO local scanner / control-server for its own project. It
