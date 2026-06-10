@@ -1,14 +1,14 @@
 # rust-parser
 
-A filegraph3d plugin that adds support for **Rust** (`.rs`) files.
+A codesynapt plugin that adds support for **Rust** (`.rs`) files.
 
 ## What it does
 
-Without this plugin, filegraph3d ignores `.rs` files — they appear as
+Without this plugin, codesynapt ignores `.rs` files — they appear as
 isolated nodes with no edges, because the app doesn't know how to
 read Rust's import syntax.
 
-With this plugin installed, filegraph3d parses:
+With this plugin installed, codesynapt parses:
 
 - `use path::to::thing;` — including `pub use`
 - `mod foo;` — local module declarations
@@ -20,15 +20,15 @@ false edges.
 ## Install
 
 ```sh
-# Copy this folder into your filegraph3d plugins directory:
-# macOS:   ~/Library/Application Support/FileGraph 3D/plugins/
-# Windows: %APPDATA%\FileGraph 3D\plugins\
-# Linux:   ~/.config/FileGraph 3D/plugins/
+# Copy this folder into your codesynapt plugins directory:
+# macOS:   ~/Library/Application Support/codesynapt/plugins/
+# Windows: %APPDATA%\codesynapt\plugins\
+# Linux:   ~/.config/codesynapt/plugins/
 
-cp -r rust-parser ~/Library/Application\ Support/FileGraph\ 3D/plugins/
+cp -r rust-parser ~/Library/Application\ Support/codesynapt/plugins/
 ```
 
-Then quit and reopen filegraph3d.
+Then quit and reopen codesynapt.
 
 Open a Rust project (or any folder containing `.rs` files). You'll
 see them connected by import edges in the graph.
@@ -56,7 +56,7 @@ export its graph.
 
 ## How resolution works
 
-The parser returns import paths like `"std::collections"`. filegraph3d
+The parser returns import paths like `"std::collections"`. codesynapt
 then tries to match these against actual files in your project. The
 matching is path-prefix based, so:
 

@@ -51,7 +51,7 @@ plugin must have one.
 |---|---|---|
 | `author` | string | Your name (no email required). Defaults to `"unknown"`. |
 | `description` | string | One-line summary shown in the plugin list. |
-| `minAppVersion` | string | Earliest filegraph3d version this plugin supports. |
+| `minAppVersion` | string | Earliest codesynapt version this plugin supports. |
 | `license` | string | SPDX identifier (`MIT`, `Apache-2.0`, etc.). |
 
 ### Optional fields
@@ -137,7 +137,7 @@ globals or DOM internals, those aren't stable across versions.
 
 ```js
 ctx.manifest      // your own manifest (handy for version checks)
-ctx.appVersion    // host filegraph3d version
+ctx.appVersion    // host codesynapt version
 
 ctx.graph         // read-only access to nodes/edges/selection
 ctx.ui            // register UI: panels, context-menu items, commands
@@ -175,7 +175,7 @@ Two reasons:
 
 1. **Self-documentation.** Anyone reading your manifest knows what the
    plugin can do without reading the code.
-2. **Future-proofing.** filegraph3d may eventually show a permission
+2. **Future-proofing.** codesynapt may eventually show a permission
    prompt to users before enabling a plugin (Obsidian and VS Code both
    have similar mechanisms). Declaring permissions now means your
    plugin won't break when that lands.

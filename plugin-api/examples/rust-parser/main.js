@@ -1,4 +1,4 @@
-// Rust parser plugin for filegraph3d.
+// Rust parser plugin for codesynapt.
 //
 // Recognizes:
 //   - `use path::to::thing;`  → an import to "path::to::thing"

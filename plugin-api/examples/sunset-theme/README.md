@@ -18,15 +18,15 @@ giving it a softer feel than the default Observatory theme.
 
 ## Install
 
-Copy this folder into your filegraph3d plugins directory:
+Copy this folder into your codesynapt plugins directory:
 
 ```
-macOS:   ~/Library/Application Support/FileGraph 3D/plugins/
-Windows: %APPDATA%\FileGraph 3D\plugins\
-Linux:   ~/.config/FileGraph 3D/plugins/
+macOS:   ~/Library/Application Support/codesynapt/plugins/
+Windows: %APPDATA%\codesynapt\plugins\
+Linux:   ~/.config/codesynapt/plugins/
 ```
 
-Quit and reopen filegraph3d. Open **Settings → Appearance** — "Sunset"
+Quit and reopen codesynapt. Open **Settings → Appearance** — "Sunset"
 appears in the theme grid. Click it.
 
 ## Files

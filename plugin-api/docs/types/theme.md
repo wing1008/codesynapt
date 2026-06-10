@@ -2,7 +2,7 @@
 
 A theme plugin is the simplest plugin type — just CSS. You override
 the app's CSS variables under a `body[data-theme="your-id"]` selector,
-and filegraph3d picks it up automatically.
+and codesynapt picks it up automatically.
 
 - [Minimal example](#minimal-example)
 - [Every variable you can override](#every-variable-you-can-override)
@@ -49,7 +49,7 @@ of ~30 variables, but it'll load. Read on for the rest.
 
 ## Every variable you can override
 
-filegraph3d's UI is parameterized by ~30 CSS custom properties. The
+codesynapt's UI is parameterized by ~30 CSS custom properties. The
 full list:
 
 ### Backgrounds
@@ -177,7 +177,7 @@ Where `R, G, B` is your accent color's RGB.
 
 ## Decorations: corner brackets and accents
 
-filegraph3d's built-in themes have **corner brackets** on panels —
+codesynapt's built-in themes have **corner brackets** on panels —
 small `┌` `┐` `└` `┘` marks that frame each panel. These are part of
 the "Observatory" aesthetic.
 

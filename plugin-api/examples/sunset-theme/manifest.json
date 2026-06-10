@@ -2,7 +2,7 @@
   "id": "sunset-theme",
   "name": "Sunset",
   "version": "1.0.0",
-  "author": "filegraph3d",
+  "author": "codesynapt",
   "description": "Warm orange-coral theme inspired by sunset over the ocean",
   "type": "theme",
   "main": "theme.css",

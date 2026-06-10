@@ -2,7 +2,7 @@
   "id": "rust-parser",
   "name": "Rust Parser",
   "version": "1.0.0",
-  "author": "filegraph3d",
+  "author": "codesynapt",
   "description": "Parse Rust `use` statements and mod declarations to build the dependency graph",
   "type": "parser",
   "main": "main.js",

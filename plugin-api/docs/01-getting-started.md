@@ -1,26 +1,26 @@
 # Getting started
 
-You'll build your first filegraph3d plugin in five minutes. We'll walk
+You'll build your first codesynapt plugin in five minutes. We'll walk
 through two starter plugins — a **theme** (no JavaScript, just CSS)
 and an **action** (a context-menu item that runs code).
 
 ## Prerequisites
 
-- filegraph3d installed and working
+- codesynapt installed and working
 - A text editor of any kind
 - That's it — no Node.js, no build tools, nothing to install
 
 ## 1. Open your plugin folder
 
-In filegraph3d, click **Settings → Appearance → Open plugin folder…**.
+In codesynapt, click **Settings → Appearance → Open plugin folder…**.
 
 This opens (and creates if missing) the per-user plugin directory:
 
 | OS | Path |
 |---|---|
-| macOS | `~/Library/Application Support/FileGraph 3D/plugins/` |
-| Windows | `%APPDATA%\FileGraph 3D\plugins\` |
-| Linux | `~/.config/FileGraph 3D/plugins/` |
+| macOS | `~/Library/Application Support/codesynapt/plugins/` |
+| Windows | `%APPDATA%\codesynapt\plugins\` |
+| Linux | `~/.config/codesynapt/plugins/` |
 
 ## 2A. Track A — make a theme (the easiest plugin)
 
@@ -76,7 +76,7 @@ body[data-theme="my-theme"] {
 
 That's everything. Now:
 
-1. **Quit filegraph3d completely** (Cmd/Ctrl+Q, not just close window).
+1. **Quit codesynapt completely** (Cmd/Ctrl+Q, not just close window).
 2. **Reopen** the app.
 3. Go to **Settings → Appearance**. You'll see "My Theme" in the
    theme grid.
@@ -140,7 +140,7 @@ export default {
 }
 ```
 
-Quit filegraph3d. Reopen. Open a folder. Right-click any node in the
+Quit codesynapt. Reopen. Open a folder. Right-click any node in the
 graph. You'll see "Show info for this file" in the menu. Click it.
 
 A toast pops up with the file's stats. You just made a code plugin.
@@ -159,13 +159,13 @@ Every plugin follows the same shape:
 
 ## Hot reload (limitations)
 
-filegraph3d doesn't yet support hot-reload for plugins. Any change to
+codesynapt doesn't yet support hot-reload for plugins. Any change to
 a plugin requires **quitting and reopening the app**.
 
 A common workflow is:
 
 1. Edit the plugin file in your text editor.
-2. **Cmd/Ctrl+Q** to quit filegraph3d.
+2. **Cmd/Ctrl+Q** to quit codesynapt.
 3. Reopen the app — your plugin reloads with the changes.
 
 (Hot reload is on the roadmap; until then, the quit-restart cycle is

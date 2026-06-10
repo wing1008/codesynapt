@@ -1,8 +1,8 @@
 {
-  "name": "@filegraph3d/plugin-api",
+  "name": "@codesynapt/plugin-api",
   "version": "0.1.0",
   "type": "module",
-  "description": "TypeScript types and helpers for filegraph3d plugins",
+  "description": "TypeScript types and helpers for codesynapt plugins",
   "types": "types.d.ts",
   "files": [
     "types.d.ts",
@@ -11,10 +11,10 @@
     "examples/"
   ],
   "license": "MIT",
-  "keywords": ["filegraph3d", "plugin", "api", "code-visualization"],
+  "keywords": ["codesynapt", "plugin", "api", "code-visualization"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_USER/filegraph3d.git",
+    "url": "git+https://github.com/wing1008/codesynapt.git",
     "directory": "plugin-api"
   }
 }
