@@ -9,6 +9,13 @@
 const fs = require('fs')
 const path = require('path')
 
+// Decline SAMPLING (which specific calls were declined) is a DIAGNOSTIC, not a
+// shipped signal — every /symbol/summary response is consumed by AI agents on a
+// token budget, so we never bloat it with samples in production. The compact
+// declineReasons COUNTS always ship (they power the honest static-floor footer);
+// the per-call samples only collect when CS_DBG is set.
+const CS_DECLINE_SAMPLES = !!(process.env.CS_DBG || process.env.CS_DECLINE_SAMPLES)
+
 // Parser registry — extended per-language in Stage 1 / Stage 2.
 // Each entry: { extractSymbols(content, fileId) → SymbolNode[],
 //               extractReferences(content, fileId, index) → SymbolEdge[] }
@@ -139,6 +146,11 @@ class SymbolGraph {
     // (builtin/common name, or ambiguous across >1 production file). Surfaced
     // in stats() so "unresolved" reads as data, not a silent drop.
     this.unresolvedAmbiguous = 0
+    // Decomposition of unresolvedAmbiguous by decline reason — separates
+    // correct stdlib/builtin declines (not real edges) from genuine unresolved
+    // user calls (the real static gap). Surfaced in stats().
+    this.declineReasons = Object.create(null)
+    this.declineSamples = []
     // Honest signal #2: parser outcomes per file, so a broken-language /
     // crashed-parser file is distinguishable from a legitimately symbol-less
     // one. parseFailures = files whose parser THREW (extractSymbols or
@@ -174,6 +186,8 @@ class SymbolGraph {
     this.fileCount = 0
     this.scanMs = 0
     this.unresolvedAmbiguous = 0
+    this.declineReasons = Object.create(null)
+    this.declineSamples = []
     this.parseFailures = 0
     this.emptyFiles = 0
   }
@@ -284,6 +298,22 @@ class SymbolGraph {
     return null
   }
 
+  // Record a declined call resolution under a labeled reason. The sum of
+  // declineReasons always equals unresolvedAmbiguous — it just tells us WHICH
+  // declines are correct (stdlib/builtin) vs a genuine unresolved user call.
+  _decline(reason, name, fromFileId) {
+    this.unresolvedAmbiguous++
+    this.declineReasons[reason] = (this.declineReasons[reason] || 0) + 1
+    // Sample the genuinely-uncertain declines (NOT stdlib/builtin noise) so the
+    // real static gap is inspectable — DIAGNOSTIC ONLY (CS_DBG), never in the
+    // shipped response. Capped to stay cheap even when enabled.
+    if (CS_DECLINE_SAMPLES && reason !== 'builtin-method' && reason !== 'builtin-fallback'
+        && this.declineSamples.length < 100) {
+      this.declineSamples.push({ reason, name, from: fromFileId })
+    }
+    return null
+  }
+
   resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false, inModule = null } = {}) {
     if (!name) return null
     // Untyped member call `obj.foo()` where foo is a builtin / common method
@@ -293,8 +323,7 @@ class SymbolGraph {
     // `add` for `visited.add()` — B-2 / the JS-recall measurement). Bare
     // calls `foo()` are unaffected (memberCall=false).
     if (memberCall && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
-      this.unresolvedAmbiguous++
-      return null
+      return this._decline('builtin-method', name, fromFileId)
     }
     // Type-aware lookup: `User.method` matches a symbol whose
     // qualifiedName === 'User.method' exactly. Higher priority than
@@ -417,7 +446,7 @@ class SymbolGraph {
     }
     // Ambiguous bare-name member call (≥2 impls of the method name) — refuse the
     // arbitrary first match; the candidate leg exposes all impls instead.
-    if (ambiguousMethodCall) { this.unresolvedAmbiguous++; return null }
+    if (ambiguousMethodCall) { return this._decline('ambiguous-user-method', name, fromFileId) }
     if (sameFile && !importedOnly) return sameFile
     // Pinned namespace match (single module reach) takes precedence as before.
     if (imported) return imported
@@ -426,7 +455,7 @@ class SymbolGraph {
     // through to the production/candidate legs rather than pick an arbitrary,
     // iteration-order-dependent file (the documented nondeterminism bug).
     if (importedCandCount === 1) return importedCand
-    if (importedCandCount > 1) { this.unresolvedAmbiguous++; return null }
+    if (importedCandCount > 1) { return this._decline('imported-ambiguous', name, fromFileId) }
     if (!allowAny) return null
     // Tightened fallback. The old code returned ANY same-named symbol here,
     // which mis-linked `.add()`/`.resolve()` method calls on unknown
@@ -434,10 +463,9 @@ class SymbolGraph {
     // common method name by bare name, and leave an ambiguous name (>1
     // production candidate) unresolved rather than mis-link. Phase-0 spike:
     // suspect cross-file edges −81% (JS) / −54% (Python), <1% real loss.
-    if (BUILTIN_NAMES.has(name.toLowerCase())) { this.unresolvedAmbiguous++; return null }
+    if (BUILTIN_NAMES.has(name.toLowerCase())) { return this._decline('builtin-fallback', name, fromFileId) }
     if (prodCount === 1) return prodOne
-    this.unresolvedAmbiguous++
-    return null
+    return this._decline(prodCount === 0 ? 'no-match' : 'ambiguous-prod', name, fromFileId)
   }
 
   // The DYNAMIC candidate leg. When a call can't be pinned to ONE static target
@@ -933,6 +961,10 @@ class SymbolGraph {
       builtAt: this.builtAt,
       abortedAt: this.abortedAt || null,   // null | 'symbols' | 'edges'
       unresolvedAmbiguous: this.unresolvedAmbiguous,  // calls we declined to guess
+      declineReasons: this.declineReasons,  // breakdown: stdlib-correct vs genuine gap
+      // Per-call samples are diagnostic-only — omitted from the shipped response
+      // unless CS_DBG populated them (keeps the AI-consumed payload lean).
+      ...(this.declineSamples.length ? { declineSamples: this.declineSamples } : {}),
       parseFailures: this.parseFailures,   // files whose parser threw (swallowed to [])
       emptyFiles: this.emptyFiles,         // files parsed OK but with 0 symbols
     }

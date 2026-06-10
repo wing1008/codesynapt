@@ -1145,6 +1145,20 @@ async function main() {
               process.stdout.write(`  c=${String(h.callers).padStart(4)}  [${(h.kind || '?').padEnd(8)}] ${h.name}  ${h.file}:${h.line}\n`)
             }
           }
+          // Honesty footer — make the static floor and its blind spots explicit
+          // rather than letting the symbol counts read as "the whole call graph".
+          const _be = j.byEdgeKind || {}
+          const _dr = j.declineReasons || {}
+          const _precise = _be.call || 0
+          const _cand = _be['call-candidate'] || 0
+          if (_cand || j.unresolvedAmbiguous) {
+            const _stdlib = (_dr['builtin-method'] || 0) + (_dr['builtin-fallback'] || 0)
+            const _gap = Math.max(0, (j.unresolvedAmbiguous || 0) - _stdlib)
+            process.stdout.write(`\nresolution (static floor — treat as a lower bound, not the whole graph):\n`)
+            process.stdout.write(`  ${_precise} precise · ${_cand} ambiguous (candidates shown, not pinned to one target)\n`)
+            process.stdout.write(`  ${j.unresolvedAmbiguous || 0} declined = ${_stdlib} stdlib/builtin (correct, not edges) + ${_gap} genuinely unresolved\n`)
+            process.stdout.write(`  ⚠️  dynamic calls (obj[x](), DI, local callbacks) produce NO edge and are NOT counted — only runtime tracing sees them.\n`)
+          }
           break
         }
 
