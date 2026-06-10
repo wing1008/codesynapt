@@ -280,6 +280,13 @@
         </label>
         <input type="range" id="folderSpreadSlider" min="0.3" max="1.0" step="0.05" value="0.85" />
       </div>
+      <div class="slider-row">
+        <label class="slider-label">
+          <span data-i18n="settings.layout.folder_opacity">folder area opacity</span>
+          <span id="folderOpacityVal" class="slider-val">0.06</span>
+        </label>
+        <input type="range" id="folderOpacitySlider" min="0" max="0.4" step="0.01" value="0.06" />
+      </div>
       <button id="resetLayoutBtn" class="micro-btn" style="margin-top:6px;" data-i18n="settings.layout.reset">reset to defaults</button>
 
       <div class="settings-section" style="margin-top: 22px;" data-i18n="settings.appearance.title">appearance</div>
@@ -386,21 +393,18 @@
        localStorage (codesynapt:left-tab). -->
   <aside id="leftRail">
     <div class="left-tabs" role="tablist">
-      <button class="left-tab active" data-tab="files"     role="tab" data-i18n="kicker.files">files</button>
-      <button class="left-tab"        data-tab="pipelines" role="tab" data-i18n="kicker.pipelines">pipelines</button>
-      <button class="left-tab"        data-tab="recent"    role="tab" data-i18n="kicker.recent">recent</button>
-      <button class="left-tab"        data-tab="legend"    role="tab" data-i18n="kicker.legend">extensions</button>
+      <button class="left-tab active" data-tab="files"     role="tab" data-i18n-title="kicker.files"><span class="lt-icon">📁</span><span class="lt-label" data-i18n="kicker.files">files</span></button>
+      <button class="left-tab"        data-tab="pipelines" role="tab" data-i18n-title="kicker.pipelines"><span class="lt-icon">🔗</span><span class="lt-label" data-i18n="kicker.pipelines">pipelines</span></button>
+      <button class="left-tab"        data-tab="recent"    role="tab" data-i18n-title="kicker.recent"><span class="lt-icon">🕐</span><span class="lt-label" data-i18n="kicker.recent">recent</span></button>
+      <button class="left-tab"        data-tab="legend"    role="tab" data-i18n-title="kicker.legend"><span class="lt-icon">🎨</span><span class="lt-label" data-i18n="kicker.legend">extensions</span></button>
+      <button class="left-tab"        data-tab="settings"  role="tab" data-i18n-title="kicker.settings"><span class="lt-icon">⚙️</span><span class="lt-label" data-i18n="kicker.settings">settings</span></button>
       <!-- [④] only shown in multi-session viewer mode (CS_REGISTRY) -->
-      <button class="left-tab hidden" data-tab="sessions"  role="tab" id="sessionsTab" data-i18n="kicker.sessions">sessions</button>
+      <button class="left-tab hidden" data-tab="sessions"  role="tab" id="sessionsTab" data-i18n-title="kicker.sessions"><span class="lt-icon">📊</span><span class="lt-label" data-i18n="kicker.sessions">sessions</span></button>
     </div>
     <div class="left-tab-pane" data-pane="files">
       <section id="fileTreePanel">
         <div class="ft-head">
           <span class="kicker" data-i18n="kicker.files">files</span>
-          <div class="ft-actions">
-            <button id="ftCollapseAll" class="micro-btn" data-i18n-title="ft.collapse_all.title">⌃</button>
-            <button id="ftToggle" class="micro-btn" data-i18n-title="ft.hide.title">−</button>
-          </div>
         </div>
         <div id="ftRoot" class="ft-root" title=""></div>
         <div id="fileTreeBody" class="ft-body"></div>
@@ -444,6 +448,9 @@
         <div id="sessionsList" class="sp-list"></div>
       </section>
     </div>
+    <!-- settings: the #settings .settings-body is RELOCATED here by JS
+         (moveSettingsIntoRail) so all its existing controls keep their wiring. -->
+    <div class="left-tab-pane hidden" data-pane="settings" id="settingsPaneHost"></div>
   </aside>
 
   <!-- Folder name labels — one per cluster when grouping is on -->

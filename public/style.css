@@ -324,6 +324,17 @@ body {
 }
 body.rail-collapsed       { grid-template-columns: var(--rail-w) 1fr 0; column-gap: var(--grid-gap); }
 body.left-rail-collapsed  { grid-template-columns: 0 1fr var(--rail-w); }
+/* Activity-bar collapsed: only the 40px icon strip; pane hidden (see #leftRail).
+   The icon strip stays 40px in BOTH states (same as expanded) for a consistent
+   width — so the collapsed left column is exactly the strip. */
+body.left-rail-icons      { grid-template-columns: 40px 1fr var(--rail-w); }
+/* The rail's wide-rail -12px side margins make #leftRail render wider than the
+   40px strip; that extra sliver showed the lighter --bg-elev background as a
+   faint band before the 3D view. Paint the collapsed rail the 3D-view colour so
+   the sliver blends into the canvas (invisible), and drop the strip's divider
+   border since there's no pane beside it. Strip stays 40px. */
+body.left-rail-icons #leftRail  { background: #03050C; border-right: 0; }
+body.left-rail-icons .left-tabs { border-right: 0; }
 body.no-folder            { grid-template-columns: 0 1fr 0; column-gap: 0; padding: 0; }
 
 #topbar    { grid-area: top; }
@@ -1607,6 +1618,37 @@ body:not(.no-folder) #welcome { display: none; }
   line-height: 1.5;
   margin: 0 0 12px;
 }
+/* ═══ Settings as a collapsible accordion (relocated into the left rail) ═══ */
+.settings-acc { border-bottom: 1px solid var(--border-edge); }
+.settings-acc-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  margin: 0;
+  padding: 10px 0;
+  /* match the search box's faint '파일 필터…' placeholder: light, not bold */
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--fg-mute);
+  opacity: 0.7;
+}
+.settings-acc-title::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 18px;           /* ~2× — easier to see and click (matches files) */
+  line-height: 1;
+  color: var(--fg-mute);
+  transition: transform 0.15s;
+}
+.settings-acc.open > .settings-acc-title::before { transform: rotate(90deg); }
+.settings-acc-title:hover { color: var(--fg); opacity: 1; }
+.settings-acc-body { display: none; padding: 0 0 12px 14px; }
+.settings-acc.open > .settings-acc-body { display: block; }
 .setting-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .setting-toggle {
   display: inline-flex; align-items: center; gap: 8px;
@@ -2756,7 +2798,7 @@ body.rail-collapsed #statsPanel {
 /* ─── Left sidebar shell — fills grid area "lft" ──────── */
 #leftRail {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;   /* activity-bar: vertical icon strip | expandable pane */
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -2766,33 +2808,37 @@ body.rail-collapsed #statsPanel {
   /* extend full-width into grid gap so it visually anchors to viewport edge */
 }
 
-/* ═══ Left sidebar: tabs + single visible pane ═══ */
+/* ═══ Left sidebar: vertical icon strip (activity bar) + expandable pane ═══ */
 .left-tabs {
   display: flex;
-  border-bottom: 1px solid var(--border-edge);
+  flex-direction: column;                       /* icons stacked vertically */
+  border-right: 1px solid var(--border-edge);
   background: rgba(0, 0, 0, 0.25);
-  flex: 0 0 32px;
+  flex: 0 0 40px;                               /* fixed 40px icon strip */
 }
 .left-tab {
-  flex: 1;
-  height: 32px;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 0;
+  border-left: 2px solid transparent;          /* active marker on the strip edge */
   color: var(--fg-mute);
   font: inherit;
-  font-size: 10.5px;
-  text-transform: lowercase;
-  letter-spacing: 0.04em;
+  font-size: 17px;                             /* emoji icon size */
   cursor: pointer;
-  border-bottom: 2px solid transparent;
   transition: color 0.12s, border-color 0.12s, background 0.12s;
 }
-.left-tab:hover { color: var(--fg); background: rgba(126, 207, 207, 0.04); }
+.left-tab:hover { color: var(--fg); background: rgba(126, 207, 207, 0.06); }
 .left-tab.active {
   color: var(--accent);
-  border-bottom-color: var(--accent);
-  background: rgba(126, 207, 207, 0.06);
+  border-left-color: var(--accent);
+  background: rgba(126, 207, 207, 0.08);
 }
+.lt-label { display: none; }                   /* strip is icon-only; label feeds i18n + a11y */
 .left-tab-pane {
   flex: 1 1 auto;
   min-height: 0;
@@ -2801,10 +2847,39 @@ body.rail-collapsed #statsPanel {
   flex-direction: column;
 }
 .left-tab-pane.hidden { display: none; }
+/* Collapsed to icons only — hide the pane; the grid shrinks the column to 40px */
+body.left-rail-icons #leftRail .left-tab-pane { display: none; }
 body.no-folder #leftRail { display: none; }
-/* Tree collapse hides only the file tree section — the other left-rail
-   panels (pipelines, recent, legend) remain visible. */
-body.tree-collapsed #fileTreePanel { display: none; }
+/* These panels were floating cards (border, bg, blur, shadow, corner accents).
+   Inside a left-rail pane that's a redundant box-in-a-box — flatten them so the
+   content sits directly in the pane and the PANE (not the inner card) scrolls. */
+.left-tab-pane #legend,
+.left-tab-pane #recentFiles,
+.left-tab-pane #pipelinesPanel {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  max-height: none;
+  padding: 6px 12px 10px;
+}
+.left-tab-pane #pipelinesPanel::before,
+.left-tab-pane #pipelinesPanel::after { display: none; }
+/* Inner lists carried their own capped scroll (e.g. .rf-list max-height:180px),
+   which inside a rail pane shows a tiny scrollbar with empty pane space below.
+   Let them flow and the pane scroll instead. */
+.left-tab-pane .rf-list,
+.left-tab-pane .pp-list { max-height: none; overflow: visible; }
+/* The file tree panel was also a floating card — flatten it inside the rail. */
+.left-tab-pane #fileTreePanel {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 
 #fileTreePanel {
   position: relative;
@@ -2821,11 +2896,10 @@ body.tree-collapsed #fileTreePanel { display: none; }
   overflow: hidden;
   transition: opacity 0.22s ease;
 }
-#fileTreePanel.collapsed {
-  transform: translateX(calc(-100% - 32px));
-  opacity: 0;
-  pointer-events: none;
-}
+/* Accordion collapse: keep the "files" header, hide the tree body (the .ft-root
+   is already hidden below); shrink so it doesn't reserve empty space. */
+#fileTreePanel.collapsed { flex: 0 0 auto; }
+#fileTreePanel.collapsed .ft-body { display: none; }
 .ft-head {
   display: flex;
   justify-content: space-between;
@@ -2833,7 +2907,19 @@ body.tree-collapsed #fileTreePanel { display: none; }
   padding: 10px 12px;
   border-bottom: 1px solid rgba(126, 207, 207, 0.1);
   flex-shrink: 0;
+  cursor: pointer;              /* click the header to collapse/expand (accordion) */
+  user-select: none;
 }
+.ft-head .kicker::before {
+  content: '▾';
+  display: inline-block;
+  margin-right: 7px;
+  font-size: 18px;            /* ~2× — easier to see and click */
+  line-height: 1;
+  color: var(--fg-mute);
+  transition: transform 0.15s;
+}
+#fileTreePanel.collapsed .ft-head .kicker::before { transform: rotate(-90deg); }
 .ft-actions { display: flex; gap: 4px; }
 .ft-root {
   padding: 6px 12px 8px;
@@ -2880,7 +2966,7 @@ body.tree-collapsed #fileTreePanel { display: none; }
   color: var(--fg-mute);
   flex-shrink: 0;
 }
-.ft-row .ft-icon.expand { cursor: pointer; }
+.ft-row .ft-icon.expand { cursor: pointer; font-size: 14px; }   /* bigger glyph (box stays 12px → tree stays aligned) */
 .ft-row .ft-color {
   width: 6px; height: 6px;
   border-radius: 50%;

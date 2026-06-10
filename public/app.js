@@ -232,6 +232,7 @@ const T = {
     'settings.layout.max_world':    '월드 최대 크기',
     'settings.layout.folder_strength': '폴더 클러스터 중력',
     'settings.layout.folder_spread':   '폴더 클러스터 거리',
+    'settings.layout.folder_opacity':  '폴더 영역 투명도',
     'settings.layout.reset':        '기본값으로 리셋',
     'settings.appearance.title':    '외관',
     'settings.appearance.help':     '인터페이스 비주얼 테마. 그래프 자체는 모든 테마에서 동일 — 패널/타이포/장식만 바뀜.',
@@ -504,6 +505,7 @@ const T = {
     'settings.layout.max_world':    'max world size',
     'settings.layout.folder_strength': 'folder cluster strength',
     'settings.layout.folder_spread':   'folder cluster spread',
+    'settings.layout.folder_opacity':  'folder area opacity',
     'settings.layout.reset':        'reset to defaults',
     'settings.appearance.title':    'appearance',
     'settings.appearance.help':     'Visual theme for the interface. The graph itself looks the same across themes — only the panels, typography, and decorations change.',
@@ -770,6 +772,7 @@ const state = {
   folderGrouping: false,   // when true, files in the same folder get a weak attraction,
   folderClusterStrength: 0.30,  // 0..0.4 — pull intensity toward folder anchor
   folderClusterSpread:   0.85,  // 0.3..1.0 — anchor radius as fraction of world soft cap
+  folderAreaOpacity:     0.06,  // 0..0.4 — folder bubble (area) max opacity (far)
 
   // User-tunable layout — scale spacing and node size at runtime
   nodeDistanceScale: 1.0,  // 0.3..3.0 — multiplies REPEL and REST
@@ -1550,7 +1553,9 @@ function updateFolderBubblesToCentroids() {
     // alpha 0.18 × color@L=0.55 ≈ (39, 17, 17)   close
     // alpha 0.50 × color@L=0.90 ≈ (130, 116, 116) far  ← much brighter
     const t = Math.max(0, Math.min(1, 1 - apparent))
-    mesh.material.opacity = 0.08 + 0.42 * t       // 0.08 close → 0.50 far
+    // Slider-controlled: state.folderAreaOpacity is the FAR (max) opacity; near
+    // is 20% of it so the distance-fade is preserved at any level.
+    mesh.material.opacity = (state.folderAreaOpacity ?? 0.06) * (0.2 + 0.8 * t)
     const folderName = mesh.userData.folder || ''
     const p = FOLDER_PALETTE[folderPaletteIndex(folderName)]
     const L = p.l + (0.92 - p.l) * t              // palette L → near 0.92 far
@@ -2861,7 +2866,8 @@ function setTreeCollapsed(collapsed) {
   const panel = document.getElementById('fileTreePanel')
   panel.classList.toggle('collapsed', collapsed)
   document.body.classList.toggle('tree-collapsed', collapsed)
-  document.getElementById('ftToggle').textContent = collapsed ? '+' : '−'
+  const ft = document.getElementById('ftToggle')
+  if (ft) ft.textContent = collapsed ? '+' : '−'   // button removed; guard
   const tbtn = document.getElementById('treeToggleBtn')
   if (tbtn) tbtn.classList.toggle('active', collapsed)
   try { localStorage.setItem('codesynapt:tree_collapsed', collapsed ? 'true' : 'false') } catch {}
@@ -2870,16 +2876,16 @@ function toggleTree() {
   const collapsed = !document.getElementById('fileTreePanel').classList.contains('collapsed')
   setTreeCollapsed(collapsed)
 }
-document.getElementById('ftCollapseAll').addEventListener('click', collapseAllTree)
-document.getElementById('ftToggle').addEventListener('click', toggleTree)
+// The ftCollapseAll / ftToggle header buttons were removed (a stray click on the
+// hide button left no way to bring the tree back). treeToggleBtn / the 'T'
+// shortcut remain as escape hatches.
 document.getElementById('treeToggleBtn')?.addEventListener('click', toggleTree)
+// Click the "files" header to collapse/expand the tree (accordion).
+document.querySelector('.ft-head')?.addEventListener('click', toggleTree)
 
-// Restore tree collapsed state
-try {
-  if (localStorage.getItem('codesynapt:tree_collapsed') === 'true') {
-    setTreeCollapsed(true)
-  }
-} catch {}
+// Never auto-collapse on load, and clear any state persisted by the old hide
+// button so a tree that was hidden that way reappears.
+try { localStorage.removeItem('codesynapt:tree_collapsed') } catch {}
 
 // Reveal the canvas (hide the dark loading overlay) once the graph's first
 // frame has drawn — covers the brief white an opaque WebGL canvas shows before
@@ -3281,9 +3287,17 @@ function renderFilterBadges() {
       label: 'folder clustering',
       title: 'Files in the same folder are pulled toward each other',
       clear: () => {
+        // Reuse the canonical Settings toggle so the FULL teardown runs:
+        // de-cluster animation (disperse targets + frames), hideFolderBubbles(),
+        // camera reframe, persistence, and the filter:changed that removes this
+        // badge. The ✕ used to only flip the flag + reheat — leaving nodes
+        // clustered and the folder bubbles on screen, so it "didn't revert" and
+        // you had to turn it off in Settings instead.
+        const btn = document.getElementById('folderGroupBtn')
+        if (btn && state.folderGrouping) { btn.click(); return }
+        // Fallback if the toggle button isn't in the DOM for some reason.
         state.folderGrouping = false
         try { localStorage.setItem('codesynapt:folder_grouping', 'false') } catch {}
-        const btn = document.getElementById('folderGroupBtn')
         if (btn) btn.classList.remove('active')
         reheat(0.3)
       },
@@ -4169,10 +4183,10 @@ window.addEventListener('keydown', (e) => {
     document.getElementById('search').focus()
     return
   }
-  // Cmd/Ctrl+, — open settings
+  // Cmd/Ctrl+, — open settings (now the left-rail settings tab)
   if ((e.metaKey || e.ctrlKey) && e.key === ',') {
     e.preventDefault()
-    settingsPanel.classList.toggle('hidden')
+    openSettings()
     return
   }
   // Space — pause toggle
@@ -4206,11 +4220,10 @@ window.addEventListener('keydown', (e) => {
     if (btn) btn.click()
     return
   }
-  // T — toggle file tree
+  // T — toggle file tree (header button removed; call the toggle directly)
   if (e.key === 't' || e.key === 'T') {
     e.preventDefault()
-    const btn = document.getElementById('ftToggle')
-    if (btn) btn.click()
+    toggleTree()
     return
   }
   // 1-3 — restore camera view (Cmd/Ctrl+1-3 saves the current view).
@@ -5866,6 +5879,7 @@ const NODE_SIZE_KEY = 'codesynapt:node_size_v2'   // v2: rebased default — old
 const MAX_WORLD_KEY = 'codesynapt:max_world_radius'
 const FOLDER_STRENGTH_KEY = 'codesynapt:folder_strength'
 const FOLDER_SPREAD_KEY   = 'codesynapt:folder_spread'
+const FOLDER_OPACITY_KEY  = 'codesynapt:folder_opacity'
 try { localStorage.removeItem('codesynapt:node_size') } catch {}
 try {
   const d = parseFloat(localStorage.getItem(NODE_DIST_KEY))
@@ -5878,6 +5892,8 @@ try {
   if (!isNaN(fs) && fs >= 0 && fs <= 0.4) state.folderClusterStrength = fs
   const fp = parseFloat(localStorage.getItem(FOLDER_SPREAD_KEY))
   if (!isNaN(fp) && fp >= 0.3 && fp <= 1.0) state.folderClusterSpread = fp
+  const fo = parseFloat(localStorage.getItem(FOLDER_OPACITY_KEY))
+  if (!isNaN(fo) && fo >= 0 && fo <= 0.4) state.folderAreaOpacity = fo
 } catch {}
 
 const distSlider         = document.getElementById('nodeDistanceSlider')
@@ -5890,6 +5906,8 @@ const folderStrengthSlider = document.getElementById('folderStrengthSlider')
 const folderStrengthVal    = document.getElementById('folderStrengthVal')
 const folderSpreadSlider   = document.getElementById('folderSpreadSlider')
 const folderSpreadVal      = document.getElementById('folderSpreadVal')
+const folderOpacitySlider  = document.getElementById('folderOpacitySlider')
+const folderOpacityVal     = document.getElementById('folderOpacityVal')
 
 function syncSliderUI() {
   distSlider.value = state.nodeDistanceScale
@@ -5902,6 +5920,10 @@ function syncSliderUI() {
   folderStrengthVal.textContent = state.folderClusterStrength.toFixed(2)
   folderSpreadSlider.value = state.folderClusterSpread
   folderSpreadVal.textContent = state.folderClusterSpread.toFixed(2)
+  if (folderOpacitySlider) {
+    folderOpacitySlider.value = state.folderAreaOpacity
+    folderOpacityVal.textContent = state.folderAreaOpacity.toFixed(2)
+  }
 }
 syncSliderUI()
 
@@ -5981,12 +6003,20 @@ folderSpreadSlider.addEventListener('input', () => {
   }
   try { localStorage.setItem(FOLDER_SPREAD_KEY, String(state.folderClusterSpread)) } catch {}
 })
+folderOpacitySlider?.addEventListener('input', () => {
+  state.folderAreaOpacity = parseFloat(folderOpacitySlider.value)
+  if (isNaN(state.folderAreaOpacity)) state.folderAreaOpacity = 0.06
+  folderOpacityVal.textContent = state.folderAreaOpacity.toFixed(2)
+  // No reheat needed — opacity is read live in the render loop each frame.
+  try { localStorage.setItem(FOLDER_OPACITY_KEY, String(state.folderAreaOpacity)) } catch {}
+})
 document.getElementById('resetLayoutBtn')?.addEventListener('click', () => {
   state.nodeDistanceScale = 1.0
   state.nodeSizeScale = 1.0
   state.maxWorldRadius = 200
   state.folderClusterStrength = 0.30
   state.folderClusterSpread = 0.85
+  state.folderAreaOpacity = 0.06
   syncSliderUI()
   if (state.folderGrouping) folderCentroidLastUpdate = 0
   reheat(0.5)
@@ -5996,6 +6026,7 @@ document.getElementById('resetLayoutBtn')?.addEventListener('click', () => {
     localStorage.removeItem(MAX_WORLD_KEY)
     localStorage.removeItem(FOLDER_STRENGTH_KEY)
     localStorage.removeItem(FOLDER_SPREAD_KEY)
+    localStorage.removeItem(FOLDER_OPACITY_KEY)
   } catch {}
 })
 
@@ -6318,10 +6349,14 @@ function formatBytes(b) {
 //  another app (e.g. Wan 2.2 inference, gaming, training).
 // ═══════════════════════════════════════════════════════════════
 const settingsPanel = document.getElementById('settings')
-document.getElementById('settingsBtn').addEventListener('click', () => {
-  settingsPanel.classList.toggle('hidden')
-})
-document.getElementById('closeSettings').addEventListener('click', () => {
+// Settings now live in the left rail (its body is relocated there by
+// moveSettingsIntoRail). Opening settings = switch the rail to the settings tab
+// and expand it. leftSetTab/setLeftRailCollapsed are hoisted declarations below.
+function openSettings() {
+  try { leftSetTab('settings'); setLeftRailCollapsed(false) } catch {}
+}
+document.getElementById('settingsBtn').addEventListener('click', openSettings)
+document.getElementById('closeSettings')?.addEventListener('click', () => {
   settingsPanel.classList.add('hidden')
 })
 
@@ -7118,13 +7153,27 @@ function leftSetTab(name) {
   }
   try { localStorage.setItem(LEFT_TAB_KEY, name) } catch {}
 }
+const LEFT_RAIL_ICONS_KEY = 'codesynapt:left_rail_icons'
+// Collapse the left rail to its 40px icon strip (pane hidden) or expand it.
+function setLeftRailCollapsed(collapsed) {
+  document.body.classList.toggle('left-rail-icons', collapsed)
+  try { localStorage.setItem(LEFT_RAIL_ICONS_KEY, collapsed ? '1' : '0') } catch {}
+}
 ;(function initLeftTabs() {
   const rail = document.getElementById('leftRail')
   if (!rail) return
   rail.addEventListener('click', (ev) => {
     const btn = ev.target.closest('.left-tab')
     if (!btn) return
-    leftSetTab(btn.dataset.tab)
+    const collapsed = document.body.classList.contains('left-rail-icons')
+    if (!collapsed && btn.classList.contains('active')) {
+      // Clicking the already-open icon collapses the rail back to icons only.
+      setLeftRailCollapsed(true)
+    } else {
+      // Switching to / opening an icon always expands the pane.
+      leftSetTab(btn.dataset.tab)
+      setLeftRailCollapsed(false)
+    }
   })
   let saved = 'files'
   try { saved = localStorage.getItem(LEFT_TAB_KEY) || 'files' } catch {}
@@ -7134,6 +7183,49 @@ function leftSetTab(name) {
   const savedBtn = rail.querySelector(`.left-tab[data-tab="${saved}"]`)
   if (!savedBtn || savedBtn.classList.contains('hidden')) saved = 'files'
   leftSetTab(saved)
+  // Default to collapsed (icon-only) per the activity-bar design; restore the
+  // saved choice so an expand persists across reloads.
+  let startCollapsed = true
+  try { if (localStorage.getItem(LEFT_RAIL_ICONS_KEY) === '0') startCollapsed = false } catch {}
+  setLeftRailCollapsed(startCollapsed)
+})()
+
+// ── Relocate the Settings panel into the left rail as an accordion tab ──
+// The whole .settings-body node is MOVED (not recreated) so every existing
+// control keeps its event wiring. Each section becomes a collapsible accordion
+// row (default collapsed; per-section open state persisted).
+;(function moveSettingsIntoRail() {
+  const host = document.getElementById('settingsPaneHost')
+  const panel = document.getElementById('settings')
+  const body = panel && panel.querySelector('.settings-body')
+  if (!host || !body) return
+  host.appendChild(body)
+  if (panel) panel.classList.add('hidden')   // old overlay is now empty — keep hidden
+  const sections = [...body.querySelectorAll('.settings-section')]
+  sections.forEach((title, i) => {
+    const wrap = document.createElement('div')
+    wrap.className = 'settings-acc'
+    title.before(wrap)
+    wrap.appendChild(title)
+    title.classList.add('settings-acc-title')
+    title.style.marginTop = ''                // accordion provides its own spacing
+    const cbody = document.createElement('div')
+    cbody.className = 'settings-acc-body'
+    let n = wrap.nextSibling
+    while (n && !(n.nodeType === 1 && n.classList && n.classList.contains('settings-section'))) {
+      const next = n.nextSibling
+      cbody.appendChild(n)
+      n = next
+    }
+    wrap.appendChild(cbody)
+    title.addEventListener('click', () => {
+      const open = wrap.classList.toggle('open')
+      try { localStorage.setItem('codesynapt:set_acc:' + i, open ? '1' : '0') } catch {}
+    })
+    let open = false
+    try { open = localStorage.getItem('codesynapt:set_acc:' + i) === '1' } catch {}
+    wrap.classList.toggle('open', open)
+  })
 })()
 
 // ═══════════════════════════════════════════════════════════════
