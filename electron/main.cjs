@@ -2674,7 +2674,7 @@ if (!gotSingleInstanceLock) {
 app.whenReady().then(() => {
   // Serve public/ over the app:// scheme registered above (fixes ESM/importmap
   // under file://). Containment: only files inside public/ are served.
-  protocol.handle('app', (request) => {
+  protocol.handle('app', async (request) => {
     const { pathToFileURL } = require('url')
     const publicDir = path.join(__dirname, '..', 'public')
     const { pathname } = new URL(request.url)
@@ -2683,7 +2683,16 @@ app.whenReady().then(() => {
     if (filePath !== publicDir && !filePath.startsWith(publicDir + path.sep)) {
       return new Response('forbidden', { status: 403 })
     }
-    return net.fetch(pathToFileURL(filePath).toString())
+    const res = await net.fetch(pathToFileURL(filePath).toString())
+    // Dev (unpackaged): disable caching so Ctrl+R picks up renderer edits
+    // (CSS/HTML/app.js) without a full restart. Packaged releases keep caching
+    // for load speed — automatic, no manual toggle.
+    if (!app.isPackaged) {
+      const headers = new Headers(res.headers)
+      headers.set('Cache-Control', 'no-store')
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+    }
+    return res
   })
 
   if (!HEADLESS) {
