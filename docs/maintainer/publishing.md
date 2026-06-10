@@ -76,7 +76,7 @@ labels — see [`.github/LABELS.md`](../../.github/LABELS.md).
 
 ### Release flow
 
-1. **Review the draft**. Go to the [Releases page](https://github.com/YOUR_USER/codesynapt/releases)
+1. **Review the draft**. Go to the [Releases page](https://github.com/wing1008/codesynapt/releases)
    and find the draft titled `v$NEXT_VERSION`. It's been kept in sync
    by the `release-drafter` workflow since the last release.
 

@@ -402,5 +402,5 @@ Start at:
 3. `parser.js` → how imports are extracted
 4. `public/app.js` (the largest file) → renderer, layout, UI
 
-If something seems wrong or surprising, [open an issue](https://github.com/YOUR_USER/codesynapt/issues)
+If something seems wrong or surprising, [open an issue](https://github.com/wing1008/codesynapt/issues)
 or a PR.

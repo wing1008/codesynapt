@@ -12,7 +12,7 @@ available for macOS, Windows, and Linux, or you can build from source.
 ## Pre-built binaries
 
 Download the latest release from
-[Releases](https://github.com/YOUR_USER/codesynapt/releases).
+[Releases](https://github.com/wing1008/codesynapt/releases).
 
 | OS | Recommended | Notes |
 |---|---|---|
@@ -32,7 +32,7 @@ Click through it — the source is open and the build is reproducible
 ## Building from source
 
 ```sh
-git clone https://github.com/YOUR_USER/codesynapt.git
+git clone https://github.com/wing1008/codesynapt.git
 cd codesynapt
 npm install
 npm start
@@ -88,7 +88,7 @@ source, the build is **reproducible** when run in the same Node
 version:
 
 ```sh
-git clone https://github.com/YOUR_USER/codesynapt.git
+git clone https://github.com/wing1008/codesynapt.git
 cd codesynapt
 git checkout v0.0.0
 npm ci                    # exact dependency versions from package-lock.json
