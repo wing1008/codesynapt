@@ -1,0 +1,29 @@
+# Normalize line endings to LF on every platform.
+#
+# CRITICAL for public/index.html: its inline <script type="importmap"> is pinned
+# by a sha256 in the Content-Security-Policy. A CRLF checkout (Windows default
+# without this file) changes that hash, so the browser silently blocks the
+# importmap → `import 'three'` fails → blank app. It also breaks the
+# csp-importmap CI test on Windows runners. Forcing LF keeps the shipped bytes
+# (and the hash) identical everywhere.
+* text=auto eol=lf
+
+# Binary assets — never normalize (would corrupt them).
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.icns  binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.eot   binary
+*.mp4   binary
+*.mov   binary
+*.zip   binary
+*.gz    binary
+*.node  binary
+*.wasm  binary
