@@ -217,6 +217,11 @@ async function buildLegacyCached() {
 }
 
 async function startScanner(root) {
+  // [gap#2] Pure-client mode has no local scanner — delegate to the daemon-attach
+  // path. Every "load this project" entry point (did-finish-load, load-folder,
+  // recent/pinned menu, pick-folder, second-instance) funnels through here, so
+  // this single dispatch converts them all.
+  if (PURE_CLIENT) return startPureClient(root)
   // Await teardown: scanner.stop() returns chokidar's close() promise. Not
   // awaiting leaks the old watcher's fs handles when we immediately attach a
   // new one (worst on Windows). clearParserCaches also runs inside stop().
@@ -502,7 +507,8 @@ ipcMain.handle('get-state', () => ({
   recentFolders: store.recentFolders,
 }))
 ipcMain.handle('close-folder', () => {
-  stopScanner()
+  if (PURE_CLIENT) { try { getViewer().detach() } catch {} ; _ownDaemonPort = null; currentRoot = null }
+  else stopScanner()
   store.lastFolder = null
   saveStore()
   mainWindow?.webContents.send('no-folder')
@@ -778,29 +784,55 @@ function basenameOf(p) {
 // HTTP server from the file:// origin under the current CSP, so we
 // expose the data through IPC. Same underlying functions are shared
 // with the HTTP layer.
-ipcMain.handle('panel:tour',       () => buildTour())
-ipcMain.handle('panel:timeline',   async () => await buildTimeline())
-ipcMain.handle('panel:changes',    () => listSessionChanges())
-ipcMain.handle('panel:change-diff', (_e, id) => getChangeDiff(id))
-ipcMain.handle('panel:packages',   () => buildPackagesCached())
-ipcMain.handle('panel:package',    (_e, name) => buildPackageDetail(name))
-ipcMain.handle('panel:legacy',     async () => await buildLegacyCached())
+ipcMain.handle('panel:tour',       () => PURE_CLIENT ? daemonGet('/tour') : buildTour())
+ipcMain.handle('panel:timeline',   () => PURE_CLIENT ? daemonGet('/timeline') : buildTimeline())
+ipcMain.handle('panel:changes',    () => PURE_CLIENT ? daemonGet('/changes') : listSessionChanges())
+ipcMain.handle('panel:change-diff', (_e, id) => PURE_CLIENT ? daemonGet('/changes/' + encodeURIComponent(id)) : getChangeDiff(id))
+ipcMain.handle('panel:packages',   () => PURE_CLIENT ? daemonGet('/packages') : buildPackagesCached())
+ipcMain.handle('panel:package',    (_e, name) => PURE_CLIENT ? daemonGet('/package/' + encodeURIComponent(name)) : buildPackageDetail(name))
+ipcMain.handle('panel:legacy',     () => PURE_CLIENT ? daemonGet('/legacy') : buildLegacyCached())
+// Symbol graph (Layer-2) — unlike the panels above, the renderer historically
+// fetched this DIRECTLY over HTTP. From the app:// scheme that is a cross-origin
+// request, and the backend's allowedOrigin reflects only loopback Origins (never
+// app://), so the response carries no Access-Control-Allow-Origin and the browser
+// blocks it — silently, because buildSymbolGraph()'s catch swallows the error.
+// Proxy it through IPC like every other panel. Main-process HTTP has no CORS, so
+// this works in both modes: pure-client → the project daemon, normal desktop →
+// the local control-server.
+ipcMain.handle('panel:symbols', () => {
+  const port = (PURE_CLIENT && _ownDaemonPort) ? _ownDaemonPort : controlPort
+  return new Promise((resolve, reject) => {
+    if (!port) return reject(new Error('symbol backend not ready'))
+    const r = http.get({ host: '127.0.0.1', port, path: '/symbol/graph', timeout: 30000 }, (res) => {
+      let d = ''; res.on('data', (c) => d += c)
+      res.on('end', () => { try { resolve(JSON.parse(d)) } catch (e) { reject(e) } })
+    })
+    r.on('error', reject); r.on('timeout', () => { r.destroy(); reject(new Error('timeout')) })
+  })
+})
 ipcMain.handle('trace:log',        (_e, opts = {}) => {
+  if (PURE_CLIENT) return daemonGet('/trace').then((r) => {
+    let evs = (r && r.events) || []
+    if (opts.tool) evs = evs.filter((e) => e.tool === opts.tool)
+    if (opts.limit) evs = evs.slice(-opts.limit)
+    return { sessionId: r && r.sessionId, events: evs, totalAvailable: (r && r.meta && r.meta.totalAvailable) || evs.length }
+  })
   let evs = _trace.log
   if (opts.tool) evs = evs.filter((e) => e.tool === opts.tool)
   if (opts.limit) evs = evs.slice(-opts.limit)
   return { sessionId: _trace.sessionId, events: evs, totalAvailable: _trace.log.length }
 })
-ipcMain.handle('trace:stats',      () => ({ sessionId: _trace.sessionId, ...computeTraceStats(_trace.log) }))
-ipcMain.handle('trace:sessions',   () => ({
+ipcMain.handle('trace:stats',      () => PURE_CLIENT ? daemonGet('/trace/stats') : ({ sessionId: _trace.sessionId, ...computeTraceStats(_trace.log) }))
+ipcMain.handle('trace:sessions',   () => PURE_CLIENT ? daemonGet('/trace/sessions') : ({
   sessions: listTraceSessions(currentRoot), currentSessionId: _trace.sessionId,
 }))
 ipcMain.handle('trace:session',    (_e, id) => {
+  if (PURE_CLIENT) return daemonGet('/trace/session/' + encodeURIComponent(id))
   const data = readTraceSession(currentRoot, id)
   if (!data) return null
   return { ...data, stats: computeTraceStats(data.events) }
 })
-ipcMain.handle('trace:clear',      () => { _trace.log = []; startTraceSession(); return { newSessionId: _trace.sessionId } })
+ipcMain.handle('trace:clear',      () => PURE_CLIENT ? daemonSend('POST', '/trace/clear') : (() => { _trace.log = []; startTraceSession(); return { newSessionId: _trace.sessionId } })())
 ipcMain.handle('trace:export',     async (_e, exportPath) => {
   if (!exportPath) {
     const r = await dialog.showSaveDialog(mainWindow, {
@@ -810,6 +842,10 @@ ipcMain.handle('trace:export',     async (_e, exportPath) => {
     })
     if (r.canceled || !r.filePath) return { canceled: true }
     exportPath = r.filePath
+  }
+  if (PURE_CLIENT) {
+    try { const r = await daemonSend('POST', '/trace/export', { path: exportPath }); return r || { ok: true, path: exportPath } }
+    catch (e) { return { error: e.message } }
   }
   try {
     const stats = computeTraceStats(_trace.log)
@@ -2411,9 +2447,9 @@ function stopControlServer() {
   }
   clearLockFile()
 }
-ipcMain.handle('control-port', () => controlPort)
+ipcMain.handle('control-port', () => (PURE_CLIENT && _ownDaemonPort) ? _ownDaemonPort : controlPort)
 
-// ─── [④] Multi-session viewer client (flag-gated: CS_REGISTRY=1) ─
+// ─── [④] Multi-session viewer client (DEFAULT ON; CS_REGISTRY=0 to disable) ─
 // The desktop, as a PURE CLIENT, can attach to another Claude Code session's
 // per-project daemon (`cs serve`) and watch ITS graph + trace — without running
 // its own scanner for that project. The heavy lifting (registry discovery,
@@ -2425,7 +2461,7 @@ ipcMain.handle('control-port', () => controlPort)
 //
 // ADDITIVE & gated: with CS_REGISTRY unset the whole block is inert and the
 // in-process scanner path is untouched (design: 점진 교체, 옛 경로 살려둠).
-const USE_VIEWER = process.env.CS_REGISTRY === '1'
+const USE_VIEWER = process.env.CS_REGISTRY !== '0'
 let _viewer = null
 const _viewerLib = (() => {
   try { return require('../packages/core/lib/viewer-client.cjs') } catch { return null }
@@ -2470,6 +2506,107 @@ ipcMain.handle('viewer:detach', async () => {
   return { ok: true }
 })
 app.on('before-quit', () => { if (_viewer) { try { _viewer.detach() } catch {} } })
+
+// ─── [gap#2] Pure-client mode (dev-gated: CS_PURE_CLIENT=1) ──────
+// The desktop runs NO local scanner / control-server for its own project. It
+// ensures the per-project headless `cs serve` daemon and attaches to it as a
+// viewer (graph + trace + symbol over HTTP via ViewerClient); graph-derived IPC
+// handlers proxy to that daemon. Eliminates the "two servers / two scans per
+// project" duplication. CS_PURE_CLIENT unset → fully legacy (local scanner +
+// control server), unchanged. Once verified this folds into CS_REGISTRY default.
+const PURE_CLIENT = process.env.CS_PURE_CLIENT === '1'
+let _ownDaemonPort = null
+const _pcRegistry = (() => { try { return require('../packages/core/lib/registry.cjs') } catch { return null } })()
+
+function _pcPing(port) {
+  return new Promise((resolve) => {
+    const r = http.get({ host: '127.0.0.1', port, path: '/health', timeout: 1200 }, (res) => {
+      let d = ''; res.on('data', (c) => d += c)
+      res.on('end', () => { try { const b = JSON.parse(d); resolve(res.statusCode === 200 ? b : null) } catch { resolve(null) } })
+    })
+    r.on('error', () => resolve(null)); r.on('timeout', () => { r.destroy(); resolve(null) })
+  })
+}
+function _pcSameRoot(a, root) {
+  if (!a) return false
+  const A = path.resolve(a), B = path.resolve(root)
+  return process.platform === 'win32' ? A.toLowerCase() === B.toLowerCase() : A === B
+}
+// Discover-or-spawn the per-project daemon (mirrors `cs ensure`'s registry path);
+// resolves to its port once /health reports initialScanComplete.
+async function ensureOwnDaemon(root, { onProgress } = {}) {
+  if (!_pcRegistry) throw new Error('registry unavailable')
+  const abs = path.resolve(root)
+  const phash = _pcRegistry.projectHash(abs)
+  const TTL = 15000
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const serveBin = path.join(__dirname, '..', 'packages', 'core', 'bin', 'codesynapt.cjs')
+  let spawned = false
+  const startedAt = Date.now()
+  const budgetMs = 240000
+  while (Date.now() - startedAt < budgetMs) {
+    const d = _pcRegistry.readDaemon(phash, TTL)
+    if (d && d.port) {
+      const h = await _pcPing(d.port)
+      if (h && _pcSameRoot(h.root, abs)) {
+        if (h.initialScanComplete === true) return d.port
+        if (onProgress) onProgress(h)
+      }
+    }
+    if (!spawned) {
+      const lock = _pcRegistry.acquireDaemonLock(phash, { pid: process.pid }, TTL)
+      if (lock.won) {
+        const child = require('child_process').spawn(process.execPath, [serveBin, 'serve', abs],
+          { detached: true, stdio: 'ignore', env: { ...process.env } })
+        child.unref(); spawned = true
+      }
+    }
+    await sleep(500)
+  }
+  const d2 = _pcRegistry.readDaemon(phash, TTL)
+  if (d2 && d2.port && await _pcPing(d2.port)) return d2.port
+  throw new Error(`daemon not ready for ${abs}`)
+}
+
+// Enter pure-client mode for `root`: ensure its daemon, point controlPort at it,
+// attach the viewer. Replaces startScanner() in pure-client mode.
+async function startPureClient(root) {
+  const abs = path.resolve(root)
+  currentRoot = abs
+  addRecent(abs)
+  store.lastFolder = abs; saveStore()
+  mainWindow?.webContents.send('folder-loaded', { root: abs })
+  try {
+    const port = await ensureOwnDaemon(abs, {
+      onProgress: (h) => mainWindow?.webContents.send('scan-progress', { phase: h.scanPhase || 'scanning', fileCount: h.fileCount }),
+    })
+    _ownDaemonPort = port
+    controlPort = port   // renderer's /symbol/graph fetch + control-port IPC now hit the daemon
+    await getViewer().attach({ projectRoot: abs, daemonPort: port, sessionId: 'desktop-' + process.pid })
+  } catch (e) {
+    mainWindow?.webContents.send('error', { message: `Could not connect to daemon for ${abs}: ${e.message}` })
+  }
+}
+
+// HTTP proxies to the own-project daemon for graph-derived IPC handlers.
+function daemonGet(pathname) {
+  if (!_ownDaemonPort) return Promise.reject(new Error('no daemon attached'))
+  return _viewerLib.httpJson(_ownDaemonPort, pathname)
+}
+function daemonSend(method, pathname, body) {
+  return new Promise((resolve, reject) => {
+    if (!_ownDaemonPort) return reject(new Error('no daemon attached'))
+    const data = body != null ? JSON.stringify(body) : null
+    const headers = data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}
+    const r = http.request({ host: '127.0.0.1', port: _ownDaemonPort, path: pathname, method, headers, timeout: 60000 }, (res) => {
+      let d = ''; res.on('data', (c) => d += c)
+      res.on('end', () => { try { resolve(JSON.parse(d)) } catch { resolve(d) } })
+    })
+    r.on('error', reject); r.on('timeout', () => { r.destroy(); reject(new Error('timeout')) })
+    if (data) r.write(data)
+    r.end()
+  })
+}
 
 // ─── Log retention (audit + per-project traces) ────────────────
 // Default 30 days; configurable via env. Prevents unbounded growth of
@@ -2560,7 +2697,7 @@ app.whenReady().then(() => {
     // and CI runs that only need the control API.
     new BrowserWindow({ show: false, width: 1, height: 1 })
   }
-  startControlServer()
+  if (!PURE_CLIENT) startControlServer()   // pure-client uses the daemon's server, not its own
   pruneOldLogs()   // one-shot on boot; daily users get fresh pruning
 
   app.on('activate', () => {

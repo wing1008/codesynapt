@@ -7045,10 +7045,11 @@ async function buildSymbolGraph() {
   symbolModeState.loading = true
   if (cell) cell.classList.add('loading', 'sb-clickable')
   try {
-    let port = 7707
-    try { if (window.codesynapt?.controlPort) port = await window.codesynapt.controlPort() } catch {}
-    const r = await fetch(`http://127.0.0.1:${port}/symbol/graph`)
-    const j = await r.json()
+    // Fetch via IPC, NOT a direct fetch(): the renderer runs on the app://
+    // scheme, so a fetch to the backend's http://127.0.0.1 is cross-origin and
+    // CORS-blocked (the backend reflects only loopback Origins). Main proxies it
+    // — works for both the local control-server and a pure-client daemon.
+    const j = await window.codesynapt.getSymbols()
     state.symbols.clear()
     for (const s of (j.symbols || [])) {
       // Stable offset on a small sphere shell around the parent file node,
@@ -7073,7 +7074,15 @@ async function buildSymbolGraph() {
     symbolModeState.lastRoot = state.root
     if (cell) cell.title = `${state.symbols.size.toLocaleString()} functions · ${state.symbolCalls.length.toLocaleString()} calls · click to hide`
   } catch (e) {
+    // Surface the failure: a silent catch here is exactly what hid the app://
+    // CORS block on the old direct fetch. Toast + console so it's diagnosable.
     if (cell) cell.title = 'symbol layer failed: ' + (e.message || e)
+    state.showSymbols = false
+    symPoints.visible = false
+    symEdgeLines.visible = false
+    if (cell) cell.classList.remove('active')
+    toast('symbol layer failed: ' + (e.message || e))
+    console.error('[symbols] build failed:', e)
   } finally {
     symbolModeState.loading = false
     if (cell) cell.classList.remove('loading')
