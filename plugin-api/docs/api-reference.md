@@ -28,7 +28,7 @@ companion.
 
 ```ts
 ctx.manifest: PluginManifest    // your plugin's own manifest
-ctx.appVersion: string          // host filegraph3d version (e.g. "0.11.0")
+ctx.appVersion: string          // host codesynapt version (e.g. "0.11.0")
 ctx.graph: GraphAPI             // read graph state
 ctx.ui: UIAPI                   // register UI items
 ctx.exporters: ExporterRegistry
@@ -53,7 +53,7 @@ The absolute path of the currently-opened folder.
 
 ```js
 ctx.log('User opened:', ctx.graph.root)
-// → /Users/you/projects/filegraph3d
+// → /Users/you/projects/codesynapt
 ```
 
 ### `graph.nodes: ReadonlyArray<GraphNode>`
@@ -144,7 +144,7 @@ const content = await ctx.graph.readFile('src/index.js')
 const lineCount = content.split('\n').length
 ```
 
-Reading files is async because filegraph3d may need to load from disk
+Reading files is async because codesynapt may need to load from disk
 or wait for an in-flight read. Performance: ~5ms per file on average.
 
 ---
@@ -437,7 +437,7 @@ The complete TypeScript types are in [`../types.d.ts`](../types.d.ts).
 If you're using TypeScript or VS Code, install the package:
 
 ```sh
-npm install --save-dev @filegraph3d/plugin-api
+npm install --save-dev @codesynapt/plugin-api
 ```
 
 ```ts
@@ -446,7 +446,7 @@ import type {
   PluginContext,
   GraphAPI,
   // ... all the rest
-} from '@filegraph3d/plugin-api'
+} from '@codesynapt/plugin-api'
 ```
 
 You get IntelliSense for every method, parameter, and return value.
@@ -460,4 +460,4 @@ Expect breaking changes until 1.0. After 1.0:
 - **Major versions** (2.0, 3.0) may break — old plugins are loaded
   with a deprecation warning so users can update.
 
-Watch `CHANGELOG.md` (top-level filegraph3d repo) for changes.
+Watch `CHANGELOG.md` (top-level codesynapt repo) for changes.

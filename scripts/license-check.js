@@ -34,11 +34,21 @@ const ALLOWED = new Set([
   'Zlib',
 ])
 
+// Packages whose `license` field can't be parsed automatically (the legacy
+// "SEE LICENSE IN <file>" form) but whose actual license file was inspected and
+// verified permissive. Keyed name@version so a version bump re-triggers review.
+const VERIFIED_EXCEPTIONS = new Set([
+  'flatbuffers@1.12.0',   // Apache-2.0 (LICENSE.txt) — Google FlatBuffers
+])
+
 // Some packages bundle both — we accept if any constituent is allowed.
 function isAllowedLicense(raw) {
   if (!raw) return false
-  if (typeof raw === 'object') raw = raw.type || raw.license || ''
+  // Arrays are objects in JS, so test Array FIRST: the legacy multi-license form
+  // is `[{ type: 'MIT', url }, …]`. Checking `typeof === 'object'` before this
+  // collapsed the array to '' and wrongly failed permissive (MIT) packages.
   if (Array.isArray(raw)) return raw.some(isAllowedLicense)
+  if (typeof raw === 'object') raw = raw.type || raw.license || ''
   const norm = String(raw).trim()
   if (ALLOWED.has(norm)) return true
   // Handle SPDX expressions like "(MIT OR Apache-2.0)"
@@ -97,6 +107,7 @@ for (const m of all) {
   const key = `${m.name}@${m.version}`
   if (seen.has(key)) continue
   seen.add(key)
+  if (VERIFIED_EXCEPTIONS.has(key)) continue
   if (!m.license) { unknown.push(m); continue }
   if (!isAllowedLicense(m.license)) {
     violations.push(m)

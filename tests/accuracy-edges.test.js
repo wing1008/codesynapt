@@ -51,6 +51,41 @@ fork('node')                         // bare binary, no ext — skip
 `, 'js')
     expect(r.imports.some((i) => i.kind === 'worker' || i.kind === 'process')).toBe(false)
   })
+
+  // FIX (2026-06-10): the real in-repo call sites use path.resolve/join(__dirname,
+  // …) rather than bare string literals. Without resolving these, this repo's own
+  // search-worker.cjs (Worker) and symbol-parse-worker.cjs (spawnSync) were false
+  // orphans — the very cases the worker-edge handler was written to fix.
+  it('captures new Worker(path.resolve/join(__dirname,…)) incl. const indirection', () => {
+    const r = parseFile('src/main.js', `
+const workerPath = path.resolve(__dirname, '..', 'lib', 'search-worker.cjs')
+const w = new Worker(workerPath)
+new Worker(path.join(__dirname, 'inline-worker.cjs'))
+`, 'js')
+    const specs = r.imports.filter((i) => i.kind === 'worker').map((i) => i.spec).sort()
+    expect(specs).toEqual(['../lib/search-worker.cjs', './inline-worker.cjs'])
+  })
+
+  it('captures spawnSync/execFileSync(execPath, [path.join(__dirname,…)])', () => {
+    const r = parseFile('src/main.js', `
+const cp = require('child_process')
+const worker = path.join(__dirname, 'symbol-parse-worker.cjs')
+cp.spawnSync(process.execPath, [worker], { input: 'x' })
+cp.execFileSync(process.execPath, [path.resolve(__dirname, 'tool.cjs')])
+`, 'js')
+    const specs = r.imports.filter((i) => i.kind === 'process').map((i) => i.spec).sort()
+    expect(specs).toEqual(['./symbol-parse-worker.cjs', './tool.cjs'])
+  })
+
+  it('is precision-first: path.join/resolve with a computed segment yields no edge', () => {
+    const r = parseFile('src/main.js', `
+const name = getName()
+new Worker(path.join(__dirname, name))              // computed tail segment — skip
+const base = getBase()
+cp.spawnSync(execPath, [path.resolve(base, 'w.cjs')]) // non-__dirname dynamic base — skip
+`, 'js')
+    expect(r.imports.some((i) => i.kind === 'worker' || i.kind === 'process')).toBe(false)
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────

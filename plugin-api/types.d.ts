@@ -1,4 +1,4 @@
-// @filegraph3d/plugin-api — public API surface for plugins
+// @codesynapt/plugin-api — public API surface for plugins
 // MIT licensed — free to use, fork, distribute.
 
 /* ════════════════════════════════════════════════════════════
@@ -31,7 +31,7 @@ export interface PluginManifest {
    */
   main: string
 
-  /** Minimum filegraph3d app version (semver range) */
+  /** Minimum codesynapt app version (semver range) */
   minAppVersion: string
 
   /** SPDX license identifier (MIT, Apache-2.0, etc) */

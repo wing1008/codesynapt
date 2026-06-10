@@ -25,15 +25,15 @@ You can paste this directly into a GitHub README inside a
 
 ## Install
 
-Copy this folder into your filegraph3d plugins directory:
+Copy this folder into your codesynapt plugins directory:
 
 ```
-macOS:   ~/Library/Application Support/FileGraph 3D/plugins/
-Windows: %APPDATA%\FileGraph 3D\plugins\
-Linux:   ~/.config/FileGraph 3D/plugins/
+macOS:   ~/Library/Application Support/codesynapt/plugins/
+Windows: %APPDATA%\codesynapt\plugins\
+Linux:   ~/.config/codesynapt/plugins/
 ```
 
-Quit and reopen filegraph3d. Open a folder. Open **Settings → Export**
+Quit and reopen codesynapt. Open a folder. Open **Settings → Export**
 — you'll see "Mermaid Diagram" listed.
 
 ## Files
@@ -64,7 +64,7 @@ past ~500 nodes; rendering may fail past ~2000.
 
 For large codebases:
 
-1. Use filegraph3d's **active set** feature to mark just the files
+1. Use codesynapt's **active set** feature to mark just the files
    you care about, then export.
 
 2. Or use the [GraphViz DOT exporter pattern](../../docs/types/exporter.md#example-graphviz-dot)

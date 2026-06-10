@@ -31,7 +31,7 @@ plugins/
 
 Loose files at the top of `plugins/` are ignored.
 
-**Check the plugin folder path.** filegraph3d shows the path in
+**Check the plugin folder path.** codesynapt shows the path in
 Settings → Appearance → Open plugin folder…. Verify your files are
 **in that exact directory**.
 
@@ -41,7 +41,7 @@ Settings → Appearance → Open plugin folder…. Verify your files are
 - It's valid JSON — paste into [jsonlint.com](https://jsonlint.com/)
   if unsure.
 
-**Did you restart the app?** filegraph3d only scans for plugins at
+**Did you restart the app?** codesynapt only scans for plugins at
 startup. **Cmd/Ctrl+Q to fully quit**, then reopen — just closing the
 window isn't enough on macOS.
 
@@ -246,7 +246,7 @@ mimeType: 'text/plain; charset=utf-8'
 
 ## Changes don't take effect
 
-filegraph3d **does not** hot-reload plugins right now. Any change to
+codesynapt **does not** hot-reload plugins right now. Any change to
 a plugin file requires:
 
 1. **Quit completely** (Cmd/Ctrl+Q, not just close window).
@@ -321,12 +321,12 @@ generate: async (graph) => {
    [`../types.d.ts`](../types.d.ts) and check that your code matches
    the expected shape.
 
-3. **File an issue.** [GitHub issues](https://github.com/YOUR_USER/filegraph3d/issues)
+3. **File an issue.** [GitHub issues](https://github.com/wing1008/codesynapt/issues)
    with:
    - Your `manifest.json`
    - Your `main.js` (or `theme.css`)
    - The error from the DevTools console
-   - The filegraph3d version (Settings → About)
+   - The codesynapt version (Settings → About)
 
 4. **Ask the community.** Plugin discussion lives at
-   [GitHub Discussions](https://github.com/YOUR_USER/filegraph3d/discussions).
+   [GitHub Discussions](https://github.com/wing1008/codesynapt/discussions).

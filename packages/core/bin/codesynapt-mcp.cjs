@@ -34,14 +34,14 @@ const HOST = '127.0.0.1'
 // setup is a single `claude mcp add` with nothing else to keep running.
 let _backendReady = null
 
-// [multi-session ②/2b] Registry-based attach-or-spawn, behind CS_REGISTRY=1.
-// Default OFF → the legacy port-scan path below is unchanged. When on, this MCP
+// [multi-session ②/2b] Registry-based attach-or-spawn. DEFAULT ON
+// (set CS_REGISTRY=0 to force the legacy port-scan path below). When on, this MCP
 // is a pure client: it attaches to the per-project detached `cs serve` daemon
 // (discovered via daemons/<projectHash>.json) or spawns one, then registers its
 // own session lease + heartbeat. See docs/design-multi-session.md.
 let _registry = null
 try { _registry = require('../lib/registry.cjs') } catch { /* optional during migration */ }
-const USE_REGISTRY = process.env.CS_REGISTRY === '1' && !!_registry
+const USE_REGISTRY = process.env.CS_REGISTRY !== '0' && !!_registry
 const SESSION_ID = (() => { try { return require('crypto').randomUUID() } catch { return Date.now() + '-' + process.pid } })()
 const _DAEMON_TTL_MS = 15000   // = poll(5s) × 3
 const _HEARTBEAT_MS = 5000

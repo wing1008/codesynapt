@@ -1,6 +1,6 @@
 # Exporter plugin
 
-An exporter plugin adds a new entry to filegraph3d's export menu. Your
+An exporter plugin adds a new entry to codesynapt's export menu. Your
 plugin receives the current graph and returns a string; the app handles
 file downloads, MIME types, and the user-facing UI.
 

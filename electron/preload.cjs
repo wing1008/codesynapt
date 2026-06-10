@@ -183,6 +183,7 @@ const csApi = {
   getPackages:   () => ipcRenderer.invoke('panel:packages'),
   getPackage:    (name) => ipcRenderer.invoke('panel:package', name),
   getLegacy:     () => ipcRenderer.invoke('panel:legacy'),
+  getSymbols:    () => ipcRenderer.invoke('panel:symbols'),
   // Trace session — live AI activity log
   traceLog:      (opts) => ipcRenderer.invoke('trace:log', opts || {}),
   traceStats:    () => ipcRenderer.invoke('trace:stats'),

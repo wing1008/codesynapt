@@ -124,3 +124,10 @@ build/bundled-node/
 
 # 미수정 취약점 익스플로잇 포함 — 공개 금지
 docs/internal/REMEDIATION-2026-06-05.md
+
+# Local-only working/analysis files — never published
+codesynapt_persona_problems.xlsx
+*_persona_*.xlsx
+docs/COMPETITOR-WATCH.md
+docs/competitor-log.md
+dev-review-candidates.md

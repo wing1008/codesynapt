@@ -1,4 +1,4 @@
-# filegraph3d plugin development
+# codesynapt plugin development
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Plugin API: v0.1](https://img.shields.io/badge/Plugin%20API-v0.1.0-orange.svg)](./package.json)
@@ -6,11 +6,11 @@
 [![Examples: 4](https://img.shields.io/badge/examples-4-success)](./examples/)
 
 > Build themes, exporters, parsers, layouts, panels, and context-menu
-> actions for [filegraph3d](https://github.com/YOUR_USER/filegraph3d).
+> actions for [codesynapt](https://github.com/wing1008/codesynapt).
 
-This package contains the public API surface for filegraph3d plugins.
+This package contains the public API surface for codesynapt plugins.
 It is **MIT-licensed** — you can build and distribute plugins under any
-license you choose, including commercially. The main filegraph3d app
+license you choose, including commercially. The main codesynapt app
 itself is AGPL-licensed; see the top-level `LICENSE` for details.
 
 ---
@@ -62,18 +62,18 @@ needed (the API surface is just a type definition for IDE support).
 
 ## Where plugins live
 
-filegraph3d looks for plugins in a per-user directory:
+codesynapt looks for plugins in a per-user directory:
 
 | OS | Path |
 |---|---|
-| **macOS** | `~/Library/Application Support/FileGraph 3D/plugins/` |
-| **Windows** | `%APPDATA%\FileGraph 3D\plugins\` |
-| **Linux** | `~/.config/FileGraph 3D/plugins/` |
+| **macOS** | `~/Library/Application Support/codesynapt/plugins/` |
+| **Windows** | `%APPDATA%\codesynapt\plugins\` |
+| **Linux** | `~/.config/codesynapt/plugins/` |
 
 You can open this folder from the app via **Settings → Appearance →
 Open plugin folder…**.
 
-Each plugin is its own subfolder. Restart filegraph3d after installing
+Each plugin is its own subfolder. Restart codesynapt after installing
 a plugin to pick it up.
 
 ---
@@ -84,11 +84,11 @@ If you're using TypeScript, the types in `types.d.ts` give you full
 IntelliSense and compile-time checks:
 
 ```sh
-npm install --save-dev @filegraph3d/plugin-api
+npm install --save-dev @codesynapt/plugin-api
 ```
 
 ```ts
-import type { Plugin } from '@filegraph3d/plugin-api'
+import type { Plugin } from '@codesynapt/plugin-api'
 
 const plugin: Plugin = {
   activate(ctx) {
@@ -109,6 +109,6 @@ This API package: **MIT** — see [LICENSE](./LICENSE).
 You can publish your plugins under any license you like (MIT,
 Apache-2.0, proprietary, etc).
 
-The filegraph3d app itself: **AGPL-3.0** — see [`../LICENSE`](../LICENSE).
+The codesynapt app itself: **AGPL-3.0** — see [`../LICENSE`](../LICENSE).
 Personal and internal use is free; commercial redistribution requires
 a license.

@@ -258,6 +258,42 @@ function staticStringValue(node, scope) {
   return null
 }
 
+// Reconstruct a relative spec from `path.resolve(__dirname, …'lit')` /
+// `path.join(__dirname, …'lit')` — the common Node form for worker and
+// child_process entry scripts (e.g. this repo's own
+// `new Worker(path.resolve(__dirname,'..','packages/core/lib/search-worker.cjs'))`).
+// `__dirname`/`__filename` as the first arg is the file's own directory, so it
+// is dropped and the remaining string-literal segments are joined into a
+// './'-relative path the graph resolver can follow. Also follows one `const
+// workerPath = path.resolve(…)` indirection. Any computed (non-literal) segment
+// makes the path unresolvable → return null (precision-first: no guessed edge).
+function staticPathJoinValue(node, scope) {
+  if (!node) return null
+  if (node.type === 'Identifier' && scope) {
+    const b = scope.getBinding?.(node.name)
+    if (b && b.kind === 'const' && b.path?.node?.init) node = b.path.node.init
+    else return null
+  }
+  if (node.type !== 'CallExpression') return null
+  const callee = node.callee
+  const fn = callee?.type === 'MemberExpression' && callee.property?.type === 'Identifier'
+    ? callee.property.name
+    : callee?.type === 'Identifier' ? callee.name : null
+  if (fn !== 'resolve' && fn !== 'join') return null
+  const segs = []
+  for (let i = 0; i < node.arguments.length; i++) {
+    const a = node.arguments[i]
+    if (i === 0 && a.type === 'Identifier' && (a.name === '__dirname' || a.name === '__filename')) continue
+    const v = staticStringValue(a, scope)
+    if (v == null) return null
+    segs.push(v)
+  }
+  if (!segs.length) return null
+  let rel = segs.join('/').replace(/\/{2,}/g, '/')
+  if (!rel.startsWith('.')) rel = './' + rel
+  return rel
+}
+
 // A literal worker/child_process arg is only treated as an in-repo entry
 // script when it is a RELATIVE path (`./`, `../`) ending in a JS module ext.
 // This excludes absolute paths, flags (`--inspect`), and bare binaries
@@ -328,17 +364,22 @@ function parseJS(content) {
         const callName = c.type === 'Identifier' ? c.name
           : (c.type === 'MemberExpression' && c.property?.type === 'Identifier' ? c.property.name : null)
         if (callName === 'fork') {
-          // fork(modulePath[, args][, options]) — arg0 is the module path.
-          const spec = staticStringValue(args[0], p.scope)
+          // fork(modulePath[, args][, options]) — arg0 is the module path,
+          // a literal or path.resolve/join(__dirname, …'lit').
+          const spec = staticStringValue(args[0], p.scope) || staticPathJoinValue(args[0], p.scope)
           if (spec && SCRIPT_PATH_RE.test(spec)) imports.push({ spec, kind: 'process' })
-        } else if (callName === 'spawn' || callName === 'execFile') {
-          // spawn(cmd, [args]) — the script is a literal element of the args
-          // array (e.g. spawn('node', ['./w.js'])). Scan only string-literal
-          // entries that look like an in-repo script path; skip flags/dynamic.
+        } else if (callName === 'spawn' || callName === 'spawnSync'
+            || callName === 'execFile' || callName === 'execFileSync') {
+          // spawn(cmd, [args]) — the script is an element of the args array,
+          // e.g. spawn('node', ['./w.js']) or the sync form this repo uses:
+          // spawnSync(execPath, [worker]) where worker = path.join(__dirname,
+          // 'w.cjs'). Accept string literals AND path.resolve/join(__dirname,
+          // …'lit'); skip flags/dynamic. (sync variants were previously missed,
+          // making symbol-parse-worker.cjs a false orphan.)
           const argv = args[1]
           if (argv?.type === 'ArrayExpression') {
             for (const el of argv.elements) {
-              const v = staticStringValue(el, p.scope)
+              const v = staticStringValue(el, p.scope) || staticPathJoinValue(el, p.scope)
               if (v && SCRIPT_PATH_RE.test(v)) { imports.push({ spec: v, kind: 'process' }); break }
             }
           }
@@ -361,6 +402,9 @@ function parseJS(content) {
             && arg0.callee?.type === 'Identifier' && arg0.callee.name === 'URL') {
           spec = staticStringValue(arg0.arguments?.[0], p.scope)
         }
+        // Node form: new Worker(path.resolve(__dirname, '..', 'w.cjs')) and the
+        // `const workerPath = path.resolve(…); new Worker(workerPath)` variant.
+        if (!spec) spec = staticPathJoinValue(arg0, p.scope)
         if (spec && SCRIPT_PATH_RE.test(spec)) imports.push({ spec, kind: 'worker' })
       },
     })
