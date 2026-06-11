@@ -613,7 +613,10 @@ class SymbolGraph {
       }
       return true
     }
-    if (kind !== 'call') return true
+    // 'observed' = a runtime-witnessed call (cs trace run). It IS a real call
+    // edge — indexed into the same caller/callee adjacency so blast, dead-code
+    // and callers() see it — while byEdgeKind keeps its provenance distinct.
+    if (kind !== 'call' && kind !== 'observed') return true
     if (!this.nodes.has(source) || !this.nodes.has(target)) return true
     // inAdj/outAdj back callersOf()/calleesOf() (call graph only, per above).
     if (!this.outAdj.has(source)) this.outAdj.set(source, new Set())
@@ -1115,7 +1118,7 @@ class SymbolGraph {
   // confirm a `call-candidate` (resolved a real ambiguity), or are NEW (dynamic,
   // invisible to static) — plus observed-coverage so it is never read as the
   // whole graph (runtime sees only exercised paths).
-  observeRuntimeEdges(pairs) {
+  observeRuntimeEdges(pairs, opts = {}) {
     const observed = new Set()
     const touched = new Set()
     let unmapped = 0
@@ -1128,7 +1131,7 @@ class SymbolGraph {
       if (a.id === b.id) continue
       observed.add(a.id + '\t' + b.id)
     }
-    let confirmedStatic = 0, confirmedCandidate = 0, newDynamic = 0
+    let confirmedStatic = 0, confirmedCandidate = 0, newDynamic = 0, merged = 0
     const newDynamicSamples = []
     for (const key of observed) {
       const i = key.indexOf('\t')
@@ -1139,6 +1142,12 @@ class SymbolGraph {
         newDynamic++
         if (newDynamicSamples.length < 50) newDynamicSamples.push({ from: a, to: b })
       }
+      // merge: persist the runtime-witnessed edge into the live graph as kind
+      // 'observed' (already-static-confirmed pairs gain a provenance edge too —
+      // byEdgeKind keeps the distinction; adjacency dedups).
+      if (opts.merge) {
+        if (this.addEdge({ source: a, target: b, kind: 'observed', line: 0, observed: true })) merged++
+      }
     }
     return {
       observedEdges: observed.size,
@@ -1146,6 +1155,7 @@ class SymbolGraph {
       confirmedCandidate,
       newDynamic,
       newDynamicSamples,
+      merged: opts.merge ? merged : undefined,
       symbolsTouched: touched.size,
       totalSymbols: this.nodes.size,
       unmappedFrames: unmapped,

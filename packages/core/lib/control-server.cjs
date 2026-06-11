@@ -1720,7 +1720,8 @@ function createControlServer(opts) {
           try { body = JSON.parse(Buffer.concat(bodyChunks).toString('utf8')) }
           catch { return writeJson(res, 400, { error: 'invalid JSON body' }) }
           const edges = Array.isArray(body && body.edges) ? body.edges : null
-          if (!edges) return writeJson(res, 400, { error: 'usage: { "edges": [{ cf, cl, ef, el }, ...] }' })
+          if (!edges) return writeJson(res, 400, { error: 'usage: { "edges": [{ cf, cl, ef, el }, ...], "merge": true|false }' })
+          const doMerge = body.merge !== false   // default ON — an observed edge is a real edge
           // NB: do NOT gate on req._csClientGone here. For a POST, the request
           // stream's 'close' fires NORMALLY once the body is fully received, so
           // the shared lifecycle wrapper flips _csClientGone true before the
@@ -1728,7 +1729,14 @@ function createControlServer(opts) {
           // .writableEnded is the only correct double-write guard for a body POST.
           scanner.getSymbolGraph().then((g) => {
             if (res.writableEnded) return
-            writeJson(res, 200, withMeta(g.observeRuntimeEdges(edges)))
+            const rep = g.observeRuntimeEdges(edges, { merge: doMerge })
+            // Persist the raw pairs so the merge survives graph rebuilds —
+            // mtime-guarded in trace-store (observations expire when their
+            // files change; a line-shifted remap must never lie). Best-effort.
+            if (doMerge && rep.observedEdges) {
+              try { rep.persisted = traceStore.appendObservedBatch(getCurrentRoot(), edges) > 0 } catch {}
+            }
+            writeJson(res, 200, withMeta(rep))
           }).catch((e) => { try { writeJson(res, 500, { error: 'symbol graph build failed: ' + (e && e.message) }) } catch {} })
         })
         return

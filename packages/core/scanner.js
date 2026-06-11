@@ -8,6 +8,7 @@ import { parseFile, resolveImport, resolveImportAll, clearParserCaches, normaliz
 import { detectMonorepo, packageForFile } from './monorepo.js'
 import { registerAll as registerSymbolParsers, SymbolGraph } from './lib/symbol-parsers.cjs'
 import { enrich as enrichSubengines } from './lib/subengines.cjs'
+import { loadValidObservedPairs } from './lib/trace-store.cjs'
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg',
@@ -719,6 +720,19 @@ export class Scanner extends EventEmitter {
     }
     const g = new SymbolGraph()
     await g.build(entries, fileImports, { fileReexports })
+    // Re-apply persisted runtime observations (cs trace run --merge). The graph
+    // was just rebuilt from source, so observed edges would otherwise vanish.
+    // trace-store's mtime guard EXPIRES observations whose files changed —
+    // line-shifted mappings must never silently attach to the wrong symbol.
+    try {
+      const obs = loadValidObservedPairs(this.root)
+      if (obs.pairs.length) {
+        const rep = g.observeRuntimeEdges(obs.pairs, { merge: true })
+        g._observedReapplied = { merged: rep.merged || 0, stale: obs.stale }
+      } else if (obs.stale) {
+        g._observedReapplied = { merged: 0, stale: obs.stale }
+      }
+    } catch (e) { if (process.env.CS_DBG) console.error('[cs] observed reapply:', e && e.message) }
     this.symbolGraph = g
     this._symbolGraphStale = false
     // Sub-engine enrichment (type-checker post-pass), TIERED by engine cost:

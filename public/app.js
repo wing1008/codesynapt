@@ -3779,6 +3779,10 @@ function render() {
       if (!hlSym) {
         // Resting: a FAINT cloud (context, not a bright blob) so a hover pops.
         const c = SYM_KIND_COLOR[sym.kind] || _symDefColor; cr = c.r*0.5; cg = c.g*0.5; cb = c.b*0.5
+        // B-2 uncertainty marker: this symbol contains dynamic call sites
+        // (obj[k](), reflection, callbacks) — its outgoing edges are a floor.
+        // Warm amber tint so "incomplete here" is visible at a glance.
+        if (sym.ds) { cr = Math.min(1, cr + 0.35); cg = Math.min(1, cg + 0.22); cb *= 0.5 }
       } else if (sym.id === hlSym) {
         cr = _symHiColor.r; cg = _symHiColor.g; cb = _symHiColor.b           // hovered = white
       } else if (hlNbrs && hlNbrs.has(sym.id)) {
@@ -3802,8 +3806,11 @@ function render() {
       symEdgePositions[se*6+3] = b.p.x; symEdgePositions[se*6+4] = b.p.y; symEdgePositions[se*6+5] = b.p.z
       let r, g2, b2
       // Resting: type-checker-resolved calls (via:'ts') get a teal tint so the
-      // sub-engine enrichment is visible; plain AST-resolved calls stay blue.
-      if (!hlSym && call.via === 'ts')                  { r = 0.10; g2 = 0.36; b2 = 0.30 }   // resting: tsc-enriched (teal)
+      // sub-engine enrichment is visible; runtime-WITNESSED edges (via:
+      // 'observed', merged by `cs trace run`) glow amber — links static
+      // analysis could not find but a real run proved; plain AST calls stay blue.
+      if (!hlSym && call.via === 'observed')            { r = 0.55; g2 = 0.38; b2 = 0.08 }   // resting: runtime-observed (amber)
+      else if (!hlSym && call.via === 'ts')             { r = 0.10; g2 = 0.36; b2 = 0.30 }   // resting: tsc-enriched (teal)
       else if (!hlSym)                                  { r = 0.11; g2 = 0.20; b2 = 0.38 }   // resting: heuristic (faint blue)
       else if (call.s === hlSym || call.t === hlSym)    { r = 0.55; g2 = 0.95; b2 = 1.00 }   // hovered fn's edges: bright
       else                                              { r = 0.03; g2 = 0.04; b2 = 0.08 }   // unrelated: near-invisible
@@ -7092,7 +7099,8 @@ async function buildSymbolGraph() {
       const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
       const len = off.length() || 1
       off.multiplyScalar((1.8 + Math.random() * 3.4) / len)
-      state.symbols.set(s.id, { id: s.id, file: s.file, name: s.name, kind: s.kind, line: s.line, off, p: new THREE.Vector3(), shown: false })
+      // ds = dynamic-call-site count (B-2 uncertainty marker; undefined when 0)
+      state.symbols.set(s.id, { id: s.id, file: s.file, name: s.name, kind: s.kind, line: s.line, ds: s.ds, off, p: new THREE.Vector3(), shown: false })
     }
     state.symbolCalls = j.calls || []
     // Adjacency for hover focus (so hovering a function can highlight only

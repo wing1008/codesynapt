@@ -2407,7 +2407,11 @@ async function main() {
           // / NEW dynamic). Leg C, Phase 1. See docs/design-runtime-tracing.md.
           const dashIdx = process.argv.indexOf('--')
           const cmd = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : []
-          if (!cmd.length) return die('usage: cs trace run -- <command>   (e.g. cs trace run -- npm test)')
+          if (!cmd.length) return die('usage: cs trace run [--no-merge] -- <command>   (e.g. cs trace run -- npm test)')
+          // merge default ON: an observed edge is a real edge — it joins the live
+          // graph and persists (mtime-guarded). --no-merge = report-only.
+          const flagPart = args.slice(0, args.indexOf('--') >= 0 ? args.indexOf('--') : args.length)
+          const doMerge = !flagPart.includes('--no-merge')
           const cp = require('child_process')
           const urlMod = require('url')
           const profDir = path.join(PROJECT_ROOT, '.codesynapt', 'traces', `prof-${Date.now()}`)
@@ -2482,7 +2486,7 @@ async function main() {
           }
           process.stderr.write(`  ${pairs.length} frame-edges → classifying against the static graph (port ${PORT})…\n`)
           let r
-          try { r = await req('POST', '/symbol/observe', null, { edges: pairs }) }
+          try { r = await req('POST', '/symbol/observe', null, { edges: pairs, merge: doMerge }) }
           catch (e) { _releaseLease(); return die(`could not reach this project's backend (${e.code || e.message}) — keep the desktop app or \`cs serve\` running.`) }
           _releaseLease()
           if (r.status === 404) return die('symbol mode unavailable on this backend (need `cs serve` or the desktop app running for THIS project).')
@@ -2493,6 +2497,11 @@ async function main() {
           process.stdout.write(`  observed call edges: ${rep.observedEdges}\n`)
           process.stdout.write(`    ${rep.confirmedStatic} confirm a static call · ${rep.confirmedCandidate} resolve a candidate · ${rep.newDynamic} NEW (dynamic, invisible to static)\n`)
           process.stdout.write(`  coverage: ${rep.symbolsTouched}/${rep.totalSymbols} symbols touched (runtime sees only exercised paths — NOT completeness)\n`)
+          if (rep.merged !== undefined) {
+            process.stdout.write(`  merged into live graph: ${rep.merged} observed edge${rep.merged === 1 ? '' : 's'}${rep.persisted ? ' — persisted (survives rebuilds until the involved files change)' : ''}\n`)
+          } else {
+            process.stdout.write(`  (--no-merge: report only, graph unchanged)\n`)
+          }
           if (rep.newDynamicSamples && rep.newDynamicSamples.length) {
             process.stdout.write(`\n  new dynamic edges (static could not see these):\n`)
             for (const s of rep.newDynamicSamples.slice(0, 15)) process.stdout.write(`    ${s.from}  →  ${s.to}\n`)
