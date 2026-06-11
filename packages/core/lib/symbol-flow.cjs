@@ -186,4 +186,48 @@ function argBlast(g, readFile, sym, paramName, opts = {}) {
   return out
 }
 
-module.exports = { extractFlow, argBlast }
+// ⑦ v1 — signature-change detection (feeds the realtime issue alerts).
+// Keys are file + qualifiedName, NOT symbol ids: ids embed the start line,
+// which shifts whenever anything above the function is edited — keying by id
+// would report every function below an edit as "changed".
+const SIG_COLLIDED = ' collided'   // >=2 symbols share the key — identity untrackable
+function collectSignatures(g) {
+  const map = new Map()
+  for (const n of g.nodes.values()) {
+    if (n.kind === 'module' || !n.signature) continue
+    const key = n.file + ' ' + (n.qualifiedName || n.name)
+    // Same key twice (e.g. multiple object-literal click handlers in one
+    // file) - WHICH one changed cannot be tracked by name; diffing them
+    // produced a false "changed" alert on every rebuild (reproduced on
+    // electron/main.cjs menu items). Precision-first: mark and exclude.
+    map.set(key, map.has(key) ? SIG_COLLIDED : n.signature)
+  }
+  return map
+}
+
+// Compare a previous collectSignatures() map against the CURRENT graph.
+// Returns ONLY functions present in both whose signature text changed —
+// additions/removals are a different concern (accounting/dead diff covers
+// removals). Each entry carries the current symbol id + caller count so the
+// alert layer can run argBlast / show blast size without re-walking.
+function signatureDelta(prevMap, g) {
+  const out = []
+  const curMap = collectSignatures(g)   // collision-aware view of NOW
+  for (const n of g.nodes.values()) {
+    if (n.kind === 'module' || !n.signature) continue
+    const key = n.file + ' ' + (n.qualifiedName || n.name)
+    const before = prevMap.get(key)
+    if (before === undefined || before === SIG_COLLIDED || curMap.get(key) === SIG_COLLIDED) continue
+    if (before === n.signature) continue
+    out.push({
+      id: n.id, name: n.name, qualifiedName: n.qualifiedName || n.name,
+      file: n.file, line: n.startLine,
+      before: before.slice(0, 100), after: n.signature.slice(0, 100),
+      callers: (g.callersOf ? g.callersOf(n.id).length : 0),
+    })
+    if (out.length >= 20) break   // alert feed, not a report — cap
+  }
+  return out
+}
+
+module.exports = { extractFlow, argBlast, collectSignatures, signatureDelta }
