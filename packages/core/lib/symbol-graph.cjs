@@ -935,11 +935,75 @@ class SymbolGraph {
         if (this.nodes.has(r.source) && this.nodes.has(r.target)) this.addEdge(r)
       }
     }
+    this.finalizeDispatchCandidates()
     this.fileCount = fileCount
     this.builtAt = Date.now()
     this.scanMs = this.builtAt - start
     this.abortedAt = abortedAt          // null or 'symbols'/'edges'
     return this.stats()
+  }
+
+  // Polymorphic-dispatch candidates (post-pass; user bar: "동적은 후보군 최대치").
+  // A typed member call resolving to an interface/base METHOD declaration is a
+  // CORRECT confident edge — but at runtime the dispatch lands on an OVERRIDE in
+  // an implementing/extending class. Without this pass those real targets are
+  // invisible: blast on `Alpha.greet` misses the caller of `Greeter.greet`.
+  // For every confident call edge whose target method's declaring type has
+  // subtypes (reverse extends/implements, transitive), emit `call-candidate`
+  // edges to each subtype's same-named override. Isolated from the confident
+  // call graph (candidate adjacency only), capped to avoid hierarchy explosion.
+  finalizeDispatchCandidates(cap = 24) {
+    if (!this.extendsOut.size) return
+    // Reverse subtype index: baseClassId → Set<subClassId>
+    const subsOf = new Map()
+    for (const [sub, bases] of this.extendsOut) {
+      for (const base of bases) {
+        if (!subsOf.has(base)) subsOf.set(base, new Set())
+        subsOf.get(base).add(sub)
+      }
+    }
+    const allSubsOf = (typeId) => {
+      const out = new Set(); const q = [typeId]
+      while (q.length) {
+        const cur = q.pop()
+        const subs = subsOf.get(cur)
+        if (!subs) continue
+        for (const s of subs) { if (!out.has(s)) { out.add(s); q.push(s) } }
+      }
+      return out
+    }
+    // Snapshot — addEdge below appends to this.edges; never iterate a growing list.
+    const callEdges = this.edges.filter((e) => e.kind === 'call')
+    const pending = []
+    for (const e of callEdges) {
+      const t = this.nodes.get(e.target)
+      if (!t || !t.qualifiedName || !t.qualifiedName.includes('.') || t.qualifiedName === t.name) continue
+      const dot = t.qualifiedName.lastIndexOf('.')
+      const typeName = t.qualifiedName.slice(0, dot)
+      const methodName = t.qualifiedName.slice(dot + 1)
+      const typeIds = this.byName.get(typeName.toLowerCase())
+      if (!typeIds) continue
+      let emitted = 0
+      for (const tid of typeIds) {
+        const tn = this.nodes.get(tid)
+        if (!tn || tn.name !== typeName) continue
+        for (const subId of allSubsOf(tid)) {
+          if (emitted >= cap) break
+          const sub = this.nodes.get(subId)
+          if (!sub) continue
+          const overrides = this.byName.get(methodName.toLowerCase())
+          if (!overrides) continue
+          for (const oid of overrides) {
+            const o = this.nodes.get(oid)
+            if (!o || oid === e.target || o.qualifiedName !== `${sub.name}.${methodName}`) continue
+            pending.push({ source: e.source, target: oid, kind: 'call-candidate', line: e.line, candidate: true, dispatch: 'override' })
+            emitted++
+            if (emitted >= cap) break
+          }
+        }
+      }
+    }
+    for (const e of pending) this.addEdge(e)
   }
 
   // ── Runtime tracing (Leg C). Map a runtime stack frame (file id + 1-based

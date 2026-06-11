@@ -575,6 +575,17 @@ function extractInheritance(node, lang) {
       // Swift — single base type or protocol
       const name = walkType(c)
       if (name) out.push({ name, kind: 'extends' })
+    } else if (ct === 'base_list') {
+      // C# — `class Alpha : Base, IGreeter` puts everything in one base_list;
+      // class-vs-interface is not syntactically distinguishable. Label the
+      // first entry extends and the rest implements (C# allows one base class,
+      // listed first). The graph indexes both kinds identically (extendsOut),
+      // so the label only affects display, never resolution/dispatch.
+      let first = true
+      for (let j = 0; j < c.namedChildCount; j++) {
+        const name = walkType(c.namedChild(j))
+        if (name) { out.push({ name, kind: first ? 'extends' : 'implements' }); first = false }
+      }
     } else if (ct === 'argument_list' && lang === 'python') {
       // Python `class Foo(Bar, Baz):` — base classes as `argument_list`
       for (let j = 0; j < c.namedChildCount; j++) {
