@@ -1791,7 +1791,17 @@ function createControlServer(opts) {
           // Shared symbol views (summary/graph/find/callers/callees/blast) live
           // in lib/symbol-views.cjs so the desktop and headless servers stay in
           // sync. Returns null for server-specific subs (node-with-source).
-          const r = sv.handleSymbolView(g, sub, params, { files: scanner.files, supportedExts: SUPPORTED_EXTS })
+          const r = sv.handleSymbolView(g, sub, params, {
+            files: scanner.files, supportedExts: SUPPORTED_EXTS,
+            // Root-scoped whole-file reader (flow E1) — same path guard as
+            // readSymbolSource.
+            readFile: (file) => {
+              const root = getCurrentRoot()
+              const full = path.join(root, file)
+              if (!isInsideRoot(root, full)) return null
+              return fs.readFileSync(full, 'utf8')
+            },
+          })
           if (r) return writeJson(res, r.status, r.status === 200 ? withMeta(r.body) : r.body)
           if (sub === 'node') {
             const n = g.nodes.get(params.id)

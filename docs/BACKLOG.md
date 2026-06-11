@@ -12,3 +12,6 @@
 - [ ] **Lua 베어 호출이 전부 member-call로 오분류** (NAV_TYPES 'variable' — lua AST가 베어 호출도 variable로 감쌈) → zero-silence 원장이 Lua에서 무음 + builtin 거부가 베어에도 적용. 2026-06-05 기존 결함(2차 점검 확인, 회귀 아님). 수정: variable의 자식이 단일 identifier면 bare 취급.
 - [ ] (기존 wasm 오염 항목 보강) 트리거 쌍에 **php→lua**도 확인됨 — scala→lua만이 아님 (2차 점검).
 - [ ] **장기세션 wasm 힙 추세 미실측**: 라이브맵이 수정마다 심볼 재빌드 — JS 위주 리포는 6회 연속 재빌드 실측 평탄(heap 23→21MB·rss 안정, 2026-06-11). 단 tree-sitter 비중 큰 리포(py/java 대형)의 수일급 데스크톱 세션은 미실측 (tree.delete 호출·swift 워커격리는 있음). 장기 soak 측정 1회 가치.
+- [ ] **⑤ 잔여 — 트레이서 미커버 영역** (PR#28 이후): ①Python은 `trace run`만 — `trace watch`(연속) 미지원 ②JVM 에이전트·.NET 프로파일러 트레이서 미구현(각각 별도 대형 공사; Java/C#는 정적바+마킹으로 커버 중) ③언더스코어 시작 파일(`_x.py`)은 스캐너 ignore라 트레이스 시 "no in-repo frames"로 침묵 — 에러 메시지에 힌트 추가 가치. (2026-06-11)
+- [ ] **it.fails 단독실행 의미론**: misc-langs의 wasm 오염 expected-fail은 `-t` 필터 단독실행 시 오염원(scala)이 skip돼 통과→fail로 뒤집힘 (2차 점검 실증). 주석 또는 가드 보강.
+- [ ] **토스트 문구 다듬기**: 비전문가 가독성 + 이름 3개 이하일 때 '…' 고정 출력 (2차 점검 LOW).

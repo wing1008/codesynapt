@@ -235,6 +235,9 @@ const USAGE = `CodeSynapt CLI — usage:
   cs symbol accounting [--json]
                               # EVERY symbol labelled: entry / reachable /
                               #   possible / dead (static floor, with caveats).
+  cs symbol flow <name|id>  # expression-layer E1: which params/locals flow
+                              #   into which call args + return provenance
+                              #   (JS family; certain flows only, rest counted).
   cs symbol find <query> [--json]
                               # functions/classes/… whose NAME contains <query>.
                               #   prints  id  kind  file:line.
@@ -1226,6 +1229,30 @@ async function main() {
           break
         }
 
+        if (sub === 'flow') {
+          // Expression layer E1: per-function dataflow facts (lazy, JS family).
+          if (!rest[0]) return die('usage: cs symbol flow <name|id> [--json]')
+          const id = await resolveSymbol(rest[0])
+          const r = await req('GET', '/symbol/flow', { id })
+          if (r.status === 404) return die(r.json?.error || `symbol not found: ${id}`)
+          if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
+          const j = r.json
+          if (asJson) { printJson(j); break }
+          if (j.scope) { process.stdout.write(`${j.name}: ${j.scope}\n`); break }
+          process.stdout.write(`flow facts — ${j.name}  ${j.file}:${j.line}\n`)
+          process.stdout.write(`  params: ${(j.params || []).join(', ') || '(none)'}\n`)
+          for (const c of j.calls || []) {
+            const args = c.args.map((a) => a.from).join(', ')
+            process.stdout.write(`  L${c.line}  ${c.name}(${args})\n`)
+          }
+          for (const rt of j.returns || []) {
+            process.stdout.write(`  L${rt.line}  return ← ${rt.from}\n`)
+          }
+          if (j.unresolvedFlows) process.stdout.write(`  ${j.unresolvedFlows} flow(s) not trackable in E1 (object/closure/mutation) — counted, not guessed\n`)
+          if (j.capped) process.stdout.write(`  (capped at 200 facts)\n`)
+          break
+        }
+
         if (sub === 'callers' || sub === 'callees') {
           if (!rest[0]) return die(`usage: cs symbol ${sub} <name|id> [--json]`)
           const id = await resolveSymbol(rest[0])
@@ -1311,7 +1338,7 @@ async function main() {
           break
         }
 
-        return die(`unknown symbol subcommand: ${sub}\n  valid: summary | accounting | find | callers | callees | blast | node`)
+        return die(`unknown symbol subcommand: ${sub}\n  valid: summary | accounting | find | callers | callees | blast | node | flow`)
       }
       case 'safety': {
         if (!args[0]) return die('usage: cs safety <id> [--deep] [--json] [--locale ko|en]')

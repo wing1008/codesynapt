@@ -176,6 +176,30 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
       if (!r) return { status: 404, body: { error: 'symbol not found', id } }
       return { status: 200, body: r }
     }
+    case 'flow': {
+      // Expression layer E1 — per-function dataflow facts, computed LAZILY for
+      // this one symbol (design doc bans whole-project expression graphs).
+      // JS family only in E1; other languages return a scope note.
+      const id = params.id || ''
+      const n = g.nodes.get(id)
+      if (!n) return { status: 404, body: { error: 'symbol not found', id } }
+      const ext = (n.file.split('.').pop() || '').toLowerCase()
+      if (!['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs'].includes(ext)) {
+        return { status: 200, body: { id, name: n.qualifiedName || n.name, file: n.file, scope: 'E1 covers the JS family only — other languages are planned increments (docs/design-expression-layer.md).' } }
+      }
+      if (typeof ctx.readFile !== 'function') return { status: 501, body: { error: 'flow unavailable on this server (no file reader wired)' } }
+      let src = null
+      try { src = ctx.readFile(n.file) } catch {}
+      if (src == null) return { status: 500, body: { error: 'could not read source for ' + n.file } }
+      let flowMod
+      try { flowMod = require('./symbol-flow.cjs') } catch (e) { return { status: 500, body: { error: 'flow module unavailable: ' + (e && e.message) } } }
+      const facts = flowMod.extractFlow(src, n.file, { name: n.name, startLine: n.startLine, endLine: n.endLine })
+      return { status: 200, body: {
+        id, name: n.qualifiedName || n.name, file: n.file, line: n.startLine,
+        ...facts,
+        note: 'CERTAIN flows only (direct identifiers + simple const/let chains); object/closure/mutation flows are counted in unresolvedFlows, never guessed.',
+      } }
+    }
     case 'accounting': {
       // Accounting completeness (every symbol labelled; unexplained 0 by
       // construction). Dead is a STATIC FLOOR — caveats ride along always.
