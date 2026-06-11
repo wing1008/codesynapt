@@ -269,8 +269,36 @@ function loadValidObservedPairs(root) {
   return out
 }
 
+// Quiet review queue for auto-discovered recall-miss suspects (roadmap ②
+// safety rules: append-only, deduped, capped — never interrupts, never fixes).
+function appendRecallSuspects(root, suspects) {
+  if (!root || !suspects || !suspects.length) return 0
+  const file = path.join(root, HISTORY_DIR_NAME, 'recall-suspects.jsonl')
+  let existing = new Set()
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try { const j = JSON.parse(line); existing.add(j.from + '>' + j.to) } catch {}
+    }
+  } catch {}
+  if (existing.size >= 500) return 0   // cap — review the queue before growing it
+  let added = 0
+  try {
+    fs.mkdirSync(path.join(root, HISTORY_DIR_NAME), { recursive: true })
+    for (const s of suspects) {
+      const key = s.from + '>' + s.to
+      if (existing.has(key)) continue
+      existing.add(key)
+      fs.appendFileSync(file, JSON.stringify({ ...s, ts: Date.now() }) + '\n')
+      added++
+    }
+  } catch {}
+  return added
+}
+
 module.exports = {
   TraceStore,
+  appendRecallSuspects,
   computeTraceStats,
   listTraceSessions,
   readTraceSession,

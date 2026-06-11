@@ -144,11 +144,21 @@ let _symbolBuilding = null        // in-flight build promise (avoid double work)
 // per-file patch isn't safe; a full rebuild on next query is. We only
 // invalidate when a graph (or in-flight build) actually exists, so the
 // common "no symbol query yet" path stays a no-op.
+let _symLiveTimer = null
+let _prevDeadSet = null   // accounting baseline for the ③ newly-dead diff
 function invalidateSymbolGraph(id, reason) {
   if (!symbolGraph && !_symbolBuilding) return
   symbolGraph = null
   _symbolBuilding = null
   try { log.info('symbol graph invalidated', { file: id, reason }) } catch {}
+  // ALWAYS-ON live map (roadmap ②): the renderer must learn the symbol layer
+  // went stale, or the 3D map silently shows pre-edit reality until the user
+  // toggles it. Debounced — editors fire bursts of change events; the refetch
+  // it triggers is what lazily rebuilds the graph (incl. observed re-apply).
+  clearTimeout(_symLiveTimer)
+  _symLiveTimer = setTimeout(() => {
+    try { mainWindow?.webContents.send('symbols-updated', { reason: 'rescan' }) } catch {}
+  }, 1500)
 }
 
 // Fingerprint of a scanner's exact file set, as sorted "id:mtimeMs" pairs.
@@ -1901,6 +1911,24 @@ async function handleControlRequest(req, res) {
                 g._observedReapplied = { merged: rep.merged || 0, stale: obs.stale }
               }
             } catch (e) { console.warn('[symbol] observed reapply:', e.message) }
+            // Realtime potential-issue alert (roadmap ③ v1): compare this
+            // rebuild's accounting against the previous one — symbols that
+            // JUST became statically unreachable after an edit are the
+            // cheapest honest "you may have orphaned this" signal. First
+            // build sets the baseline silently.
+            try {
+              const acc = g.accounting()
+              const deadNow = new Set(acc.dead)
+              if (_prevDeadSet) {
+                const newlyDead = [...deadNow].filter((id) => !_prevDeadSet.has(id))
+                if (newlyDead.length) {
+                  const names = newlyDead.slice(0, 8).map((id) => { const n = g.nodes.get(id); return n ? (n.qualifiedName || n.name) : id })
+                  mainWindow?.webContents.send('symbol-issues', { newlyDead: names, total: newlyDead.length, dynamicSiteCount: acc.dynamicSiteCount })
+                  emitTrace('issue', `newly unreachable after edit: ${names.slice(0, 3).join(', ')}${newlyDead.length > 3 ? ` +${newlyDead.length - 3}` : ''} (static floor — dynamic/framework entries may still invoke)`)
+                }
+              }
+              _prevDeadSet = deadNow
+            } catch (e) { console.warn('[symbol] issue diff:', e.message) }
             symbolGraph = g
             _symbolBuilding = null
             return g
@@ -1997,6 +2025,8 @@ async function handleControlRequest(req, res) {
           const rep = g.observeRuntimeEdges(edges, { merge: doMerge })
           if (doMerge && rep.observedEdges) {
             try { rep.persisted = traceStore.appendObservedBatch(currentRoot, edges) > 0 } catch {}
+            // Quiet review queue (auto-discovery safety rules: no interruption).
+            if (rep.recallSuspects) { try { traceStore.appendRecallSuspects(currentRoot, rep.recallSuspects) } catch {} }
             // LIVE map: tell the renderer new observed edges landed so the 3D
             // symbol layer refetches and the amber links appear immediately.
             try { mainWindow?.webContents.send('symbols-updated', { merged: rep.merged || 0, newDynamic: rep.newDynamic || 0 }) } catch {}

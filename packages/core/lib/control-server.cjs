@@ -1735,6 +1735,8 @@ function createControlServer(opts) {
             // files change; a line-shifted remap must never lie). Best-effort.
             if (doMerge && rep.observedEdges) {
               try { rep.persisted = traceStore.appendObservedBatch(getCurrentRoot(), edges) > 0 } catch {}
+              // Quiet review queue (auto-discovery safety rules: no interruption).
+              if (rep.recallSuspects) { try { traceStore.appendRecallSuspects(getCurrentRoot(), rep.recallSuspects) } catch {} }
               // Surface the run in the trace panel/timeline — otherwise the only
               // evidence is the amber edges + a transient toast, and "what did my
               // trace do?" has no answer in the UI.

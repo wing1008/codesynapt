@@ -129,3 +129,24 @@ describe('persisted observations — mtime staleness guard', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe('auto-discovery — recall-miss suspects (roadmap ②, suspicion never verdict)', () => {
+  it('flags an observed same-file edge to a UNIQUE-named target with no static edge', () => {
+    const g = fixtureGraph()
+    // foo→qux: same file pair? foo is a.js, qux is b.js — make it import-related
+    g.fileImports = new Map([['a.js', new Set(['b.js'])]])
+    const r = g.observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'b.js', el: 12 }], { merge: true })
+    expect(r.newDynamic).toBe(1)
+    expect(g.recallSuspects.length).toBe(1)
+    expect(g.recallSuspects[0].name).toBe('qux')
+    expect(g.stats().recallSuspectCount).toBe(1)
+  })
+
+  it('does NOT flag when the target name is ambiguous or files are unrelated', () => {
+    const g = fixtureGraph()
+    g.addNode({ id: 'c#qux@1', file: 'c.js', name: 'qux', startLine: 1, endLine: 5, kind: 'function' }) // name now ambiguous
+    g.fileImports = new Map([['a.js', new Set(['b.js'])]])
+    g.observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'b.js', el: 12 }], { merge: true })
+    expect(g.recallSuspects.length).toBe(0)   // unique-name predicate refused
+  })
+})

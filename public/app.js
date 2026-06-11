@@ -317,6 +317,7 @@ const T = {
     'changes.requires_electron': 'Changes 패널은 데스크탑 앱에서만 사용 가능',
     'symbols.requires_electron': '심볼(함수) 레이어는 데스크탑 앱에서만 사용 가능',
     'symbols.observed_toast': '런타임 관측 반영: 엣지 {merged}개 (정적이 못 본 동적 {newDynamic}개) — 주황색 링크',
+    'symbols.newly_dead_toast': '⚠ 잠재 이슈: 방금 수정으로 {total}개 심볼이 정적 미도달 — {names}… (동적 호출 가능성 있음)',
     // Tour / Time-lapse
     'timelapse.requires_electron':  '타임랩스는 데스크탑 앱에서만 사용 가능',
     // Hints bar
@@ -585,6 +586,7 @@ const T = {
     'changes.requires_electron': 'Changes panel requires the desktop app',
     'symbols.requires_electron': 'Symbol (function) layer requires the desktop app',
     'symbols.observed_toast': 'runtime observations merged: {merged} edges ({newDynamic} dynamic, invisible to static) — amber links',
+    'symbols.newly_dead_toast': '⚠ potential issue: this edit left {total} symbol(s) statically unreachable — {names}… (dynamic callers may still exist)',
     'timelapse.requires_electron':  'Time-lapse requires the desktop app',
     'hints.drag':    'drag',
     'hints.orbit':   'orbit',
@@ -6302,13 +6304,23 @@ if (isElectron) {
   // backend graph — refetch the symbol layer so the amber links appear NOW,
   // not on the next restart. No-op when the symbol layer is off.
   if (window.codesynapt.onSymbolsUpdated) {
-    window.codesynapt.onSymbolsUpdated(({ merged, newDynamic }) => {
+    window.codesynapt.onSymbolsUpdated(({ merged, newDynamic, reason }) => {
       symbolModeState.lastRoot = null            // bust the per-root cache
       if (state.showSymbols) {
         state.symbols.clear()                    // force the loader to refetch
         buildSymbolGraph()
-        toast(t('symbols.observed_toast', { merged, newDynamic }))
+        // 'rescan' = a source edit staled the layer — refresh SILENTLY (edits
+        // are constant; a toast per edit would be noise). Trace merges toast.
+        if (reason !== 'rescan') toast(t('symbols.observed_toast', { merged, newDynamic }))
       }
+    })
+  }
+  // Realtime potential-issue alerts (roadmap ③ v1): an edit just made symbols
+  // statically unreachable — surface immediately, honestly labelled as a floor.
+  if (window.codesynapt.onSymbolIssues) {
+    window.codesynapt.onSymbolIssues(({ newlyDead, total }) => {
+      if (!newlyDead || !newlyDead.length) return
+      toast(t('symbols.newly_dead_toast', { names: newlyDead.slice(0, 3).join(', '), total }))
     })
   }
   if (window.codesynapt.onScanProgress) window.codesynapt.onScanProgress(handleScanProgress)
