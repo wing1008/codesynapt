@@ -217,6 +217,12 @@ const USAGE = `CodeSynapt CLI — usage:
   cs trace sessions         # past sessions in .codesynapt/traces/
   cs trace export <path>    # write current session to JSON
   cs trace clear            # start a fresh session (old one preserved on disk)
+  cs trace run [--no-merge] -- <cmd>
+                              # run <cmd> under the CPU profiler → observed call
+                              #   edges merge into the live graph (amber in 3D)
+  cs trace watch [--interval <sec>] -- <cmd>
+                              # attach to a LONG-RUNNING command; profile in
+                              #   cycles, merging observations live (Ctrl-C stops)
   cs blast <id> [n] [dir]   # impact of editing <id>: dependents within n hops
                               #   n   = BFS depth (default 3)
                               #   dir = users|deps (default users)
@@ -2410,6 +2416,164 @@ async function main() {
       }
       case 'trace': {
         const sub = args[0]
+        // ── Shared by `run` and `watch` ──
+        // Map an absolute/file: URL inside the project to a repo-relative id;
+        // node: internals and node_modules are excluded.
+        const _urlToRel = (u) => {
+          if (!u || u.startsWith('node:') || u.includes('node_modules')) return null
+          let abs
+          try { abs = u.startsWith('file:') ? require('url').fileURLToPath(u) : u } catch { return null }
+          if (!abs || !path.isAbsolute(abs)) return null
+          const rel = path.relative(PROJECT_ROOT, abs)
+          if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
+          return rel.split(path.sep).join('/')
+        }
+        // Walk a V8 profile's call tree → unique caller→callee frame pairs.
+        // `seen` is caller-owned so watch can dedup ACROSS cycles.
+        const _profileToPairs = (prof, seen) => {
+          const pairs = []
+          if (!prof || !Array.isArray(prof.nodes)) return pairs
+          const byId = new Map(); for (const n of prof.nodes) byId.set(n.id, n)
+          for (const n of prof.nodes) {
+            if (!n.children) continue
+            const cfRel = _urlToRel(n.callFrame?.url)
+            if (!cfRel) continue
+            const cl = (n.callFrame.lineNumber | 0) + 1
+            for (const cid of n.children) {
+              const c = byId.get(cid); if (!c) continue
+              const efRel = _urlToRel(c.callFrame?.url); if (!efRel) continue
+              const el = (c.callFrame.lineNumber | 0) + 1
+              const k = `${cfRel}:${cl}>${efRel}:${el}`
+              if (seen.has(k)) continue; seen.add(k)
+              pairs.push({ cf: cfRel, cl, ef: efRel, el })
+            }
+          }
+          return pairs
+        }
+        // Session lease — keeps an idle `cs serve` daemon from reaping while a
+        // trace is in progress (same registry lease the MCP/desktop use).
+        const _traceReg = (() => { try { return require('../lib/registry.cjs') } catch { return null } })()
+        let _leaseTimer = null
+        const _leaseId = `trace-${process.pid}`
+        const _holdLease = () => {
+          if (!_traceReg || _leaseTimer) return
+          try {
+            const root = _traceReg.canonicalRoot ? _traceReg.canonicalRoot(PROJECT_ROOT) : PROJECT_ROOT
+            const _lease = () => { try { _traceReg.touch('session', _leaseId, { projectRoot: root, startedAt: Date.now(), kind: 'trace' }) } catch {} }
+            _lease()
+            _leaseTimer = setInterval(_lease, 5000)
+            if (_leaseTimer.unref) _leaseTimer.unref()
+          } catch {}
+        }
+        const _releaseLease = () => {
+          if (_leaseTimer) { clearInterval(_leaseTimer); _leaseTimer = null }
+          if (_traceReg) { try { _traceReg.remove('session', _leaseId) } catch {} }
+        }
+
+        if (sub === 'watch') {
+          // cs trace watch [--interval <sec>] -- <long-running-command>
+          // Realtime leg: attach the V8 inspector to a LONG-RUNNING process
+          // (dev server, worker) and profile in cycles — each cycle's observed
+          // edges merge into the live graph immediately, so the open desktop
+          // map keeps pulsing with runtime truth while the process runs.
+          const dashIdx = process.argv.indexOf('--')
+          const cmd = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : []
+          if (!cmd.length) return die('usage: cs trace watch [--interval <sec>] -- <command>   (e.g. cs trace watch -- npm run dev)')
+          const flagPart = args.slice(0, args.indexOf('--') >= 0 ? args.indexOf('--') : args.length)
+          const ivIdx = flagPart.indexOf('--interval')
+          const intervalMs = Math.max(2, parseInt((ivIdx >= 0 && flagPart[ivIdx + 1]) || '8', 10) || 8) * 1000
+          let WebSocket
+          try { WebSocket = require('ws') } catch { return die('the optional `ws` package is unavailable — trace watch needs it to attach the inspector.') }
+          const cp = require('child_process')
+          _holdLease()
+          process.stdout.write(`watching: ${cmd.join(' ')}\n  (inspector cycles every ${intervalMs / 1000}s — observed edges merge into the live map; Ctrl-C to stop)\n  note: attaches to the FIRST node process the command starts.\n\n`)
+          const nodeOpts = `${process.env.NODE_OPTIONS || ''} --inspect=0`.trim()
+          const ch = cp.spawn(cmd[0], cmd.slice(1), {
+            cwd: PROJECT_ROOT, stdio: ['inherit', 'inherit', 'pipe'], shell: true,
+            env: { ...process.env, NODE_OPTIONS: nodeOpts },
+          })
+          const seen = new Set()
+          const totals = { batches: 0, observed: 0, newDynamic: 0, merged: 0 }
+          let stopping = false
+          let wsUrl = null
+          let errBuf = ''
+          let childExited = false, exitCode = null
+          ch.stderr.on('data', (d) => {
+            process.stderr.write(d)   // pass the child's stderr through
+            if (!wsUrl) {
+              errBuf += d.toString()
+              const m = errBuf.match(/ws:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+/i)
+              if (m) wsUrl = m[0]
+            }
+          })
+          ch.on('exit', (c) => { childExited = true; if (exitCode === null) exitCode = c == null ? 1 : c })
+          ch.on('error', (e) => { childExited = true; exitCode = 127; process.stderr.write(`spawn failed: ${e.message}\n`) })
+          process.on('SIGINT', () => { stopping = true; try { ch.kill() } catch {}; if (exitCode === null) exitCode = 130 })
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+          // ONE profiling cycle = connect → profile interval → collect → DISCONNECT.
+          // The disconnect between cycles is load-bearing: node does not exit
+          // while an inspector session is attached, so a persistent connection
+          // deadlocks against a child that finished its work (proven: a 25s
+          // fixture survived 30+ minutes under an always-on session).
+          const oneCycle = () => new Promise((resolve) => {
+            const ws = new WebSocket(wsUrl)
+            let nextId = 1; const waiters = new Map()
+            let settled = false
+            const finish = () => { if (!settled) { settled = true; try { ws.close() } catch {}; resolve() } }
+            const send = (method, params) => new Promise((res2, rej2) => {
+              const id = nextId++
+              waiters.set(id, { resolve: res2, reject: rej2 })
+              try { ws.send(JSON.stringify({ id, method, params })) } catch (e) { waiters.delete(id); rej2(e) }
+            })
+            ws.on('message', (m) => {
+              let j; try { j = JSON.parse(m) } catch { return }
+              if (j.id && waiters.has(j.id)) {
+                const w = waiters.get(j.id); waiters.delete(j.id)
+                j.error ? w.reject(new Error(j.error.message || 'cdp error')) : w.resolve(j.result)
+              }
+            })
+            ws.on('open', async () => {
+              try {
+                await send('Profiler.enable')
+                await send('Profiler.start')
+                await sleep(intervalMs)
+                const res = await send('Profiler.stop')
+                const pairs = _profileToPairs(res && res.profile, seen)
+                if (pairs.length) {
+                  try {
+                    const r2 = await req('POST', '/symbol/observe', null, { edges: pairs, merge: true })
+                    if (r2.status === 200 && r2.json) {
+                      totals.batches++
+                      totals.observed += r2.json.observedEdges || 0
+                      totals.newDynamic += r2.json.newDynamic || 0
+                      totals.merged += r2.json.merged || 0
+                      process.stderr.write(`  [watch #${totals.batches}] +${pairs.length} frames → ${r2.json.observedEdges} edges (${r2.json.newDynamic} new dynamic, ${r2.json.merged} merged live)\n`)
+                    }
+                  } catch { /* backend momentarily unreachable — keep watching */ }
+                }
+              } catch { /* child died mid-cycle or cdp hiccup — next loop re-checks */ }
+              finish()
+            })
+            ws.on('error', () => finish())
+            ws.on('close', () => finish())
+            // Safety: never let one cycle wedge the loop.
+            setTimeout(finish, intervalMs + 15000)
+          })
+          // Wait for the inspector URL (or an early child exit).
+          for (let i = 0; i < 100 && !wsUrl && !childExited; i++) await sleep(200)
+          if (!wsUrl && !childExited) process.stderr.write('  [watch] no inspector URL detected (not a Node process?) — waiting for the command to finish.\n')
+          while (!childExited && !stopping) {
+            if (wsUrl) await oneCycle()
+            else await sleep(1000)
+            // Brief gap with NO session attached so a finished child can exit.
+            await sleep(400)
+          }
+          stopping = true
+          _releaseLease()
+          process.stdout.write(`\n── trace watch ended (exit=${exitCode == null ? '?' : exitCode}) — ${totals.batches} cycle${totals.batches === 1 ? '' : 's'}, ${totals.merged} merged (${totals.newDynamic} new dynamic) ──\n`)
+          break
+        }
+
         if (sub === 'run') {
           // cs trace run -- <command...>  → run the command under the V8 CPU
           // profiler, turn the sampled call tree into observed call edges, and
@@ -2423,29 +2587,12 @@ async function main() {
           const flagPart = args.slice(0, args.indexOf('--') >= 0 ? args.indexOf('--') : args.length)
           const doMerge = !flagPart.includes('--no-merge')
           const cp = require('child_process')
-          const urlMod = require('url')
           const profDir = path.join(PROJECT_ROOT, '.codesynapt', 'traces', `prof-${Date.now()}`)
           try { fs.mkdirSync(profDir, { recursive: true }) } catch (e) { return die(`cannot create profile dir: ${e.message}`) }
           // Hold a session lease for the whole run so an idle `cs serve` daemon
           // does NOT idle-reap mid-trace (a long `npm test` easily outlives the
-          // ~20s grace). Uses the same registry lease the MCP/desktop use; the
-          // observe POST at the end then still has a live backend to hit.
-          const _traceReg = (() => { try { return require('../lib/registry.cjs') } catch { return null } })()
-          let _leaseTimer = null
-          const _leaseId = `trace-${process.pid}`
-          const _releaseLease = () => {
-            if (_leaseTimer) { clearInterval(_leaseTimer); _leaseTimer = null }
-            if (_traceReg) { try { _traceReg.remove('session', _leaseId) } catch {} }
-          }
-          if (_traceReg) {
-            try {
-              const root = _traceReg.canonicalRoot ? _traceReg.canonicalRoot(PROJECT_ROOT) : PROJECT_ROOT
-              const _lease = () => { try { _traceReg.touch('session', _leaseId, { projectRoot: root, startedAt: Date.now(), kind: 'trace' }) } catch {} }
-              _lease()
-              _leaseTimer = setInterval(_lease, 5000)
-              if (_leaseTimer.unref) _leaseTimer.unref()
-            } catch {}
-          }
+          // ~20s grace). See the shared _holdLease above.
+          _holdLease()
           const nodeOpts = `${process.env.NODE_OPTIONS || ''} --cpu-prof --cpu-prof-dir=${profDir}`.trim()
           process.stdout.write(`tracing: ${cmd.join(' ')}\n  (CPU profiler attached — observed edges cover only paths the run exercises)\n\n`)
           const code = await new Promise((resolve) => {
@@ -2464,35 +2611,12 @@ async function main() {
             process.stdout.write(`\nno .cpuprofile produced (command not a Node process, or it crashed before exit). exit=${code}\n`)
             break
           }
-          const urlToRel = (u) => {
-            if (!u || u.startsWith('node:') || u.includes('node_modules')) return null
-            let abs
-            try { abs = u.startsWith('file:') ? urlMod.fileURLToPath(u) : u } catch { return null }
-            if (!abs || !path.isAbsolute(abs)) return null
-            const rel = path.relative(PROJECT_ROOT, abs)
-            if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
-            return rel.split(path.sep).join('/')
-          }
           process.stderr.write(`  ${profiles.length} profile(s) collected, extracting call edges…\n`)
           const seen = new Set(); const pairs = []
           for (const pf of profiles) {
             let prof
             try { prof = JSON.parse(fs.readFileSync(path.join(profDir, pf), 'utf8')) } catch { continue }
-            const byId = new Map(); for (const n of prof.nodes || []) byId.set(n.id, n)
-            for (const n of prof.nodes || []) {
-              if (!n.children) continue
-              const cfRel = urlToRel(n.callFrame?.url)
-              if (!cfRel) continue
-              const cl = (n.callFrame.lineNumber | 0) + 1
-              for (const cid of n.children) {
-                const c = byId.get(cid); if (!c) continue
-                const efRel = urlToRel(c.callFrame?.url); if (!efRel) continue
-                const el = (c.callFrame.lineNumber | 0) + 1
-                const k = `${cfRel}:${cl}>${efRel}:${el}`
-                if (seen.has(k)) continue; seen.add(k)
-                pairs.push({ cf: cfRel, cl, ef: efRel, el })
-              }
-            }
+            pairs.push(..._profileToPairs(prof, seen))
           }
           process.stderr.write(`  ${pairs.length} frame-edges → classifying against the static graph (port ${PORT})…\n`)
           let r
