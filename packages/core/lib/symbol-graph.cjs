@@ -151,6 +151,13 @@ class SymbolGraph {
     // user calls (the real static gap). Surfaced in stats().
     this.declineReasons = Object.create(null)
     this.declineSamples = []
+    // Zero-silence ledger (user bar #3): call sites whose CALLEE cannot even be
+    // named statically — computed members `obj[k]()`, indirect `f()()`, local
+    // callbacks `cb()`. These previously produced NO edge and NO counter (proven
+    // by fixture: invisible). Now every such site is recorded against its
+    // enclosing symbol so accounting/blast can say "this symbol contains N
+    // dynamic call sites" instead of silently looking complete.
+    this.dynamicSites = new Map()   // symbolId → [{ line, form }]
     // Honest signal #2: parser outcomes per file, so a broken-language /
     // crashed-parser file is distinguishable from a legitimately symbol-less
     // one. parseFailures = files whose parser THREW (extractSymbols or
@@ -188,6 +195,7 @@ class SymbolGraph {
     this.unresolvedAmbiguous = 0
     this.declineReasons = Object.create(null)
     this.declineSamples = []
+    this.dynamicSites.clear()
     this.parseFailures = 0
     this.emptyFiles = 0
   }
@@ -296,6 +304,16 @@ class SymbolGraph {
       if (!srcFile && any) return any
     }
     return null
+  }
+
+  // Record a statically-unnameable call site against its enclosing symbol.
+  // forms: 'computed-member' (obj[k]()), 'indirect' (f()(), (expr)()),
+  // 'local-callback' (cb() where cb is a param/local non-function binding).
+  recordDynamicSite(symbolId, line, form) {
+    if (!symbolId) return
+    let list = this.dynamicSites.get(symbolId)
+    if (!list) { list = []; this.dynamicSites.set(symbolId, list) }
+    if (list.length < 64) list.push({ line: line || 0, form: form || 'unknown' })
   }
 
   // Record a declined call resolution under a labeled reason. The sum of
@@ -1086,6 +1104,11 @@ class SymbolGraph {
       abortedAt: this.abortedAt || null,   // null | 'symbols' | 'edges'
       unresolvedAmbiguous: this.unresolvedAmbiguous,  // calls we declined to guess
       declineReasons: this.declineReasons,  // breakdown: stdlib-correct vs genuine gap
+      // Zero-silence ledger summary — sites whose callee static analysis cannot
+      // even NAME. Nonzero here means "the call graph for these symbols is a
+      // floor"; per-symbol detail via this.dynamicSites.
+      dynamicSiteCount: [...this.dynamicSites.values()].reduce((a, l) => a + l.length, 0),
+      dynamicSiteSymbols: this.dynamicSites.size,
       // Per-call samples are diagnostic-only — omitted from the shipped response
       // unless CS_DBG populated them (keeps the AI-consumed payload lean).
       ...(this.declineSamples.length ? { declineSamples: this.declineSamples } : {}),

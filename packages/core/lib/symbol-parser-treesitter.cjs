@@ -405,6 +405,12 @@ function walk(node, ctx) {
     const src = ctx.fnStack[ctx.fnStack.length - 1]
     if (src) {
       const calleeName = extractCalleeName(node)
+      // Statically-unnameable callee — subscript `arr[i]()`, call-result
+      // `getattr(o, n)()`, etc. Previously a SILENT drop; record it so the
+      // graph admits the enclosing symbol has a dynamic call site (zero-silence).
+      if (!calleeName && ctx.index?.recordDynamicSite) {
+        ctx.index.recordDynamicSite(src, node.startPosition.row + 1, 'indirect')
+      }
       if (calleeName && !ctx.kwSet?.has(calleeName)) {
         let target = null
         // Type-aware member resolution. When the receiver's class is known —

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { buildGraph, hasCall, hasCandidate } from './_build.js'
+import { parseFile } from '../../packages/core/parser.js'
 
 // ── Symbol-completeness BAR — Java ──
 // Common-pattern fixture (NOT a full type solver — see design doc depth limit).
@@ -52,5 +53,10 @@ describe('symbol-completeness bar — Java', () => {
     const g = await buildGraph([{ id: 'Fix.java', ext: 'java', content: FIX }])
     expect(hasCandidate(g, 'go', 'Alpha.greet')).toBe(true)
     expect(hasCandidate(g, 'go', 'Beta.greet')).toBe(true)
+  })
+
+  it('ZERO SILENCE: reflection is flagged at the file level (Layer-1 marker)', () => {
+    const r = parseFile('Fix.java', FIX, 'java')
+    expect(r.dynamicPatterns).toContain('reflection')
   })
 })

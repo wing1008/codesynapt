@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildGraph, hasCall, hasCandidate, refExists } from './_build.js'
+import { buildGraph, hasCall, refExists, dynamicSiteForms } from './_build.js'
 
 // ── Symbol-completeness BAR — Python ──
 // Known-answer fixture; every call site labelled. Same bar as js.test.js.
@@ -28,8 +28,7 @@ def uses_callback(cb):
     return cb()              # DYNAMIC: parameter call — no static target
 
 def dispatch(obj, name):
-    fn = getattr(obj, name)
-    return fn()              # DYNAMIC: reflection — no static target
+    return getattr(obj, name)()   # DYNAMIC SITE: call-result callee (reflection)
 `
 
 describe('symbol-completeness bar — Python', () => {
@@ -55,5 +54,10 @@ describe('symbol-completeness bar — Python', () => {
   it('REF honesty: a function passed as a value is recorded as used', async () => {
     const g = await buildGraph([{ id: 'fix.py', ext: 'py', content: FIX }])
     expect(refExists(g, 'leaf')).toBe(true)
+  })
+
+  it('ZERO SILENCE: getattr(...)() dynamic site is recorded, not dropped', async () => {
+    const g = await buildGraph([{ id: 'fix.py', ext: 'py', content: FIX }])
+    expect(dynamicSiteForms(g, 'dispatch')).toContain('indirect')
   })
 })

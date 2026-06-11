@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { buildGraph, hasCall, hasCandidate } from './_build.js'
+import { parseFile } from '../../packages/core/parser.js'
 
 // ── Symbol-completeness BAR — C# ──
 // Common-pattern fixture (NOT a full type solver — see design doc depth limit).
@@ -51,5 +52,10 @@ describe('symbol-completeness bar — C#', () => {
     const g = await buildGraph([{ id: 'Fix.cs', ext: 'cs', content: FIX }])
     expect(hasCandidate(g, 'Go', 'Alpha.Greet')).toBe(true)
     expect(hasCandidate(g, 'Go', 'Beta.Greet')).toBe(true)
+  })
+
+  it('ZERO SILENCE: reflection is flagged at the file level (Layer-1 marker)', () => {
+    const r = parseFile('Fix.cs', FIX, 'cs')
+    expect(r.dynamicPatterns).toContain('reflection')
   })
 })

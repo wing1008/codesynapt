@@ -63,3 +63,11 @@ export function refExists(g, toName) {
 export function symbolNames(g) {
   return [...g.nodes.values()].map((n) => n.name)
 }
+
+// Zero-silence ledger: forms of dynamic call sites recorded inside a symbol.
+export function dynamicSiteForms(g, symName) {
+  for (const [sid, list] of g.dynamicSites) {
+    if (nameMatch(g.nodes.get(sid), symName)) return list.map((s) => s.form)
+  }
+  return []
+}

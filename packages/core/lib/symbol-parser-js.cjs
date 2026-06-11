@@ -755,7 +755,11 @@ function extractReferences(content, fileId, index) {
       let memberViaImport = false   // `ns.fn()` where ns is `import * as ns` / default import
       let nsModule = null           // the resolved source module fileId of `ns` (pin target)
       if (callee.type === 'Identifier') name = callee.name
-      else if (callee.type === 'MemberExpression' && callee.property?.type === 'Identifier') {
+      // computed guard: in `o[k]()` the property IS an Identifier (k) but it is
+      // the SUBSCRIPT VARIABLE, not the method name — treating it as the callee
+      // name can phantom-match a user symbol named `k`. Computed members fall
+      // through to the dynamic-site branch below instead.
+      else if (callee.type === 'MemberExpression' && !callee.computed && callee.property?.type === 'Identifier') {
         name = callee.property.name
         // Type-aware: receiver is `user` → look up `user`'s declared
         // type → resolve `User.method` qualified name first.
@@ -795,7 +799,18 @@ function extractReferences(content, fileId, index) {
           if (t) receiverClass = t
         }
       }
-      if (!name) return
+      if (!name) {
+        // Statically-unnameable callee — `obj[k]()` (computed member) or an
+        // indirect call `f()()` / `(expr)()`. Previously a SILENT drop (no edge,
+        // no counter — the proven invisible blind spot). Record it against the
+        // enclosing symbol so the graph admits "this symbol has a dynamic call
+        // site" (zero-silence bar).
+        if (index.recordDynamicSite) {
+          const form = (callee.type === 'MemberExpression' && callee.computed) ? 'computed-member' : 'indirect'
+          index.recordDynamicSite(src, path.node.loc?.start.line || 0, form)
+        }
+        return
+      }
       // Resolve. A bare call `foo()` may resolve loosely (same-file /
       // imported / unique-production) — no receiver, so it's a strong
       // signal for an in-scope or module-level function. A member call
@@ -836,7 +851,12 @@ function extractReferences(content, fileId, index) {
           const isFnLocal = (b.path && b.path.isFunctionDeclaration && b.path.isFunctionDeclaration())
             || (b.path && b.path.isClassDeclaration && b.path.isClassDeclaration())
             || (initPath && initPath.isFunction && initPath.isFunction())
-          if (!isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) return
+          if (!isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) {
+            // `cb()` where cb is a parameter / non-function local: a runtime
+            // value call. Not resolvable statically — record, don't drop silent.
+            if (index.recordDynamicSite) index.recordDynamicSite(src, path.node.loc?.start.line || 0, 'local-callback')
+            return
+          }
         }
       }
       if (!target && index.resolveCall) {
