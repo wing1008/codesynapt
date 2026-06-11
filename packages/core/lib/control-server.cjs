@@ -1802,6 +1802,11 @@ function createControlServer(opts) {
               return fs.readFileSync(full, 'utf8')
             },
           })
+          // flow (multilang) returns a PROMISE — await thenables (both servers).
+          if (r && typeof r.then === 'function') {
+            return r.then((rr) => { if (!res.writableEnded) writeJson(res, rr.status, rr.status === 200 ? withMeta(rr.body) : rr.body) })
+              .catch((e) => { try { writeJson(res, 500, { error: 'flow failed: ' + (e && e.message) }) } catch {} })
+          }
           if (r) return writeJson(res, r.status, r.status === 200 ? withMeta(r.body) : r.body)
           if (sub === 'node') {
             const n = g.nodes.get(params.id)

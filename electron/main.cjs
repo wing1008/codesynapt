@@ -2005,6 +2005,11 @@ async function handleControlRequest(req, res) {
               if (fullAbs !== rootAbs && !fullAbs.startsWith(rootAbs + path.sep)) return null
               return fs.readFileSync(fullAbs, 'utf8')
             } })
+        // flow (multilang) returns a PROMISE — await thenables (parity).
+        if (r && typeof r.then === 'function') {
+          const rr = await r
+          return writeJson(res, rr.status, rr.status === 200 ? withMeta(rr.body) : rr.body)
+        }
         if (r) return writeJson(res, r.status, r.status === 200 ? withMeta(r.body) : r.body)
         if (sub === 'node') {
           const n = g.nodes.get(params.id)

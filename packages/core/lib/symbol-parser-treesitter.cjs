@@ -1450,4 +1450,6 @@ function availableExtensions() {
   return out
 }
 
-module.exports = { makeParser, availableExtensions, LANG_CONFIG }
+// parserFor is exported for the expression-flow walker (symbol-flow.cjs):
+// it needs RAW trees, not the symbol/reference extraction pipeline.
+module.exports = { makeParser, availableExtensions, LANG_CONFIG, parserFor }
