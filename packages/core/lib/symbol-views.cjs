@@ -193,6 +193,17 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
       if (src == null) return { status: 500, body: { error: 'could not read source for ' + n.file } }
       let flowMod
       try { flowMod = require('./symbol-flow.cjs') } catch (e) { return { status: 500, body: { error: 'flow module unavailable: ' + (e && e.message) } } }
+      // E2: ?param=<name> → argument-level blast ("change THIS param — which
+      // downstream call sites receive the value"), walked over confident call
+      // edges only; ambiguous targets stop the walk and are counted.
+      if (params.q && params.q !== '') {
+        const blast = flowMod.argBlast(g, ctx.readFile, n, params.q, { depth: parseInt(params.depth, 10) || 4 })
+        return { status: 200, body: {
+          id, name: n.qualifiedName || n.name, file: n.file, line: n.startLine,
+          ...blast,
+          note: 'Argument-level blast over CONFIDENT call edges only — an ambiguous/unknown call target stops the walk (unresolvedTargets), never guessed.',
+        } }
+      }
       const facts = flowMod.extractFlow(src, n.file, { name: n.name, startLine: n.startLine, endLine: n.endLine })
       return { status: 200, body: {
         id, name: n.qualifiedName || n.name, file: n.file, line: n.startLine,

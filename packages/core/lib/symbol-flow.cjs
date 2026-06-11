@@ -129,4 +129,61 @@ function extractFlow(source, fileId, sym) {
   return out
 }
 
-module.exports = { extractFlow }
+// E2 — argument-level blast: starting from (function, param), follow E1 flow
+// facts across CONFIDENT Layer-2 call edges: param → call arg → the target
+// function's parameter at that index → recurse. PRECISION-FIRST walk rules:
+//   - only confident `call` edges (g.calleesOf) are followed;
+//   - a call whose target is ambiguous (0 or ≥2 same-named confident callees)
+//     STOPS the walk and increments unresolvedTargets — counted, not guessed;
+//   - bounded depth + visited-set (cycles) + fan-out cap.
+function argBlast(g, readFile, sym, paramName, opts = {}) {
+  const maxDepth = Math.min(8, Math.max(1, opts.depth || 4))
+  const out = { seed: { fn: sym.name, param: paramName }, impacted: [], unresolvedTargets: 0, returnsParam: false, truncated: false }
+  const flowCache = new Map()
+  const factsOf = (node) => {
+    if (flowCache.has(node.id)) return flowCache.get(node.id)
+    let facts = null
+    try {
+      const src = readFile(node.file)
+      if (src != null) facts = extractFlow(src, node.file, { name: node.name, startLine: node.startLine, endLine: node.endLine })
+    } catch {}
+    flowCache.set(node.id, facts)
+    return facts
+  }
+  const visited = new Set()
+  const queue = [{ node: sym, param: paramName, depth: 0 }]
+  while (queue.length) {
+    if (out.impacted.length >= 100) { out.truncated = true; break }
+    const { node, param, depth } = queue.shift()
+    const key = node.id + '|' + param
+    if (visited.has(key)) continue
+    visited.add(key)
+    const facts = factsOf(node)
+    if (!facts) continue
+    const want = 'param:' + param
+    if (depth === 0 && facts.returns.some((r) => r.from === want)) out.returnsParam = true
+    for (const call of facts.calls) {
+      const carrying = call.args.filter((a) => a.from === want)
+      if (!carrying.length) continue
+      // Resolve the call to ONE confident Layer-2 callee by name — the bare
+      // short name (qualified tails count). 0 or ≥2 ⇒ stop + count.
+      const callees = (g.calleesOf ? g.calleesOf(node.id) : [])
+        .filter((c) => c.name === call.name || (c.qualifiedName || '').endsWith('.' + call.name))
+      if (callees.length !== 1) { out.unresolvedTargets++; continue }
+      const target = callees[0]
+      const tFacts = factsOf(target)
+      for (const a of carrying) {
+        const tParam = tFacts && tFacts.params ? tFacts.params[a.index] : undefined
+        out.impacted.push({
+          fn: target.name, qualifiedName: target.qualifiedName || target.name,
+          file: target.file, line: call.line,
+          param: tParam || `(arg${a.index})`, argIndex: a.index, depth: depth + 1,
+        })
+        if (tParam && depth + 1 < maxDepth) queue.push({ node: target, param: tParam, depth: depth + 1 })
+      }
+    }
+  }
+  return out
+}
+
+module.exports = { extractFlow, argBlast }
