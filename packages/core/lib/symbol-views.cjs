@@ -18,6 +18,10 @@ function symbolNodeView(g, n) {
     // the common payload lean.
     candidateCallers: g.candIn?.get(n.id)?.size || undefined,
     candidateCallees: g.candOut?.get(n.id)?.size || undefined,
+    // Zero-silence ledger: this symbol contains N call sites whose callee
+    // static analysis cannot even name (obj[k](), f()(), local callbacks) —
+    // its OUTGOING edges are a floor. 0 omitted.
+    dynamicSites: g.dynamicSites?.get(n.id)?.length || undefined,
   }
 }
 
@@ -79,12 +83,20 @@ function symbolBlast(g, id, depth = 3, direction = 'callers') {
     .filter(Boolean)
   const files = new Set(impacted.map((i) => i.file))
   const seed = g.nodes.get(id)
+  // Honest bound: dynamic call sites inside the blast set are places the
+  // impact could EXPAND beyond this static result. Count them so "12 impacted"
+  // reads as "12 + N dynamic sites", never as a complete answer.
+  let dynamicSitesInImpact = 0
+  if (g.dynamicSites) {
+    for (const sid of visited) dynamicSitesInImpact += g.dynamicSites.get(sid)?.length || 0
+  }
   return {
     seed: { id, name: seed.qualifiedName || seed.name, file: seed.file, line: seed.startLine },
     direction, depth,
     totalImpacted: impacted.length, filesTouched: files.size,
     byDepth, impacted: impacted.slice(0, 200), truncated: impacted.length > 200,
-    caveat: 'Static call graph. Dynamic/reflective dispatch (signals/slots, getattr, DI) and ambiguous method names are not resolved — treat this as a floor. Coverage: JS/TS + Python only.',
+    dynamicSitesInImpact: dynamicSitesInImpact || undefined,
+    caveat: 'Static call graph — a floor, not the whole impact. Ambiguous dispatch is surfaced separately as candidate* edges; dynamicSitesInImpact counts call sites in this blast set whose callee is statically unnameable (obj[k](), reflection, callbacks) — impact can expand through those.',
   }
 }
 
@@ -156,6 +168,29 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
       const r = symbolBlast(g, id, depth, dir)
       if (!r) return { status: 404, body: { error: 'symbol not found', id } }
       return { status: 200, body: r }
+    }
+    case 'accounting': {
+      // Accounting completeness (every symbol labelled; unexplained 0 by
+      // construction). Dead is a STATIC FLOOR — caveats ride along always.
+      const acc = g.accounting()
+      const dead = acc.dead
+        .map((sid) => { const n = g.nodes.get(sid); return n ? { name: n.qualifiedName || n.name, kind: n.kind, file: n.file, line: n.startLine } : null })
+        .filter(Boolean)
+      return { status: 200, body: {
+        total: acc.total,
+        entries: acc.entryCount, reachable: acc.reachableCount,
+        possible: acc.possibleCount, dead: acc.deadCount,
+        unexplained: acc.unexplained,
+        deadSymbols: dead, deadTruncated: acc.deadTruncated || undefined,
+        dynamicSiteCount: acc.dynamicSiteCount,
+        entryDetection: acc.entryDetection,
+        labels: {
+          entries: 'entry points (exported symbols + module top-level code)',
+          reachable: 'on a confident static call chain from an entry',
+          possible: 'alive only via candidate dispatch or value-reference (callback) — could run',
+          dead: 'NO static evidence of life — a floor, NOT proof: dynamic sites (' + acc.dynamicSiteCount + ') and framework-implicit entries can still invoke these',
+        },
+      } }
     }
     default: return null   // node (with source) / explore / scan — server-specific
   }

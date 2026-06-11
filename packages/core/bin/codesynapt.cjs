@@ -1157,7 +1157,31 @@ async function main() {
             process.stdout.write(`\nresolution (static floor — treat as a lower bound, not the whole graph):\n`)
             process.stdout.write(`  ${_precise} precise · ${_cand} ambiguous (candidates shown, not pinned to one target)\n`)
             process.stdout.write(`  ${j.unresolvedAmbiguous || 0} declined = ${_stdlib} stdlib/builtin (correct, not edges) + ${_gap} genuinely unresolved\n`)
-            process.stdout.write(`  ⚠️  dynamic calls (obj[x](), DI, local callbacks) produce NO edge and are NOT counted — only runtime tracing sees them.\n`)
+            if (j.dynamicSiteCount) {
+              process.stdout.write(`  ${j.dynamicSiteCount} dynamic call sites in ${j.dynamicSiteSymbols} symbols (obj[x](), reflection, callbacks) — recorded, statically unresolvable; runtime tracing (cs trace run) fills them.\n`)
+            } else {
+              process.stdout.write(`  ⚠️  dynamic calls (obj[x](), DI, local callbacks) produce NO edge — only runtime tracing sees them.\n`)
+            }
+          }
+          break
+        }
+
+        if (sub === 'accounting') {
+          const r = await req('GET', '/symbol/accounting')
+          if (r.status === 404) return die(r.json?.error || 'symbol mode requires a running backend (`cs serve` or the desktop app).')
+          if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
+          const j = r.json
+          if (asJson) { printJson(j); break }
+          process.stdout.write(`symbol accounting — every symbol labelled, unexplained must be 0\n`)
+          process.stdout.write(`  total ${j.total} = entries ${j.entries} + reachable ${j.reachable} + possible ${j.possible} + dead ${j.dead}   (unexplained: ${j.unexplained})\n`)
+          process.stdout.write(`  entry detection: ${j.entryDetection}\n`)
+          process.stdout.write(`  ⚠️  dead = no STATIC evidence of life — a floor, not proof (${j.dynamicSiteCount} dynamic sites + framework-implicit entries can still invoke these)\n`)
+          if (j.deadSymbols && j.deadSymbols.length) {
+            process.stdout.write(`\ndead candidates (${j.dead}${j.deadTruncated ? ', truncated' : ''}):\n`)
+            for (const d of j.deadSymbols.slice(0, 30)) {
+              process.stdout.write(`  [${(d.kind || '?').padEnd(8)}] ${d.name}  ${d.file}:${d.line}\n`)
+            }
+            if (j.deadSymbols.length > 30) process.stdout.write(`  … ${j.deadSymbols.length - 30} more (--json for all)\n`)
           }
           break
         }
