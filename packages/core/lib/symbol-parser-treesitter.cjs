@@ -1031,6 +1031,13 @@ function recvName(node) {
 function typeNameOf(node) {
   if (!node) return null
   if (node.type === 'user_type') return typeNameOf(node.namedChild(0))
+  // Rust `&T` / `&mut T` / `*const T` — unwrap to the referenced type so a
+  // `s: &Service` parameter types `s` as Service (was: null → no harvest →
+  // every reference-typed param call fell to the untyped path).
+  if (node.type === 'reference_type' || node.type === 'pointer_type' && node.namedChildCount) {
+    for (let i = node.namedChildCount - 1; i >= 0; i--) { const r = typeNameOf(node.namedChild(i)); if (r) return r }
+    return null
+  }
   if (node.type === 'type_annotation') { for (let i = 0; i < node.namedChildCount; i++) { const r = typeNameOf(node.namedChild(i)); if (r) return r } return null }
   const g = goTypeName(node)
   if (g) return g
