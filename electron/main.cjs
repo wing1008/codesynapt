@@ -263,6 +263,10 @@ async function startScanner(root) {
   currentRoot = root
   registerDesktopDaemon()   // (re)register this project in the daemon registry
   timelineCache = { root: null, data: null, building: false }   // invalidate
+  // New project = new accounting baseline. Without this, the first symbol
+  // build of project B diffs against project A's dead set and fires a flood
+  // of false "newly unreachable" issue alerts.
+  _prevDeadSet = null
   // Drop every scanner-version-keyed cache so the next /summary, /packages,
   // /legacy call recomputes against the freshly-loaded project instead of
   // returning stale data from the previous project.

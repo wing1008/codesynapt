@@ -220,6 +220,25 @@ function observedFileFor(root) { return path.join(root, HISTORY_DIR_NAME, 'obser
 // pairs: [{cf,cl,ef,el}] — appends one batch line with per-file mtimes.
 function appendObservedBatch(root, pairs) {
   if (!root || !pairs || !pairs.length) return 0
+  // Growth bound: this file previously grew forever (every batch appended,
+  // stale lines never removed, re-parsed on EVERY graph rebuild). Past 512KB,
+  // compact it down to the currently-valid pairs before appending.
+  try {
+    const f = observedFileFor(root)
+    if (fs.existsSync(f) && fs.statSync(f).size > 512 * 1024) {
+      const valid = loadValidObservedPairs(root)
+      const mt = {}
+      for (const p of valid.pairs) {
+        for (const file of [p.cf, p.ef]) {
+          if (mt[file] !== undefined) continue
+          try { mt[file] = Math.floor(fs.statSync(path.join(root, file)).mtimeMs) } catch { mt[file] = -1 }
+        }
+      }
+      fs.writeFileSync(f, valid.pairs.length
+        ? JSON.stringify({ ts: Date.now(), compacted: true, mtimes: mt, pairs: valid.pairs }) + '\n'
+        : '')
+    }
+  } catch { /* compaction is best-effort */ }
   const mtimes = {}
   for (const p of pairs) {
     for (const f of [p.cf, p.ef]) {
@@ -251,7 +270,13 @@ function loadValidObservedPairs(root) {
     return m
   }
   const seen = new Set()
-  for (const line of raw.split('\n')) {
+  // NEWEST line first (the file is append-only): a pair's LATEST observation
+  // decides. The old oldest-first order let a stale batch claim the dedup key
+  // and permanently shadow a valid RE-observation of the same edge — i.e.
+  // "edit the file, trace again" (the basic workflow) silently lost its edges.
+  const lines = raw.split('\n')
+  for (let li = lines.length - 1; li >= 0; li--) {
+    const line = lines[li]
     if (!line.trim()) continue
     let batch
     try { batch = JSON.parse(line) } catch { continue }

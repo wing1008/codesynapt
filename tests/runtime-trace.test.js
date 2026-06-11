@@ -150,3 +150,21 @@ describe('auto-discovery — recall-miss suspects (roadmap ②, suspicion never 
     expect(g.recallSuspects.length).toBe(0)   // unique-name predicate refused
   })
 })
+
+describe('persisted observations — re-observation after edit (inspection fix #1)', () => {
+  it('a stale old batch must NOT shadow a valid newer re-observation of the same pair', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-obs2-'))
+    fs.writeFileSync(path.join(dir, 'a.js'), 'function foo(){}\n')
+    fs.writeFileSync(path.join(dir, 'b.js'), 'function baz(){}\n')
+    const pairs = [{ cf: 'a.js', cl: 1, ef: 'b.js', el: 1 }]
+    traceStore.appendObservedBatch(dir, pairs)          // batch 1 (will go stale)
+    await new Promise((r) => setTimeout(r, 20))
+    fs.writeFileSync(path.join(dir, 'b.js'), 'function baz(){ return 1 }\n')
+    const t = Date.now() + 2000
+    fs.utimesSync(path.join(dir, 'b.js'), new Date(t), new Date(t))
+    traceStore.appendObservedBatch(dir, pairs)          // batch 2: RE-observed, valid now
+    const loaded = traceStore.loadValidObservedPairs(dir)
+    expect(loaded.pairs.length).toBe(1)                 // the valid re-observation survives
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+})

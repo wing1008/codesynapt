@@ -1022,7 +1022,10 @@ class SymbolGraph {
           if (!overrides) continue
           for (const oid of overrides) {
             const o = this.nodes.get(oid)
-            if (!o || oid === e.target || o.qualifiedName !== `${sub.name}.${methodName}`) continue
+            // oid === e.source guard: a super-call edge's source IS a subtype
+            // override of the target — without it every super()/super./base.
+            // call sprayed a self-loop "I am my own dispatch candidate".
+            if (!o || oid === e.target || oid === e.source || o.qualifiedName !== `${sub.name}.${methodName}`) continue
             pending.push({ source: e.source, target: oid, kind: 'call-candidate', line: e.line, candidate: true, dispatch: 'override' })
             emitted++
             if (emitted >= cap) break
@@ -1142,7 +1145,11 @@ class SymbolGraph {
     for (const key of observed) {
       const i = key.indexOf('\t')
       const a = key.slice(0, i), b = key.slice(i + 1)
-      if (this.callOut.get(a) && this.callOut.get(a).has(b)) confirmedStatic++
+      // Classify against STATIC `call` edges only (via the kind-aware edge-key
+      // set) — callOut also contains previously-merged 'observed' edges, which
+      // made a re-observed runtime-only edge count as "confirmedStatic"
+      // (a false "static already knew this" on every trace-watch cycle).
+      if (this._edgeKeys.has(`${a}␞${b}␞call`)) confirmedStatic++
       else if (this.candOut.get(a) && this.candOut.get(a).has(b)) confirmedCandidate++
       else {
         newDynamic++
