@@ -2609,10 +2609,16 @@ async function main() {
           // does NOT idle-reap mid-trace (a long `npm test` easily outlives the
           // ~20s grace). See the shared _holdLease above.
           _holdLease()
-          // profDir is QUOTED — NODE_OPTIONS supports double-quoted values, and
-          // an unquoted path with spaces ("OneDrive - Corp", "My Projects")
-          // silently broke profiling on very common Windows setups.
-          const nodeOpts = `${process.env.NODE_OPTIONS || ''} --cpu-prof --cpu-prof-dir="${profDir}"`.trim()
+          // NODE_OPTIONS path handling, EMPIRICALLY validated both ways:
+          // - backslashes inside a QUOTED NODE_OPTIONS value get escape-mangled
+          //   (F:\tmp\pq became a relative ./tmppq) → always use forward
+          //   slashes (Node accepts them on Windows);
+          // - unquoted paths WITH spaces ("OneDrive - Corp") silently break →
+          //   quote ONLY when the path contains whitespace (unconditional
+          //   quoting was itself a regression that broke the no-space case).
+          const profDirOpt = profDir.split(path.sep).join('/')
+          const profDirArg = /\s/.test(profDirOpt) ? `"${profDirOpt}"` : profDirOpt
+          const nodeOpts = `${process.env.NODE_OPTIONS || ''} --cpu-prof --cpu-prof-dir=${profDirArg}`.trim()
           process.stdout.write(`tracing: ${cmd.join(' ')}\n  (CPU profiler attached — observed edges cover only paths the run exercises)\n\n`)
           const code = await new Promise((resolve) => {
             const ch = cp.spawn(shellCmd, {
