@@ -9,3 +9,5 @@
 - [ ] **표현식 layer / 다언어 확장**: 락된 계획 Phase 4·5.
 - [ ] **데스크톱 /health에 epoch 누락 (패리티)**: 헤드리스는 epoch 반환(재부트스트랩 커서), 데스크톱 main.cjs /health는 undefined — 순수클라가 데스크톱 백엔드에 붙을 때 epoch 기반 재부트스트랩이 무력화될 수 있음. (2026-06-11 도그푸딩 C5에서 실증)
 - [ ] **HIGH: 교차 그래머 wasm 오염 (web-tree-sitter 0.20.x)**: 같은 프로세스에서 scala 파스 후 lua 트리가 잘림(2번째 top-level 함수·엣지 소실) — 그래머별/공유 Parser 모두 재현. 폴리글랏 리포(해당 그래머 쌍 혼재)에서 오추출 위험. 수정경로=web-tree-sitter+tree-sitter-wasms 쌍 업그레이드(ABI 결합이라 함께). 회귀테스트: misc-langs.test.js it.fails + lua.test.js(단독=정상 증명). (2026-06-11 ① 다언어 바 작업 중 발견)
+- [ ] **Lua 베어 호출이 전부 member-call로 오분류** (NAV_TYPES 'variable' — lua AST가 베어 호출도 variable로 감쌈) → zero-silence 원장이 Lua에서 무음 + builtin 거부가 베어에도 적용. 2026-06-05 기존 결함(2차 점검 확인, 회귀 아님). 수정: variable의 자식이 단일 identifier면 bare 취급.
+- [ ] (기존 wasm 오염 항목 보강) 트리거 쌍에 **php→lua**도 확인됨 — scala→lua만이 아님 (2차 점검).

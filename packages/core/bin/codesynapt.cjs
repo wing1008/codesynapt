@@ -2603,8 +2603,22 @@ async function main() {
           // both triggers Node's DEP0190 warning on every run and concatenates
           // args unquoted, silently breaking when a piece contains spaces.
           const shellCmd = cmd.map((c) => (/\s/.test(c) ? `"${c.replace(/"/g, '\\"')}"` : c)).join(' ')
+          // PREFLIGHT: confirm the backend is reachable BEFORE spending the
+          // whole profiled run — previously a dead backend was only discovered
+          // at the observe POST, losing the run's observations entirely.
+          try { await req('GET', '/health') }
+          catch (e) { return die(`no reachable backend for this project (${e.code || e.message}) — start the desktop app or \`cs serve\` first.`) }
           const profDir = path.join(PROJECT_ROOT, '.codesynapt', 'traces', `prof-${Date.now()}`)
           try { fs.mkdirSync(profDir, { recursive: true }) } catch (e) { return die(`cannot create profile dir: ${e.message}`) }
+          // Hygiene: sweep prof-* leftovers from previous failed runs (>6h old).
+          try {
+            const tracesDir = path.join(PROJECT_ROOT, '.codesynapt', 'traces')
+            for (const d of fs.readdirSync(tracesDir)) {
+              if (!d.startsWith('prof-') || path.join(tracesDir, d) === profDir) continue
+              const ts = parseInt(d.slice(5), 10) || 0
+              if (Date.now() - ts > 6 * 3600 * 1000) fs.rmSync(path.join(tracesDir, d), { recursive: true, force: true })
+            }
+          } catch {}
           // Hold a session lease for the whole run so an idle `cs serve` daemon
           // does NOT idle-reap mid-trace (a long `npm test` easily outlives the
           // ~20s grace). See the shared _holdLease above.
@@ -2646,7 +2660,11 @@ async function main() {
           process.stderr.write(`  ${pairs.length} frame-edges → classifying against the static graph (port ${PORT})…\n`)
           let r
           try { r = await req('POST', '/symbol/observe', null, { edges: pairs, merge: doMerge }) }
-          catch (e) { _releaseLease(); return die(`could not reach this project's backend (${e.code || e.message}) — keep the desktop app or \`cs serve\` running.`) }
+          catch (e) {
+            _releaseLease()
+            try { fs.rmSync(profDir, { recursive: true, force: true }) } catch {}
+            return die(`could not reach this project's backend (${e.code || e.message}) — keep the desktop app or \`cs serve\` running.`)
+          }
           _releaseLease()
           if (r.status === 404) return die('symbol mode unavailable on this backend (need `cs serve` or the desktop app running for THIS project).')
           if (r.status !== 200) return die(r.json?.error || `observe failed (status ${r.status})`)

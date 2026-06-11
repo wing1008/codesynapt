@@ -83,12 +83,24 @@
   unreachable, the desktop toasts immediately and a trace-timeline `issue`
   entry is recorded — honestly labelled a static floor.
 
+### Fixed — pre-release inspection (two adversarial rounds)
+- A multi-agent inspection + direct re-verification before publishing caught
+  and fixed: observed-edge persistence dropping valid re-observations after
+  an edit; Python dotted external bases (`nn.Module`) phantom-linking to
+  same-named user classes (super(), extends AND typed-member-miss paths);
+  tracing silently broken on paths with spaces; unbounded observed-edge file
+  growth (now compacts); self-loop dispatch candidates; false issue-alert
+  floods on project switch; runtime-only edges miscounted as static; stdlib
+  call floods in the five new bar languages; an actively-used daemon reaping
+  mid-use; and dogfooding artifacts that had been shipping inside the npm
+  tarball since 0.0.1 (now excluded).
+
 ### Verification
 - **13-language completeness bar** committed as known-answer fixtures:
   static recall, precision (no phantom edges, wrong-file decoys), dynamic
   honesty (max candidates + zero silence), accounting, and a real-repo
   regression bar with build-determinism checks — all languages gated green
-  simultaneously (250 tests). A cross-grammar wasm corruption
+  simultaneously (253 tests). A cross-grammar wasm corruption
   (web-tree-sitter 0.20.x, scala→lua) is documented with an expected-fail
   regression rather than hidden.
 

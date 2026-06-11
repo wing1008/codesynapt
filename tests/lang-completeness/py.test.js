@@ -120,3 +120,31 @@ class Net(nn.Module):
     expect(g.stats().declineReasons['super-external']).toBeGreaterThanOrEqual(1)
   })
 })
+
+describe('Python dotted base — extends phantom (round-2 inspection)', () => {
+  const FIX = `
+class Module:
+    def helper(self):
+        return 1
+
+class Net(nn.Module):
+    def __init__(self):
+        pass
+
+def use():
+    net: Net = Net()
+    return net.helper()
+`
+  it('nn.Module never creates an extends edge to a same-named USER class (nor MRO phantom calls)', async () => {
+    const g = await buildGraph([{ id: 'net.py', ext: 'py', content: FIX }])
+    let phantomExtends = false
+    for (const e of g.edges) {
+      if (e.kind !== 'extends') continue
+      const s = g.nodes.get(e.source), t = g.nodes.get(e.target)
+      if (s?.name === 'Net' && t?.name === 'Module') phantomExtends = true
+    }
+    expect(phantomExtends).toBe(false)
+    // downstream: net.helper() must NOT confidently resolve to decoy Module.helper
+    expect(hasCall(g, 'use', 'Module.helper')).toBe(false)
+  })
+})
