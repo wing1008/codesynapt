@@ -436,7 +436,7 @@ async function runHeadlessServe(args) {
 
   let currentRoot = abs
   const scanner = new Scanner(abs)
-  const { startControlServer, stopControlServer, epoch: csEpoch } = createControlServer({
+  const { startControlServer, stopControlServer, epoch: csEpoch, inFlight: csInFlight } = createControlServer({
     scanner,
     getCurrentRoot: () => currentRoot,
     // No IPC callbacks in headless mode — onBlast/onFocus/onOpen omitted
@@ -493,13 +493,23 @@ async function runHeadlessServe(args) {
       const _bornAt = Date.now()
       let _emptyTicks = 0
       const hb = setInterval(() => {
+        // SEPARATE try blocks (zombie-daemon root cause, 2026-06-11): the old
+        // single try meant a touch() throw — frequent on Windows, where the
+        // lease rename collides EPERM with concurrent readers — skipped the
+        // reap check below it EVERY tick. Under parallel CLI activity that
+        // starved the reap entirely: 17 daemons accumulated, exhausted the
+        // port range, and discovery routed to stale-code instances. Touch
+        // failures must never starve the reap.
+        try { registry.touch('daemon', phash, { port: actualPort, epoch }) } catch {}
+        try { registry.cleanStale('session', _LEASE_TTL); registry.cleanStale('viewer', _LEASE_TTL) } catch {}
         try {
-          registry.touch('daemon', phash, { port: actualPort, epoch })
-          registry.cleanStale('session', _LEASE_TTL); registry.cleanStale('viewer', _LEASE_TTL)
           const sess = registry.readLive('session', { ttlMs: _LEASE_TTL, filter: (s) => { try { return registry.projectHash(s.projectRoot) === phash } catch { return false } } })
           const view = registry.readLive('viewer', { ttlMs: _LEASE_TTL, filter: (v) => v.attachedProjectHash === phash })
           _emptyTicks = (sess.length + view.length === 0) ? _emptyTicks + 1 : 0
           if (Date.now() - _bornAt > _GRACE_MS && _emptyTicks >= _EMPTY_LIMIT) {
+            // In-flight guard: never exit while still serving a request (a big
+            // repo's first /symbol/summary build can outlive the grace window).
+            if (typeof csInFlight === 'function' && csInFlight() > 0) return
             process.stderr.write('[cs] no live sessions/viewers — daemon self-exit\n')
             try { registry.remove('daemon', phash) } catch {}
             process.exit(0)

@@ -44,10 +44,32 @@ function dirFor(type) {
 function fileFor(type, id) { return path.join(dirFor(type), id + '.json') }
 
 // Atomic write: temp + rename (rename is atomic on the same filesystem).
+// WINDOWS CAVEAT (root cause of the 2026-06-11 zombie-daemon incident): a
+// rename ONTO a file another process currently has open for reading fails
+// with EPERM — and lease files are read every few seconds by every CLI /
+// daemon (resolvePort, reap ticks). Under concurrency the rename throws,
+// the lease update is LOST (a trace run's lease silently stops refreshing →
+// daemon reaps mid-run) and the .tmp litters the dir. Strategy: retry the
+// rename once, then fall back to a PLAIN overwrite — readers already
+// tolerate a torn read (they skip-and-retry next tick), so a rare non-atomic
+// write is strictly better than a silently dropped lease. Always remove the
+// tmp on failure.
 function writeAtomic(file, obj) {
+  const data = JSON.stringify(obj)
   const tmp = file + '.' + process.pid + '.' + Date.now() + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(obj))
-  fs.renameSync(tmp, file)
+  try {
+    fs.writeFileSync(tmp, data)
+    try {
+      fs.renameSync(tmp, file)
+      return
+    } catch {
+      try { fs.renameSync(tmp, file); return } catch { /* retry lost too */ }
+    }
+    // Fallback: plain overwrite (torn reads are tolerated by readers).
+    fs.writeFileSync(file, data)
+  } finally {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch { /* litter guard */ }
+  }
 }
 
 // Create/refresh a lease, stamping lastSeen. Merges over any existing fields.
@@ -87,8 +109,16 @@ function cleanStale(type, ttlMs) {
   try { names = fs.readdirSync(d) } catch { return 0 }
   let removed = 0
   for (const n of names) {
-    if (!n.endsWith('.json')) continue
     const file = path.join(d, n)
+    // Orphaned atomic-write temp files (rename failed under Windows read
+    // contention) — sweep anything older than a minute by its embedded stamp.
+    if (n.endsWith('.tmp')) {
+      const m = n.match(/\.(\d+)\.tmp$/)
+      const ts = m ? parseInt(m[1], 10) : 0
+      if (now - ts > 60000) { try { fs.unlinkSync(file); removed++ } catch {} }
+      continue
+    }
+    if (!n.endsWith('.json')) continue
     try {
       const e = JSON.parse(fs.readFileSync(file, 'utf8'))
       if (now - (e.lastSeen || 0) >= ttlMs) { fs.unlinkSync(file); removed++ }
