@@ -15,3 +15,4 @@
 - [ ] **⑤ 잔여 — 트레이서 미커버 영역** (PR#28 이후): ①Python은 `trace run`만 — `trace watch`(연속) 미지원 ②JVM 에이전트·.NET 프로파일러 트레이서 미구현(각각 별도 대형 공사; Java/C#는 정적바+마킹으로 커버 중) ③언더스코어 시작 파일(`_x.py`)은 스캐너 ignore라 트레이스 시 "no in-repo frames"로 침묵 — 에러 메시지에 힌트 추가 가치. (2026-06-11)
 - [ ] **it.fails 단독실행 의미론**: misc-langs의 wasm 오염 expected-fail은 `-t` 필터 단독실행 시 오염원(scala)이 skip돼 통과→fail로 뒤집힘 (2차 점검 실증). 주석 또는 가드 보강.
 - [ ] **토스트 문구 다듬기**: 비전문가 가독성 + 이름 3개 이하일 때 '…' 고정 출력 (2차 점검 LOW).
+- [ ] **HIGH: 데스크톱 watcher 간헐 사망**: 같은 날 같은 절차에서 desk_live3은 file-changed→invalidate→재빌드 작동(newly-dead e2e 성공), 이후 신선 인스턴스 2연속(desk_sig3/4)은 수정 후 25회 폴링(~100s)에도 재빌드 0(embeddings 1회뿐)·이벤트 0 — Layer-2 라이브맵·이슈알림(③⑦) 전체가 무력화됨. 재현: electron 기동→symbol summary(베이스라인)→public/backend.js 수정→재빌드 횟수 관찰. 의심: chokidar 기동 실패/이번 세션의 잦은 electron 강제종료 잔재/HMR 경합. graphVersion이 /health에 없어(기존 패리티 갭) 외부 판정도 어려움 — 패리티 수정과 함께 진단 로그 추가 가치. (2026-06-11 ⑦ e2e 중 발견)

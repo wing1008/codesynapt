@@ -146,6 +146,7 @@ let _symbolBuilding = null        // in-flight build promise (avoid double work)
 // common "no symbol query yet" path stays a no-op.
 let _symLiveTimer = null
 let _prevDeadSet = null   // accounting baseline for the ③ newly-dead diff
+let _prevSigMap = null    // signature baseline for the ⑦ changed-signature diff
 function invalidateSymbolGraph(id, reason) {
   if (!symbolGraph && !_symbolBuilding) return
   symbolGraph = null
@@ -267,6 +268,7 @@ async function startScanner(root) {
   // build of project B diffs against project A's dead set and fires a flood
   // of false "newly unreachable" issue alerts.
   _prevDeadSet = null
+  _prevSigMap = null
   // Drop every scanner-version-keyed cache so the next /summary, /packages,
   // /legacy call recomputes against the freshly-loaded project instead of
   // returning stale data from the previous project.
@@ -1933,6 +1935,23 @@ async function handleControlRequest(req, res) {
               }
               _prevDeadSet = deadNow
             } catch (e) { console.warn('[symbol] issue diff:', e.message) }
+            // Realtime expression-level alert (roadmap 7 v1): a function whose
+            // SIGNATURE changed in this edit — callers and argument flows are
+            // about to be affected. Keyed by file+qualifiedName (line-shift
+            // proof); first build sets the baseline silently.
+            try {
+              const flowMod = require('../packages/core/lib/symbol-flow.cjs')
+              if (_prevSigMap) {
+                const delta = flowMod.signatureDelta(_prevSigMap, g)
+                if (delta.length) {
+                  mainWindow?.webContents.send('symbol-issues', { signatureChanges: delta })
+                  for (const d of delta.slice(0, 3)) {
+                    emitTrace('issue', `signature changed: ${d.qualifiedName} ${d.before} -> ${d.after} (${d.callers} caller${d.callers === 1 ? '' : 's'} affected — cs symbol flow ${d.qualifiedName} <param> for argument blast)`)
+                  }
+                }
+              }
+              _prevSigMap = flowMod.collectSignatures(g)
+            } catch (e) { console.warn('[symbol] signature diff:', e.message) }
             symbolGraph = g
             _symbolBuilding = null
             return g
