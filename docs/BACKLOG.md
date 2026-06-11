@@ -11,3 +11,4 @@
 - [ ] **HIGH: 교차 그래머 wasm 오염 (web-tree-sitter 0.20.x)**: 같은 프로세스에서 scala 파스 후 lua 트리가 잘림(2번째 top-level 함수·엣지 소실) — 그래머별/공유 Parser 모두 재현. 폴리글랏 리포(해당 그래머 쌍 혼재)에서 오추출 위험. 수정경로=web-tree-sitter+tree-sitter-wasms 쌍 업그레이드(ABI 결합이라 함께). 회귀테스트: misc-langs.test.js it.fails + lua.test.js(단독=정상 증명). (2026-06-11 ① 다언어 바 작업 중 발견)
 - [ ] **Lua 베어 호출이 전부 member-call로 오분류** (NAV_TYPES 'variable' — lua AST가 베어 호출도 variable로 감쌈) → zero-silence 원장이 Lua에서 무음 + builtin 거부가 베어에도 적용. 2026-06-05 기존 결함(2차 점검 확인, 회귀 아님). 수정: variable의 자식이 단일 identifier면 bare 취급.
 - [ ] (기존 wasm 오염 항목 보강) 트리거 쌍에 **php→lua**도 확인됨 — scala→lua만이 아님 (2차 점검).
+- [ ] **장기세션 wasm 힙 추세 미실측**: 라이브맵이 수정마다 심볼 재빌드 — JS 위주 리포는 6회 연속 재빌드 실측 평탄(heap 23→21MB·rss 안정, 2026-06-11). 단 tree-sitter 비중 큰 리포(py/java 대형)의 수일급 데스크톱 세션은 미실측 (tree.delete 호출·swift 워커격리는 있음). 장기 soak 측정 1회 가치.
