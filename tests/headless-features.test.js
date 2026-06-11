@@ -124,7 +124,14 @@ describe('headless: TRACE (record on write, then serve all 6 routes)', () => {
   })
 
   it('GET /trace/sessions lists the on-disk session .jsonl', async () => {
-    const r = await callW('/trace/sessions')
+    // The session .jsonl is appended best-effort on emit; on macOS the write
+    // can land a beat after the in-memory event (CI flake, PR#14 — rerun
+    // passed). Poll briefly instead of asserting the very first read.
+    let r = await callW('/trace/sessions')
+    for (let i = 0; i < 20 && !(r.body.sessions && r.body.sessions.length >= 1); i++) {
+      await new Promise((res) => setTimeout(res, 100))
+      r = await callW('/trace/sessions')
+    }
     expect(r.status).toBe(200)
     expect(Array.isArray(r.body.sessions)).toBe(true)
     expect(r.body.sessions.length).toBeGreaterThanOrEqual(1)
