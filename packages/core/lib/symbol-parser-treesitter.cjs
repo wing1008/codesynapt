@@ -403,6 +403,21 @@ function walk(node, ctx) {
       pushedFn = true
     }
   }
+  // Imported-name harvest (pass 2): names brought in by import statements.
+  // Used to tell an EXTERNAL bare call (`from x import load; load()` — not a
+  // dynamic site, just an external dependency) apart from a genuinely-unknown
+  // bare call (function-valued local/param — a real dynamic site). Python
+  // grammar: import_from_statement / import_statement with optional aliases.
+  if (ctx.passTwo && ctx.importedNames
+      && (t === 'import_from_statement' || t === 'import_statement')) {
+    const collect = (n) => {
+      if (!n) return
+      if (n.type === 'dotted_name') { const last = n.namedChild(n.namedChildCount - 1); if (last) ctx.importedNames.add(last.text) }
+      else if (n.type === 'aliased_import') { const a = n.childForFieldName?.('alias'); if (a) ctx.importedNames.add(a.text); else collect(n.namedChild(0)) }
+      else if (IDENT_TYPES.has(n.type)) ctx.importedNames.add(n.text)
+    }
+    for (let i = 0; i < node.namedChildCount; i++) collect(node.namedChild(i))
+  }
   // Call expressions (pass 2 only — checked via ctx.passTwo flag)
   if (ctx.passTwo && cfg.call?.includes(t)) {
     const src = ctx.fnStack[ctx.fnStack.length - 1]
@@ -495,6 +510,21 @@ function walk(node, ctx) {
           const member = isMemberCallNode(node)
           const { candidates, capped } = ctx.candidates(calleeName, { memberCall: member })
           const ln = node.startPosition.row + 1
+          // Zero-silence: a BARE call whose name resolves to NOTHING anywhere
+          // (no symbol, no candidate) was previously fully silent — not even a
+          // decline (the byName miss short-circuits). For tree-sitter languages
+          // (no scope analysis) that bare-unknown class is dominated by
+          // function-valued locals/params (`cb()`, Go `fns[k]()` mis-grammared
+          // as a generic call) — record it. Member calls are excluded: they are
+          // overwhelmingly external library calls and would flood the ledger.
+          if (!member && candidates.length === 0 && ctx.index?.recordDynamicSite
+              && !(ctx.importedNames && ctx.importedNames.has(calleeName))) {
+            // Imported-but-unresolved names are EXTERNAL calls, not dynamic
+            // sites — recording them floods the ledger (measured: 913 of 936
+            // on one ML repo) and cries wolf. Only genuinely-unknown bare
+            // names (function-valued locals/params) are recorded.
+            ctx.index.recordDynamicSite(src, ln, 'unresolved-name')
+          }
           for (const c of candidates) {
             if (c.id === src) continue
             const key = src + '|' + c.id + '|call-candidate'
@@ -1266,6 +1296,7 @@ function makeParser(ext) {
           fileId, content, types, lang,
           symbols: [], classStack: [], fnStack: [], varTypeStack: [],
           edges: [], seen: new Set(),
+          importedNames: new Set(),   // names brought in by imports (external-call filter)
           kwSet,
           resolve: makeResolver(fileId, index),
           // Dynamic candidate set (parity with babel) — maximal honest set of
