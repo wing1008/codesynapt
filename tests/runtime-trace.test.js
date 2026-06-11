@@ -168,3 +168,14 @@ describe('persisted observations — re-observation after edit (inspection fix #
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe('symbolAtLine — module pseudo-symbol is fallback only', () => {
+  it('a real function on line 1 beats the <module> stub', () => {
+    const g = new SymbolGraph()
+    g.addNode({ id: 'f#<module>@1', file: 'f.py', name: '<module>', startLine: 1, endLine: 1, kind: 'module' })
+    g.addNode({ id: 'f#leaf@1', file: 'f.py', name: 'leaf', startLine: 1, endLine: 2, kind: 'function' })
+    expect(g.symbolAtLine('f.py', 1)?.name).toBe('leaf')
+    // …but module still catches lines no real symbol contains
+    expect(g.symbolAtLine('f.py', 99)?.name).toBe('<module>')
+  })
+})

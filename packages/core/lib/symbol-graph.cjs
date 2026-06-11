@@ -1112,15 +1112,21 @@ class SymbolGraph {
     const ids = this.byFile.get(fileId)
     if (!ids) return null
     let best = null, bestSpan = Infinity
+    let moduleSym = null
     for (const id of ids) {
       const n = this.nodes.get(id)
       if (!n || n.startLine == null || n.endLine == null) continue
+      // The <module> pseudo-symbol is a 1-line container stub (span 0) — it
+      // would WIN tightest-span against any real function defined on line 1
+      // (a Python tracer pair mapped dispatch→<module> instead of →leaf).
+      // Treat it strictly as the fallback when no real symbol contains the line.
+      if (n.kind === 'module') { moduleSym = n; continue }
       if (line >= n.startLine && line <= n.endLine) {
         const span = n.endLine - n.startLine
         if (span < bestSpan) { bestSpan = span; best = n }
       }
     }
-    return best
+    return best || moduleSym
   }
 
   // Classify a batch of OBSERVED runtime call edges against the static graph.

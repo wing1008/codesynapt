@@ -2623,6 +2623,42 @@ async function main() {
           // does NOT idle-reap mid-trace (a long `npm test` easily outlives the
           // ~20s grace). See the shared _holdLease above.
           _holdLease()
+          // ── Python branch (roadmap leg 5): `cs trace run -- python app.py`.
+          //    A sys.setprofile bootstrap (lib/pytracer.py) records in-repo
+          //    caller→callee frame pairs to a JSONL file; the SAME observe
+          //    pipeline classifies/merges them. Lines are chosen to land
+          //    inside the Layer-2 symbol ranges (call site / def line).
+          const isPython = /^(python3?|py)(\.exe)?$/i.test(cmd[0])
+          let code
+          const pairs = []
+          if (isPython) {
+            if (cmd.length < 2) { _releaseLease(); return die('usage: cs trace run -- python <script.py> [args]') }
+            const tracerPath = path.join(__dirname, '..', 'lib', 'pytracer.py')
+            const outFile = path.join(profDir, 'pypairs.jsonl')
+            const pyCmd = [cmd[0], tracerPath, ...cmd.slice(1)]
+              .map((c) => (/\s/.test(c) ? `"${c.replace(/"/g, '\\"')}"` : c)).join(' ')
+            process.stdout.write(`tracing (python): ${cmd.join(' ')}\n  (sys.setprofile attached — observed edges cover only paths the run exercises)\n\n`)
+            code = await new Promise((resolve) => {
+              const ch = cp.spawn(pyCmd, {
+                cwd: PROJECT_ROOT, stdio: 'inherit', shell: true,
+                env: { ...process.env, CS_PYTRACE_OUT: outFile, CS_PYTRACE_ROOT: PROJECT_ROOT },
+              })
+              ch.on('exit', (c) => resolve(c == null ? 1 : c))
+              ch.on('error', (e) => { process.stderr.write(`spawn failed: ${e.message}\n`); resolve(127) })
+            })
+            try {
+              for (const line of fs.readFileSync(outFile, 'utf8').split('\n')) {
+                if (!line.trim()) continue
+                try { pairs.push(JSON.parse(line)) } catch {}
+              }
+            } catch {}
+            if (!pairs.length) {
+              _releaseLease()
+              try { fs.rmSync(profDir, { recursive: true, force: true }) } catch {}
+              process.stdout.write(`\nno in-repo python frames observed (script outside the project, or it crashed before any call). exit=${code}\n`)
+              break
+            }
+          } else {
           // NODE_OPTIONS path handling, EMPIRICALLY validated both ways:
           // - backslashes inside a QUOTED NODE_OPTIONS value get escape-mangled
           //   (F:\tmp\pq became a relative ./tmppq) → always use forward
@@ -2634,7 +2670,7 @@ async function main() {
           const profDirArg = /\s/.test(profDirOpt) ? `"${profDirOpt}"` : profDirOpt
           const nodeOpts = `${process.env.NODE_OPTIONS || ''} --cpu-prof --cpu-prof-dir=${profDirArg}`.trim()
           process.stdout.write(`tracing: ${cmd.join(' ')}\n  (CPU profiler attached — observed edges cover only paths the run exercises)\n\n`)
-          const code = await new Promise((resolve) => {
+          code = await new Promise((resolve) => {
             const ch = cp.spawn(shellCmd, {
               cwd: PROJECT_ROOT, stdio: 'inherit', shell: true,
               env: { ...process.env, NODE_OPTIONS: nodeOpts },
@@ -2651,11 +2687,12 @@ async function main() {
             break
           }
           process.stderr.write(`  ${profiles.length} profile(s) collected, extracting call edges…\n`)
-          const seen = new Set(); const pairs = []
+          const seen = new Set()
           for (const pf of profiles) {
             let prof
             try { prof = JSON.parse(fs.readFileSync(path.join(profDir, pf), 'utf8')) } catch { continue }
             pairs.push(..._profileToPairs(prof, seen))
+          }
           }
           process.stderr.write(`  ${pairs.length} frame-edges → classifying against the static graph (port ${PORT})…\n`)
           let r
@@ -2670,7 +2707,8 @@ async function main() {
           if (r.status !== 200) return die(r.json?.error || `observe failed (status ${r.status})`)
           const rep = r.json
           if (args.includes('--json')) { printJson(rep); break }
-          process.stdout.write(`\n── runtime trace (exit=${code}, ${profiles.length} profile${profiles.length === 1 ? '' : 's'}, ${pairs.length} raw frame-edges) ──\n`)
+          const srcLabel = isPython ? 'python sys.setprofile' : 'V8 profile(s)'
+          process.stdout.write(`\n── runtime trace (exit=${code}, via ${srcLabel}, ${pairs.length} raw frame-edges) ──\n`)
           process.stdout.write(`  observed call edges: ${rep.observedEdges}\n`)
           process.stdout.write(`    ${rep.confirmedStatic} confirm a static call · ${rep.confirmedCandidate} resolve a candidate · ${rep.newDynamic} NEW (dynamic, invisible to static)\n`)
           process.stdout.write(`  coverage: ${rep.symbolsTouched}/${rep.totalSymbols} symbols touched (runtime sees only exercised paths — NOT completeness)\n`)
