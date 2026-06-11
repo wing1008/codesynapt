@@ -62,12 +62,35 @@
   repo's first symbol build outlives the idle grace window).
 - `cs trace run`/`watch` hold a session lease for their whole duration.
 
+### Added — all 13 symbol languages reach the completeness bar
+- Go, Rust, Kotlin, Swift, PHP, C++, Scala, Lua and Bash join JS/TS, Python,
+  Java and C# — every symbol-level language now has a committed known-answer
+  bar, gated green simultaneously. The new bars caught and fixed real gaps:
+  Rust `&T` params were never type-harvested, Kotlin had **no inheritance
+  edges at all** (and untyped params), C/C++ parameters were never harvested
+  (nested `function_declarator`), PHP typed params dead (`named_type`
+  unwrap), and Go's fully-silent bare-unknown call class is now ledgered
+  (with an import filter so external calls don't flood it).
+
+### Added — the live map (always-on) + auto-discovery + issue alerts
+- **Always-on live symbol map**: editing a source file now silently refreshes
+  the 3D symbol layer (the map no longer shows pre-edit reality until toggled).
+- **Recall-miss auto-discovery**: runtime-observed edges that look statically
+  resolvable but have no static edge are flagged as suspects into a quiet
+  review queue (`.codesynapt/recall-suspects.jsonl`) — suspicion never
+  verdict, no auto-fix, no interruption.
+- **Realtime potential-issue alerts**: when an edit leaves symbols statically
+  unreachable, the desktop toasts immediately and a trace-timeline `issue`
+  entry is recorded — honestly labelled a static floor.
+
 ### Verification
-- **4-language completeness bar** (JS, Python, Java, C#) committed as
-  known-answer fixtures: static recall, precision (no phantom edges,
-  wrong-file decoys), dynamic honesty (max candidates + zero silence),
-  accounting, and a real-repo regression bar with build-determinism checks —
-  all languages gated green simultaneously (227 tests).
+- **13-language completeness bar** committed as known-answer fixtures:
+  static recall, precision (no phantom edges, wrong-file decoys), dynamic
+  honesty (max candidates + zero silence), accounting, and a real-repo
+  regression bar with build-determinism checks — all languages gated green
+  simultaneously (250 tests). A cross-grammar wasm corruption
+  (web-tree-sitter 0.20.x, scala→lua) is documented with an expected-fail
+  regression rather than hidden.
 
 ## 0.0.2 — beta (2026-06-10)
 
