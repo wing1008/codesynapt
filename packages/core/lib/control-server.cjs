@@ -1735,6 +1735,10 @@ function createControlServer(opts) {
             // files change; a line-shifted remap must never lie). Best-effort.
             if (doMerge && rep.observedEdges) {
               try { rep.persisted = traceStore.appendObservedBatch(getCurrentRoot(), edges) > 0 } catch {}
+              // Surface the run in the trace panel/timeline — otherwise the only
+              // evidence is the amber edges + a transient toast, and "what did my
+              // trace do?" has no answer in the UI.
+              try { _trace.emit('trace-run', `runtime: ${rep.observedEdges} edges observed (${rep.newDynamic} dynamic, ${rep.merged} merged)`) } catch {}
             }
             writeJson(res, 200, withMeta(rep))
           }).catch((e) => { try { writeJson(res, 500, { error: 'symbol graph build failed: ' + (e && e.message) }) } catch {} })
@@ -2274,6 +2278,7 @@ function createControlServer(opts) {
 
   // ── Server lifecycle ──────────────────────────────────────────
   let server = null
+  let _inFlight = 0
   function startControlServer(port, host = '127.0.0.1') {
     return new Promise((resolve, reject) => {
       if (server) {
@@ -2284,6 +2289,13 @@ function createControlServer(opts) {
       server.on('error', (err) => {
         server = null
         reject(err)
+      })
+      // In-flight request counter — lets the idle-reap loop refuse to self-exit
+      // while a request (e.g. a long first symbol build) is still being served.
+      _inFlight = 0
+      server.on('request', (rq, rs) => {
+        _inFlight++
+        rs.on('close', () => { _inFlight = Math.max(0, _inFlight - 1) })
       })
       server.listen(port, host, () => {
         // Report the ACTUAL bound port, not the literal arg. With port 0 the
@@ -2303,7 +2315,7 @@ function createControlServer(opts) {
     })
   }
 
-  return { handleControlRequest, startControlServer, stopControlServer, epoch }
+  return { handleControlRequest, startControlServer, stopControlServer, epoch, inFlight: () => _inFlight }
 }
 
 module.exports = { createControlServer }

@@ -2000,6 +2000,9 @@ async function handleControlRequest(req, res) {
             // LIVE map: tell the renderer new observed edges landed so the 3D
             // symbol layer refetches and the amber links appear immediately.
             try { mainWindow?.webContents.send('symbols-updated', { merged: rep.merged || 0, newDynamic: rep.newDynamic || 0 }) } catch {}
+            // Trace panel visibility — the run leaves a timeline entry, not just
+            // amber edges + a transient toast.
+            try { emitTrace('trace-run', `runtime: ${rep.observedEdges} edges observed (${rep.newDynamic} dynamic, ${rep.merged} merged)`) } catch {}
           }
           return writeJson(res, 200, withMeta(rep))
         })
