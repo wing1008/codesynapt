@@ -1024,6 +1024,74 @@ class SymbolGraph {
     for (const e of pending) this.addEdge(e)
   }
 
+  // ── Accounting completeness (user bar #4): EVERY symbol gets exactly one
+  //    label — entry / reachable (confident call chain from an entry) /
+  //    possible (only via candidate-dispatch or value-reference, i.e. could be
+  //    live) / dead (statically unreachable). unexplained is 0 BY CONSTRUCTION;
+  //    the bar test asserts the partition sums to the total.
+  //    HONESTY CAVEATS (returned, never hidden): a "dead" verdict is a static
+  //    floor — dynamicSiteCount > 0 means unnameable call sites exist that
+  //    could invoke anything; entry detection itself can miss framework-implicit
+  //    entries. Dead therefore means "no static evidence of life", not proof.
+  accounting(entryIds = null) {
+    const entries = new Set()
+    if (entryIds && entryIds.length) {
+      for (const id of entryIds) if (this.nodes.has(id)) entries.add(id)
+    } else {
+      // Default entries: exported symbols + module pseudo-symbols (top-level code).
+      for (const n of this.nodes.values()) {
+        if (n.exported || n.kind === 'module') entries.add(n.id)
+      }
+    }
+    // Tier 1 — confident reach: BFS over call edges from entries.
+    const reachable = new Set(entries)
+    const q1 = [...entries]
+    while (q1.length) {
+      const cur = q1.pop()
+      const outs = this.callOut.get(cur)
+      if (outs) for (const t of outs) if (!reachable.has(t)) { reachable.add(t); q1.push(t) }
+    }
+    // Tier 2 — possible reach: from anything live, follow candidate-dispatch and
+    // value-reference edges too (a callback passed somewhere can run; a dispatch
+    // candidate can be the runtime target). Newly reached symbols are 'possible',
+    // and their own confident callees are possible as well.
+    const refOut = new Map()
+    for (const e of this.edges) {
+      if (e.kind !== 'ref') continue
+      if (!refOut.has(e.source)) refOut.set(e.source, new Set())
+      refOut.get(e.source).add(e.target)
+    }
+    const possible = new Set()
+    const seen = new Set(reachable)
+    const q2 = [...reachable]
+    while (q2.length) {
+      const cur = q2.pop()
+      for (const m of [this.callOut.get(cur), this.candOut.get(cur), refOut.get(cur)]) {
+        if (!m) continue
+        for (const t of m) if (!seen.has(t)) { seen.add(t); possible.add(t); q2.push(t) }
+      }
+    }
+    const dead = []
+    for (const id of this.nodes.keys()) {
+      if (!reachable.has(id) && !possible.has(id)) dead.push(id)
+    }
+    const total = this.nodes.size
+    const entryCount = entries.size
+    const reachableCount = reachable.size - entries.size
+    const possibleCount = possible.size
+    const deadCount = dead.length
+    return {
+      total,
+      entryCount, reachableCount, possibleCount, deadCount,
+      unexplained: total - (entryCount + reachableCount + possibleCount + deadCount),
+      dead: dead.slice(0, 200),
+      deadTruncated: dead.length > 200,
+      // Caveats — the consumer must see WHY dead is a floor, not proof.
+      dynamicSiteCount: [...this.dynamicSites.values()].reduce((a, l) => a + l.length, 0),
+      entryDetection: entryIds && entryIds.length ? 'explicit' : 'exports+modules (framework-implicit entries may be missed)',
+    }
+  }
+
   // ── Runtime tracing (Leg C). Map a runtime stack frame (file id + 1-based
   //    line) to the TIGHTEST enclosing symbol. See docs/design-runtime-tracing.md.
   symbolAtLine(fileId, line) {
