@@ -158,6 +158,11 @@ class SymbolGraph {
     // enclosing symbol so accounting/blast can say "this symbol contains N
     // dynamic call sites" instead of silently looking complete.
     this.dynamicSites = new Map()   // symbolId → [{ line, form }]
+    // Recall-miss SUSPECTS (roadmap ② auto-discovery): observed edges that
+    // LOOK statically resolvable but had neither a call nor a candidate edge.
+    // SUSPICION, never verdict (safety rules in design-symbol-completeness.md)
+    // — review queue material, no auto-fix, capped.
+    this.recallSuspects = []
     // Honest signal #2: parser outcomes per file, so a broken-language /
     // crashed-parser file is distinguishable from a legitimately symbol-less
     // one. parseFailures = files whose parser THREW (extractSymbols or
@@ -196,6 +201,7 @@ class SymbolGraph {
     this.declineReasons = Object.create(null)
     this.declineSamples = []
     this.dynamicSites.clear()
+    this.recallSuspects = []
     this.parseFailures = 0
     this.emptyFiles = 0
   }
@@ -1141,6 +1147,22 @@ class SymbolGraph {
       else {
         newDynamic++
         if (newDynamicSamples.length < 50) newDynamicSamples.push({ from: a, to: b })
+        // Auto-discovery (roadmap ②): does this runtime-only edge LOOK like
+        // something static analysis should have found? CONSERVATIVE predicate —
+        // target name unique project-wide, caller's file is the target's file
+        // or imports it, name not a builtin. Sampling/line-mapping artifacts
+        // and genuine dynamics still slip through, so this is a SUSPICION for
+        // the review queue, never a verdict and never an auto-fix.
+        const an = this.nodes.get(a), bn = this.nodes.get(b)
+        if (an && bn && this.recallSuspects.length < 200) {
+          const sameName = this.byName.get((bn.name || '').toLowerCase())
+          const unique = sameName && sameName.size === 1
+          const related = an.file === bn.file
+            || (this.fileImports.get(an.file) && this.fileImports.get(an.file).has(bn.file))
+          if (unique && related && !BUILTIN_NAMES.has((bn.name || '').toLowerCase())) {
+            this.recallSuspects.push({ from: a, to: b, fromFile: an.file, toFile: bn.file, name: bn.qualifiedName || bn.name })
+          }
+        }
       }
       // merge: persist the runtime-witnessed edge into the live graph as kind
       // 'observed' (already-static-confirmed pairs gain a provenance edge too —
@@ -1156,6 +1178,7 @@ class SymbolGraph {
       newDynamic,
       newDynamicSamples,
       merged: opts.merge ? merged : undefined,
+      recallSuspects: this.recallSuspects.length ? this.recallSuspects.slice(-20) : undefined,
       symbolsTouched: touched.size,
       totalSymbols: this.nodes.size,
       unmappedFrames: unmapped,
@@ -1187,6 +1210,9 @@ class SymbolGraph {
       // floor"; per-symbol detail via this.dynamicSites.
       dynamicSiteCount: [...this.dynamicSites.values()].reduce((a, l) => a + l.length, 0),
       dynamicSiteSymbols: this.dynamicSites.size,
+      // Auto-discovered recall-miss suspects (observed↔static cross-check) —
+      // review-queue material; see design doc safety rules.
+      recallSuspectCount: this.recallSuspects.length,
       // Per-call samples are diagnostic-only — omitted from the shipped response
       // unless CS_DBG populated them (keeps the AI-consumed payload lean).
       ...(this.declineSamples.length ? { declineSamples: this.declineSamples } : {}),

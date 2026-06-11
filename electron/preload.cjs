@@ -125,6 +125,12 @@ const csApi = {
     ipcRenderer.on('symbols-updated', handler)
     return () => ipcRenderer.off('symbols-updated', handler)
   },
+  // Realtime potential-issue alerts (newly-unreachable symbols after an edit).
+  onSymbolIssues: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('symbol-issues', handler)
+    return () => ipcRenderer.off('symbol-issues', handler)
+  },
   onNoFolder: (cb) => {
     const handler = () => cb()
     ipcRenderer.on('no-folder', handler)

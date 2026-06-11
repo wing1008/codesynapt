@@ -1173,6 +1173,9 @@ async function main() {
             process.stdout.write(`\nresolution (static floor — treat as a lower bound, not the whole graph):\n`)
             process.stdout.write(`  ${_precise} precise · ${_cand} ambiguous (candidates shown, not pinned to one target)\n`)
             process.stdout.write(`  ${j.unresolvedAmbiguous || 0} declined = ${_stdlib} stdlib/builtin (correct, not edges) + ${_gap} genuinely unresolved\n`)
+            if (j.recallSuspectCount) {
+              process.stdout.write(`  ${j.recallSuspectCount} recall-miss suspect${j.recallSuspectCount === 1 ? '' : 's'} (runtime saw an edge static analysis looks like it should have found) — review queue: .codesynapt/recall-suspects.jsonl\n`)
+            }
             if (j.dynamicSiteCount) {
               process.stdout.write(`  ${j.dynamicSiteCount} dynamic call sites in ${j.dynamicSiteSymbols} symbols (obj[x](), reflection, callbacks) — recorded, statically unresolvable; runtime tracing (cs trace run) fills them.\n`)
             } else {
