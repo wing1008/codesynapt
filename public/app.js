@@ -316,6 +316,7 @@ const T = {
     'changes.empty':             '아직 수정된 파일 없음.<br>AI(Claude Code/Cursor)나 에디터로 파일을 저장하면 여기 표시됩니다.',
     'changes.requires_electron': 'Changes 패널은 데스크탑 앱에서만 사용 가능',
     'symbols.requires_electron': '심볼(함수) 레이어는 데스크탑 앱에서만 사용 가능',
+    'symbols.observed_toast': '런타임 관측 반영: 엣지 {merged}개 (정적이 못 본 동적 {newDynamic}개) — 주황색 링크',
     // Tour / Time-lapse
     'timelapse.requires_electron':  '타임랩스는 데스크탑 앱에서만 사용 가능',
     // Hints bar
@@ -583,6 +584,7 @@ const T = {
     'changes.empty':             'No files modified yet.<br>Edits by AI (Claude Code / Cursor) or your editor will appear here.',
     'changes.requires_electron': 'Changes panel requires the desktop app',
     'symbols.requires_electron': 'Symbol (function) layer requires the desktop app',
+    'symbols.observed_toast': 'runtime observations merged: {merged} edges ({newDynamic} dynamic, invisible to static) — amber links',
     'timelapse.requires_electron':  'Time-lapse requires the desktop app',
     'hints.drag':    'drag',
     'hints.orbit':   'orbit',
@@ -6296,6 +6298,19 @@ if (isElectron) {
   })
   window.codesynapt.onNoFolder(() => { clearGraph(); refreshWelcome() })
   window.codesynapt.onError(({ message }) => { console.error(message); toast(message) })
+  // LIVE runtime-observed edges: `cs trace run` merged witnessed calls into the
+  // backend graph — refetch the symbol layer so the amber links appear NOW,
+  // not on the next restart. No-op when the symbol layer is off.
+  if (window.codesynapt.onSymbolsUpdated) {
+    window.codesynapt.onSymbolsUpdated(({ merged, newDynamic }) => {
+      symbolModeState.lastRoot = null            // bust the per-root cache
+      if (state.showSymbols) {
+        state.symbols.clear()                    // force the loader to refetch
+        buildSymbolGraph()
+        toast(t('symbols.observed_toast', { merged, newDynamic }))
+      }
+    })
+  }
   if (window.codesynapt.onScanProgress) window.codesynapt.onScanProgress(handleScanProgress)
   if (window.codesynapt.onControl) {
     window.codesynapt.onControl((msg) => {

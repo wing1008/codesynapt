@@ -117,6 +117,14 @@ const csApi = {
     ipcRenderer.on('folder-loaded', handler)
     return () => ipcRenderer.off('folder-loaded', handler)
   },
+  // Runtime-observed call edges were merged into the live symbol graph
+  // (cs trace run) — the 3D symbol layer should refetch so amber links
+  // appear without a restart.
+  onSymbolsUpdated: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('symbols-updated', handler)
+    return () => ipcRenderer.off('symbols-updated', handler)
+  },
   onNoFolder: (cb) => {
     const handler = () => cb()
     ipcRenderer.on('no-folder', handler)

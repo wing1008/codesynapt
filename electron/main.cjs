@@ -1890,6 +1890,17 @@ async function handleControlRequest(req, res) {
                 console.warn('[symbol] embedding pass failed:', e.message)
               })
             }
+            // Re-apply persisted runtime observations (cs trace run --merge) —
+            // mtime-guarded in trace-store, so observations on edited files
+            // EXPIRE instead of remapping to the wrong symbol. Parity with the
+            // headless scanner.buildSymbolGraph.
+            try {
+              const obs = traceStore.loadValidObservedPairs(currentRoot)
+              if (obs.pairs.length) {
+                const rep = g.observeRuntimeEdges(obs.pairs, { merge: true })
+                g._observedReapplied = { merged: rep.merged || 0, stale: obs.stale }
+              }
+            } catch (e) { console.warn('[symbol] observed reapply:', e.message) }
             symbolGraph = g
             _symbolBuilding = null
             return g
@@ -1969,6 +1980,30 @@ async function handleControlRequest(req, res) {
       }
       if (req.method === 'POST' && sub === 'scan') {
         return writeJson(res, 200, withMeta(g.stats()))
+      }
+      // POST /symbol/observe — runtime tracing (parity with control-server).
+      // `cs trace run` posts witnessed frame pairs here when the DESKTOP is the
+      // project's backend; without this the primary UX (desktop open) 404'd.
+      if (req.method === 'POST' && sub === 'observe') {
+        let bodyChunks = []
+        req.on('data', (c) => bodyChunks.push(c))
+        req.on('end', () => {
+          let body
+          try { body = JSON.parse(Buffer.concat(bodyChunks).toString('utf8')) }
+          catch { return writeJson(res, 400, { error: 'invalid JSON body' }) }
+          const edges = Array.isArray(body && body.edges) ? body.edges : null
+          if (!edges) return writeJson(res, 400, { error: 'usage: { "edges": [{ cf, cl, ef, el }, ...], "merge": true|false }' })
+          const doMerge = body.merge !== false
+          const rep = g.observeRuntimeEdges(edges, { merge: doMerge })
+          if (doMerge && rep.observedEdges) {
+            try { rep.persisted = traceStore.appendObservedBatch(currentRoot, edges) > 0 } catch {}
+            // LIVE map: tell the renderer new observed edges landed so the 3D
+            // symbol layer refetches and the amber links appear immediately.
+            try { mainWindow?.webContents.send('symbols-updated', { merged: rep.merged || 0, newDynamic: rep.newDynamic || 0 }) } catch {}
+          }
+          return writeJson(res, 200, withMeta(rep))
+        })
+        return
       }
       return writeJson(res, 404, { error: 'unknown symbol endpoint', path: url.pathname })
     }
