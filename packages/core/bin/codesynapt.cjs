@@ -2376,6 +2376,112 @@ async function main() {
       }
       case 'trace': {
         const sub = args[0]
+        if (sub === 'run') {
+          // cs trace run -- <command...>  → run the command under the V8 CPU
+          // profiler, turn the sampled call tree into observed call edges, and
+          // classify them against the static graph (confirm / resolve-candidate
+          // / NEW dynamic). Leg C, Phase 1. See docs/design-runtime-tracing.md.
+          const dashIdx = process.argv.indexOf('--')
+          const cmd = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : []
+          if (!cmd.length) return die('usage: cs trace run -- <command>   (e.g. cs trace run -- npm test)')
+          const cp = require('child_process')
+          const urlMod = require('url')
+          const profDir = path.join(PROJECT_ROOT, '.codesynapt', 'traces', `prof-${Date.now()}`)
+          try { fs.mkdirSync(profDir, { recursive: true }) } catch (e) { return die(`cannot create profile dir: ${e.message}`) }
+          // Hold a session lease for the whole run so an idle `cs serve` daemon
+          // does NOT idle-reap mid-trace (a long `npm test` easily outlives the
+          // ~20s grace). Uses the same registry lease the MCP/desktop use; the
+          // observe POST at the end then still has a live backend to hit.
+          const _traceReg = (() => { try { return require('../lib/registry.cjs') } catch { return null } })()
+          let _leaseTimer = null
+          const _leaseId = `trace-${process.pid}`
+          const _releaseLease = () => {
+            if (_leaseTimer) { clearInterval(_leaseTimer); _leaseTimer = null }
+            if (_traceReg) { try { _traceReg.remove('session', _leaseId) } catch {} }
+          }
+          if (_traceReg) {
+            try {
+              const root = _traceReg.canonicalRoot ? _traceReg.canonicalRoot(PROJECT_ROOT) : PROJECT_ROOT
+              const _lease = () => { try { _traceReg.touch('session', _leaseId, { projectRoot: root, startedAt: Date.now(), kind: 'trace' }) } catch {} }
+              _lease()
+              _leaseTimer = setInterval(_lease, 5000)
+              if (_leaseTimer.unref) _leaseTimer.unref()
+            } catch {}
+          }
+          const nodeOpts = `${process.env.NODE_OPTIONS || ''} --cpu-prof --cpu-prof-dir=${profDir}`.trim()
+          process.stdout.write(`tracing: ${cmd.join(' ')}\n  (CPU profiler attached — observed edges cover only paths the run exercises)\n\n`)
+          const code = await new Promise((resolve) => {
+            const ch = cp.spawn(cmd[0], cmd.slice(1), {
+              cwd: PROJECT_ROOT, stdio: 'inherit', shell: true,
+              env: { ...process.env, NODE_OPTIONS: nodeOpts },
+            })
+            ch.on('exit', (c) => resolve(c == null ? 1 : c))
+            ch.on('error', (e) => { process.stderr.write(`spawn failed: ${e.message}\n`); resolve(127) })
+          })
+          // Collect every .cpuprofile the run (and its child node procs) wrote.
+          let profiles = []
+          try { profiles = fs.readdirSync(profDir).filter((f) => f.endsWith('.cpuprofile')) } catch {}
+          if (!profiles.length) {
+            _releaseLease()
+            process.stdout.write(`\nno .cpuprofile produced (command not a Node process, or it crashed before exit). exit=${code}\n`)
+            break
+          }
+          const urlToRel = (u) => {
+            if (!u || u.startsWith('node:') || u.includes('node_modules')) return null
+            let abs
+            try { abs = u.startsWith('file:') ? urlMod.fileURLToPath(u) : u } catch { return null }
+            if (!abs || !path.isAbsolute(abs)) return null
+            const rel = path.relative(PROJECT_ROOT, abs)
+            if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
+            return rel.split(path.sep).join('/')
+          }
+          process.stderr.write(`  ${profiles.length} profile(s) collected, extracting call edges…\n`)
+          const seen = new Set(); const pairs = []
+          for (const pf of profiles) {
+            let prof
+            try { prof = JSON.parse(fs.readFileSync(path.join(profDir, pf), 'utf8')) } catch { continue }
+            const byId = new Map(); for (const n of prof.nodes || []) byId.set(n.id, n)
+            for (const n of prof.nodes || []) {
+              if (!n.children) continue
+              const cfRel = urlToRel(n.callFrame?.url)
+              if (!cfRel) continue
+              const cl = (n.callFrame.lineNumber | 0) + 1
+              for (const cid of n.children) {
+                const c = byId.get(cid); if (!c) continue
+                const efRel = urlToRel(c.callFrame?.url); if (!efRel) continue
+                const el = (c.callFrame.lineNumber | 0) + 1
+                const k = `${cfRel}:${cl}>${efRel}:${el}`
+                if (seen.has(k)) continue; seen.add(k)
+                pairs.push({ cf: cfRel, cl, ef: efRel, el })
+              }
+            }
+          }
+          process.stderr.write(`  ${pairs.length} frame-edges → classifying against the static graph (port ${PORT})…\n`)
+          let r
+          try { r = await req('POST', '/symbol/observe', null, { edges: pairs }) }
+          catch (e) { _releaseLease(); return die(`could not reach this project's backend (${e.code || e.message}) — keep the desktop app or \`cs serve\` running.`) }
+          _releaseLease()
+          if (r.status === 404) return die('symbol mode unavailable on this backend (need `cs serve` or the desktop app running for THIS project).')
+          if (r.status !== 200) return die(r.json?.error || `observe failed (status ${r.status})`)
+          const rep = r.json
+          if (args.includes('--json')) { printJson(rep); break }
+          process.stdout.write(`\n── runtime trace (exit=${code}, ${profiles.length} profile${profiles.length === 1 ? '' : 's'}, ${pairs.length} raw frame-edges) ──\n`)
+          process.stdout.write(`  observed call edges: ${rep.observedEdges}\n`)
+          process.stdout.write(`    ${rep.confirmedStatic} confirm a static call · ${rep.confirmedCandidate} resolve a candidate · ${rep.newDynamic} NEW (dynamic, invisible to static)\n`)
+          process.stdout.write(`  coverage: ${rep.symbolsTouched}/${rep.totalSymbols} symbols touched (runtime sees only exercised paths — NOT completeness)\n`)
+          if (rep.newDynamicSamples && rep.newDynamicSamples.length) {
+            process.stdout.write(`\n  new dynamic edges (static could not see these):\n`)
+            for (const s of rep.newDynamicSamples.slice(0, 15)) process.stdout.write(`    ${s.from}  →  ${s.to}\n`)
+          }
+          // Persist the observed report alongside the AI-activity traces.
+          try {
+            const outPath = path.join(PROJECT_ROOT, '.codesynapt', 'traces', `runtime-${Date.now()}.json`)
+            fs.writeFileSync(outPath, JSON.stringify({ ...rep, command: cmd.join(' '), exit: code }, null, 2))
+            process.stdout.write(`\n  saved → ${path.relative(PROJECT_ROOT, outPath)}\n`)
+          } catch (e) { if (process.env.CS_DBG) process.stderr.write(`persist failed: ${e.message}\n`) }
+          try { fs.rmSync(profDir, { recursive: true, force: true }) } catch {}
+          break
+        }
         if (sub === 'stats') {
           const r = await req('GET', '/trace/stats')
           if (r.status !== 200) return die(r.json?.error || 'failed')

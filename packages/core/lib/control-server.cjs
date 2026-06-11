@@ -1508,7 +1508,13 @@ function createControlServer(opts) {
     const on = (emitter, ev, fn) => { if (emitter && typeof emitter.on === 'function') emitter.on(ev, fn) }
     // 'aborted'/'close' on the *request* fire when the client hangs up early.
     on(req, 'aborted', markGone)
-    on(req, 'close', () => { if (!res.writableEnded) markGone() })
+    // 'close' on the request ALSO fires on NORMAL completion of a request that
+    // carried a body (every POST) — not just on an early hang-up. Guard on
+    // req.complete: only an INCOMPLETE request is a real client-gone. Without
+    // this, any async POST handler (e.g. /symbol/observe does a tree-sitter
+    // build after reading the body) sees a false "client gone" and writeJson
+    // silently drops the reply — the request hangs until the socket times out.
+    on(req, 'close', () => { if (!res.writableEnded && !req.complete) markGone() })
     let timeoutTimer = null
     if (REQUEST_TIMEOUT_MS > 0) {
       timeoutTimer = setTimeout(() => {
@@ -1695,6 +1701,37 @@ function createControlServer(opts) {
           importedByCountTotal: allUsers.length,
           truncated: allImports.length > NODE_EDGE_CAP || allUsers.length > NODE_EDGE_CAP,
         }))
+      }
+      // POST /symbol/observe — runtime tracing (Leg C). Body { edges:[{cf,cl,
+      //   ef,el}] } of OBSERVED caller→callee frames; we map each to the
+      //   enclosing symbol and classify against the static graph. Read-only (no
+      //   mutation, no auth — same trust level as the GET symbol views).
+      if (req.method === 'POST' && seg0 === 'symbol' && rest[0] === 'observe') {
+        let bodyChunks = [], bodyLen = 0, tooBig = false
+        req.on('data', (c) => {
+          bodyLen += c.length
+          if (bodyLen > 32 * 1024 * 1024) { tooBig = true; req.destroy(); return }
+          bodyChunks.push(c)
+        })
+        req.on('error', () => { try { writeJson(res, 400, { error: 'request stream error' }) } catch {} })
+        req.on('end', () => {
+          if (tooBig) return writeJson(res, 413, { error: 'request body too large (max 32MB)' })
+          let body
+          try { body = JSON.parse(Buffer.concat(bodyChunks).toString('utf8')) }
+          catch { return writeJson(res, 400, { error: 'invalid JSON body' }) }
+          const edges = Array.isArray(body && body.edges) ? body.edges : null
+          if (!edges) return writeJson(res, 400, { error: 'usage: { "edges": [{ cf, cl, ef, el }, ...] }' })
+          // NB: do NOT gate on req._csClientGone here. For a POST, the request
+          // stream's 'close' fires NORMALLY once the body is fully received, so
+          // the shared lifecycle wrapper flips _csClientGone true before the
+          // async getSymbolGraph() resolves — a false "client gone". res
+          // .writableEnded is the only correct double-write guard for a body POST.
+          scanner.getSymbolGraph().then((g) => {
+            if (res.writableEnded) return
+            writeJson(res, 200, withMeta(g.observeRuntimeEdges(edges)))
+          }).catch((e) => { try { writeJson(res, 500, { error: 'symbol graph build failed: ' + (e && e.message) }) } catch {} })
+        })
+        return
       }
       // ── Layer-2 symbol endpoints. Symbol ids contain #/@ so they ride a
       //    query param (?id=) rather than the path. getSymbolGraph() is async

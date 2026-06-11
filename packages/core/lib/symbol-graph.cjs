@@ -942,6 +942,66 @@ class SymbolGraph {
     return this.stats()
   }
 
+  // ── Runtime tracing (Leg C). Map a runtime stack frame (file id + 1-based
+  //    line) to the TIGHTEST enclosing symbol. See docs/design-runtime-tracing.md.
+  symbolAtLine(fileId, line) {
+    const ids = this.byFile.get(fileId)
+    if (!ids) return null
+    let best = null, bestSpan = Infinity
+    for (const id of ids) {
+      const n = this.nodes.get(id)
+      if (!n || n.startLine == null || n.endLine == null) continue
+      if (line >= n.startLine && line <= n.endLine) {
+        const span = n.endLine - n.startLine
+        if (span < bestSpan) { bestSpan = span; best = n }
+      }
+    }
+    return best
+  }
+
+  // Classify a batch of OBSERVED runtime call edges against the static graph.
+  // `pairs` = [{ cf, cl, ef, el }] (caller file/line, callee file/line; 1-based).
+  // Pure — no mutation. Returns how many observed edges confirm a static `call`,
+  // confirm a `call-candidate` (resolved a real ambiguity), or are NEW (dynamic,
+  // invisible to static) — plus observed-coverage so it is never read as the
+  // whole graph (runtime sees only exercised paths).
+  observeRuntimeEdges(pairs) {
+    const observed = new Set()
+    const touched = new Set()
+    let unmapped = 0
+    for (const p of pairs || []) {
+      const a = this.symbolAtLine(p.cf, p.cl)
+      const b = this.symbolAtLine(p.ef, p.el)
+      if (a) touched.add(a.id)
+      if (b) touched.add(b.id)
+      if (!a || !b) { unmapped++; continue }
+      if (a.id === b.id) continue
+      observed.add(a.id + '\t' + b.id)
+    }
+    let confirmedStatic = 0, confirmedCandidate = 0, newDynamic = 0
+    const newDynamicSamples = []
+    for (const key of observed) {
+      const i = key.indexOf('\t')
+      const a = key.slice(0, i), b = key.slice(i + 1)
+      if (this.callOut.get(a) && this.callOut.get(a).has(b)) confirmedStatic++
+      else if (this.candOut.get(a) && this.candOut.get(a).has(b)) confirmedCandidate++
+      else {
+        newDynamic++
+        if (newDynamicSamples.length < 50) newDynamicSamples.push({ from: a, to: b })
+      }
+    }
+    return {
+      observedEdges: observed.size,
+      confirmedStatic,
+      confirmedCandidate,
+      newDynamic,
+      newDynamicSamples,
+      symbolsTouched: touched.size,
+      totalSymbols: this.nodes.size,
+      unmappedFrames: unmapped,
+    }
+  }
+
   stats() {
     const byKind = {}
     for (const n of this.nodes.values()) {
