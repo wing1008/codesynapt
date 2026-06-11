@@ -213,6 +213,12 @@ async function loadLang(grammar) {
 
 // Cache: grammar name → Parser instance (Parser instances are stateful
 // but cheap to reuse since we always call setLanguage anyway).
+// NB (2026-06-11): do NOT "simplify" this into one shared Parser with
+// setLanguage switching — that corrupts even SINGLE-language extraction on
+// web-tree-sitter 0.20.x (lua call edges inverted into refs). The separate
+// cross-grammar corruption (scala-then-lua truncation, same wasm-era bug
+// class) is tracked in BACKLOG; the fix path is upgrading the
+// web-tree-sitter + tree-sitter-wasms pair together (ABI-coupled).
 const _parserCache = new Map()
 async function parserFor(grammar) {
   if (_parserCache.has(grammar)) return _parserCache.get(grammar)
@@ -1038,6 +1044,8 @@ function recvName(node) {
 function typeNameOf(node) {
   if (!node) return null
   if (node.type === 'user_type') return typeNameOf(node.namedChild(0))
+  // PHP `Engine $e` → named_type(name) / ?Engine → optional_type — unwrap.
+  if (node.type === 'named_type' || node.type === 'optional_type') return typeNameOf(node.namedChild(0))
   // Rust `&T` / `&mut T` / `*const T` — unwrap to the referenced type so a
   // `s: &Service` parameter types `s` as Service (was: null → no harvest →
   // every reference-typed param call fell to the untyped path).
@@ -1137,17 +1145,40 @@ function genericWalkParams(fnNode, map, lang) {
       // Kotlin's `parameter` (and some other grammars) exposes NO `type`
       // field — fall back to the last named child that resolves to a type
       // name, so `e: Engine` harvests e→Engine like everywhere else.
-      let tn = typeNameOf(n.childForFieldName?.('type'))
+      const tf = n.childForFieldName?.('type') || null
+      let tn = typeNameOf(tf)
       if (!tn) {
         for (let i = n.namedChildCount - 1; i >= 1; i--) { tn = typeNameOf(n.namedChild(i)); if (tn) break }
       }
-      if (tn) { const nm = n.childForFieldName?.('name') || (() => { for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (IDENT_TYPES.has(c.type) || c.type === 'variable_name' || c.type === 'simple_identifier') return c } return null })(); const name = recvName(nm); if (name) map.set(name, tn) }
+      if (tn) {
+        // Param NAME may hide inside a declarator wrapper (C++ `Engine& e` →
+        // reference_declarator(identifier), pointers likewise) — search a few
+        // levels deep for the first identifier-ish node.
+        const findIdent = (x, d) => {
+          if (!x || d > 3) return null
+          if (IDENT_TYPES.has(x.type) || x.type === 'variable_name' || x.type === 'simple_identifier') return x
+          for (let i = 0; i < x.namedChildCount; i++) { const r = findIdent(x.namedChild(i), d + 1); if (r) return r }
+          return null
+        }
+        const nm = n.childForFieldName?.('name')
+          || n.childForFieldName?.('declarator')
+          || (() => { for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c !== tf && (IDENT_TYPES.has(c.type) || c.type === 'variable_name' || c.type === 'simple_identifier' || /declarator/.test(c.type))) return c } return null })()
+        const name = recvName(nm) || recvName(findIdent(nm, 0))
+        if (name) map.set(name, tn)
+      }
       return
     }
     for (let i = 0; i < n.namedChildCount; i++) visit(n.namedChild(i), depth + 1)
   }
-  // Only descend the parameter clause region, not the body.
-  for (let i = 0; i < fnNode.namedChildCount; i++) { const c = fnNode.namedChild(i); if (/param/i.test(c.type)) visit(c, 0) }
+  // Only descend the parameter clause region, not the body. C/C++ nest the
+  // parameter_list one level down inside function_declarator — peek there too.
+  for (let i = 0; i < fnNode.namedChildCount; i++) {
+    const c = fnNode.namedChild(i)
+    if (/param/i.test(c.type)) { visit(c, 0); continue }
+    if (/declarator/.test(c.type)) {
+      for (let j = 0; j < c.namedChildCount; j++) { const cc = c.namedChild(j); if (/param/i.test(cc.type)) visit(cc, 0) }
+    }
+  }
 }
 const LAMBDA_TYPES = new Set(['lambda', 'lambda_expression', 'lambda_literal', 'closure_expression', 'anonymous_function', 'func_literal', 'arrow_function', 'function_literal'])
 function genericScanDecls(node, map, ctx, lang) {
