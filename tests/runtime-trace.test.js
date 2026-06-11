@@ -1,0 +1,72 @@
+import { describe, it, expect } from 'vitest'
+import { SymbolGraph } from '../packages/core/lib/symbol-graph.cjs'
+
+// Leg C — runtime tracing. symbolAtLine() maps a runtime stack frame to the
+// tightest enclosing symbol; observeRuntimeEdges() classifies observed call
+// edges against the static graph (confirm static / confirm candidate / NEW
+// dynamic). Both are pure.
+
+function fixtureGraph() {
+  const g = new SymbolGraph()
+  // a.js: foo (1-10) wraps bar (3-5, tighter). b.js: baz (1-8), qux (10-15).
+  g.addNode({ id: 'a#foo@1', file: 'a.js', name: 'foo', startLine: 1, endLine: 10, kind: 'function' })
+  g.addNode({ id: 'a#bar@3', file: 'a.js', name: 'bar', startLine: 3, endLine: 5, kind: 'function' })
+  g.addNode({ id: 'b#baz@1', file: 'b.js', name: 'baz', startLine: 1, endLine: 8, kind: 'function' })
+  g.addNode({ id: 'b#qux@10', file: 'b.js', name: 'qux', startLine: 10, endLine: 15, kind: 'function' })
+  g.addEdge({ source: 'a#foo@1', target: 'b#baz@1', kind: 'call' })            // static-known
+  g.addEdge({ source: 'a#foo@1', target: 'a#bar@3', kind: 'call-candidate' })  // static-ambiguous
+  return g
+}
+
+describe('symbolAtLine — frame → tightest enclosing symbol', () => {
+  const g = fixtureGraph()
+  it('picks the TIGHTEST enclosing symbol when ranges nest', () => {
+    expect(g.symbolAtLine('a.js', 4)?.id).toBe('a#bar@3') // bar(3-5) ⊂ foo(1-10)
+  })
+  it('falls back to the outer symbol outside the nested range', () => {
+    expect(g.symbolAtLine('a.js', 8)?.id).toBe('a#foo@1')
+  })
+  it('maps across files', () => {
+    expect(g.symbolAtLine('b.js', 12)?.id).toBe('b#qux@10')
+  })
+  it('returns null for an unknown file or a line in no symbol', () => {
+    expect(g.symbolAtLine('nope.js', 1)).toBe(null)
+    expect(g.symbolAtLine('b.js', 9)).toBe(null) // gap between baz and qux
+  })
+})
+
+describe('observeRuntimeEdges — classify observed vs static', () => {
+  it('confirms a static call edge', () => {
+    const r = fixtureGraph().observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'b.js', el: 5 }])
+    expect(r.observedEdges).toBe(1)
+    expect(r.confirmedStatic).toBe(1)
+    expect(r.newDynamic).toBe(0)
+  })
+  it('confirms (resolves) a static call-candidate', () => {
+    const r = fixtureGraph().observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'a.js', el: 4 }])
+    expect(r.confirmedCandidate).toBe(1)
+    expect(r.confirmedStatic).toBe(0)
+  })
+  it('flags a NEW dynamic edge invisible to static', () => {
+    const r = fixtureGraph().observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'b.js', el: 12 }]) // foo→qux, no static edge
+    expect(r.newDynamic).toBe(1)
+    expect(r.newDynamicSamples[0]).toEqual({ from: 'a#foo@1', to: 'b#qux@10' })
+  })
+  it('counts unmapped frames and ignores self-edges', () => {
+    const r = fixtureGraph().observeRuntimeEdges([
+      { cf: 'nope.js', cl: 1, ef: 'b.js', el: 5 },   // caller unmapped
+      { cf: 'a.js', cl: 8, ef: 'a.js', el: 8 },       // foo→foo self, skipped
+    ])
+    expect(r.observedEdges).toBe(0)
+    expect(r.unmappedFrames).toBe(1)
+  })
+  it('dedups repeated observations into one edge + reports coverage', () => {
+    const r = fixtureGraph().observeRuntimeEdges([
+      { cf: 'a.js', cl: 8, ef: 'b.js', el: 5 },
+      { cf: 'a.js', cl: 9, ef: 'b.js', el: 6 }, // same foo→baz, different lines
+    ])
+    expect(r.observedEdges).toBe(1)
+    expect(r.symbolsTouched).toBe(2)
+    expect(r.totalSymbols).toBe(4)
+  })
+})

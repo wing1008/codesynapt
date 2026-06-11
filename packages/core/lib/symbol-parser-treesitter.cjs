@@ -405,6 +405,12 @@ function walk(node, ctx) {
     const src = ctx.fnStack[ctx.fnStack.length - 1]
     if (src) {
       const calleeName = extractCalleeName(node)
+      // Statically-unnameable callee — subscript `arr[i]()`, call-result
+      // `getattr(o, n)()`, etc. Previously a SILENT drop; record it so the
+      // graph admits the enclosing symbol has a dynamic call site (zero-silence).
+      if (!calleeName && ctx.index?.recordDynamicSite) {
+        ctx.index.recordDynamicSite(src, node.startPosition.row + 1, 'indirect')
+      }
       if (calleeName && !ctx.kwSet?.has(calleeName)) {
         let target = null
         // Type-aware member resolution. When the receiver's class is known —
@@ -575,6 +581,17 @@ function extractInheritance(node, lang) {
       // Swift — single base type or protocol
       const name = walkType(c)
       if (name) out.push({ name, kind: 'extends' })
+    } else if (ct === 'base_list') {
+      // C# — `class Alpha : Base, IGreeter` puts everything in one base_list;
+      // class-vs-interface is not syntactically distinguishable. Label the
+      // first entry extends and the rest implements (C# allows one base class,
+      // listed first). The graph indexes both kinds identically (extendsOut),
+      // so the label only affects display, never resolution/dispatch.
+      let first = true
+      for (let j = 0; j < c.namedChildCount; j++) {
+        const name = walkType(c.namedChild(j))
+        if (name) { out.push({ name, kind: first ? 'extends' : 'implements' }); first = false }
+      }
     } else if (ct === 'argument_list' && lang === 'python') {
       // Python `class Foo(Bar, Baz):` — base classes as `argument_list`
       for (let j = 0; j < c.namedChildCount; j++) {

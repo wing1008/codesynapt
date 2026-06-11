@@ -650,9 +650,12 @@ const TOOLS = [
   {
     name: 'cs_symbol_summary',
     description:
-      'Symbol-mode project overview: total symbols, breakdown by kind (function/class/struct/…) and edge kind. Triggers the symbol scan on first call after a project is loaded. Use this once at the start of a symbol-level investigation.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    handler: async () => (await apiReq('GET', '/symbol/summary')).data,
+      'Symbol-mode project overview: total symbols, breakdown by kind (function/class/struct/…) and edge kind, plus honesty counters (dynamicSiteCount = call sites static analysis cannot name; declineReasons). Triggers the symbol scan on first call after a project is loaded. Use this once at the start of a symbol-level investigation.\n' +
+      'Pass accounting:true for the completeness partition instead — every symbol labelled entry/reachable/possible/dead (unexplained always 0; dead = static floor with caveats, NOT proof). Use it for "what code is unused?" questions.',
+    inputSchema: { type: 'object', properties: {
+      accounting: { type: 'boolean', description: 'return the accounting partition (entry/reachable/possible/dead) instead of the summary' },
+    }, additionalProperties: false },
+    handler: async (a) => (await apiReq('GET', a && a.accounting ? '/symbol/accounting' : '/symbol/summary')).data,
   },
   {
     name: 'cs_symbol_search',

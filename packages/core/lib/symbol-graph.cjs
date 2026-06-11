@@ -9,6 +9,13 @@
 const fs = require('fs')
 const path = require('path')
 
+// Decline SAMPLING (which specific calls were declined) is a DIAGNOSTIC, not a
+// shipped signal — every /symbol/summary response is consumed by AI agents on a
+// token budget, so we never bloat it with samples in production. The compact
+// declineReasons COUNTS always ship (they power the honest static-floor footer);
+// the per-call samples only collect when CS_DBG is set.
+const CS_DECLINE_SAMPLES = !!(process.env.CS_DBG || process.env.CS_DECLINE_SAMPLES)
+
 // Parser registry — extended per-language in Stage 1 / Stage 2.
 // Each entry: { extractSymbols(content, fileId) → SymbolNode[],
 //               extractReferences(content, fileId, index) → SymbolEdge[] }
@@ -139,6 +146,18 @@ class SymbolGraph {
     // (builtin/common name, or ambiguous across >1 production file). Surfaced
     // in stats() so "unresolved" reads as data, not a silent drop.
     this.unresolvedAmbiguous = 0
+    // Decomposition of unresolvedAmbiguous by decline reason — separates
+    // correct stdlib/builtin declines (not real edges) from genuine unresolved
+    // user calls (the real static gap). Surfaced in stats().
+    this.declineReasons = Object.create(null)
+    this.declineSamples = []
+    // Zero-silence ledger (user bar #3): call sites whose CALLEE cannot even be
+    // named statically — computed members `obj[k]()`, indirect `f()()`, local
+    // callbacks `cb()`. These previously produced NO edge and NO counter (proven
+    // by fixture: invisible). Now every such site is recorded against its
+    // enclosing symbol so accounting/blast can say "this symbol contains N
+    // dynamic call sites" instead of silently looking complete.
+    this.dynamicSites = new Map()   // symbolId → [{ line, form }]
     // Honest signal #2: parser outcomes per file, so a broken-language /
     // crashed-parser file is distinguishable from a legitimately symbol-less
     // one. parseFailures = files whose parser THREW (extractSymbols or
@@ -174,6 +193,9 @@ class SymbolGraph {
     this.fileCount = 0
     this.scanMs = 0
     this.unresolvedAmbiguous = 0
+    this.declineReasons = Object.create(null)
+    this.declineSamples = []
+    this.dynamicSites.clear()
     this.parseFailures = 0
     this.emptyFiles = 0
   }
@@ -284,6 +306,32 @@ class SymbolGraph {
     return null
   }
 
+  // Record a statically-unnameable call site against its enclosing symbol.
+  // forms: 'computed-member' (obj[k]()), 'indirect' (f()(), (expr)()),
+  // 'local-callback' (cb() where cb is a param/local non-function binding).
+  recordDynamicSite(symbolId, line, form) {
+    if (!symbolId) return
+    let list = this.dynamicSites.get(symbolId)
+    if (!list) { list = []; this.dynamicSites.set(symbolId, list) }
+    if (list.length < 64) list.push({ line: line || 0, form: form || 'unknown' })
+  }
+
+  // Record a declined call resolution under a labeled reason. The sum of
+  // declineReasons always equals unresolvedAmbiguous — it just tells us WHICH
+  // declines are correct (stdlib/builtin) vs a genuine unresolved user call.
+  _decline(reason, name, fromFileId) {
+    this.unresolvedAmbiguous++
+    this.declineReasons[reason] = (this.declineReasons[reason] || 0) + 1
+    // Sample the genuinely-uncertain declines (NOT stdlib/builtin noise) so the
+    // real static gap is inspectable — DIAGNOSTIC ONLY (CS_DBG), never in the
+    // shipped response. Capped to stay cheap even when enabled.
+    if (CS_DECLINE_SAMPLES && reason !== 'builtin-method' && reason !== 'builtin-fallback'
+        && this.declineSamples.length < 100) {
+      this.declineSamples.push({ reason, name, from: fromFileId })
+    }
+    return null
+  }
+
   resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false, inModule = null } = {}) {
     if (!name) return null
     // Untyped member call `obj.foo()` where foo is a builtin / common method
@@ -293,8 +341,7 @@ class SymbolGraph {
     // `add` for `visited.add()` — B-2 / the JS-recall measurement). Bare
     // calls `foo()` are unaffected (memberCall=false).
     if (memberCall && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
-      this.unresolvedAmbiguous++
-      return null
+      return this._decline('builtin-method', name, fromFileId)
     }
     // Type-aware lookup: `User.method` matches a symbol whose
     // qualifiedName === 'User.method' exactly. Higher priority than
@@ -417,7 +464,7 @@ class SymbolGraph {
     }
     // Ambiguous bare-name member call (≥2 impls of the method name) — refuse the
     // arbitrary first match; the candidate leg exposes all impls instead.
-    if (ambiguousMethodCall) { this.unresolvedAmbiguous++; return null }
+    if (ambiguousMethodCall) { return this._decline('ambiguous-user-method', name, fromFileId) }
     if (sameFile && !importedOnly) return sameFile
     // Pinned namespace match (single module reach) takes precedence as before.
     if (imported) return imported
@@ -426,7 +473,7 @@ class SymbolGraph {
     // through to the production/candidate legs rather than pick an arbitrary,
     // iteration-order-dependent file (the documented nondeterminism bug).
     if (importedCandCount === 1) return importedCand
-    if (importedCandCount > 1) { this.unresolvedAmbiguous++; return null }
+    if (importedCandCount > 1) { return this._decline('imported-ambiguous', name, fromFileId) }
     if (!allowAny) return null
     // Tightened fallback. The old code returned ANY same-named symbol here,
     // which mis-linked `.add()`/`.resolve()` method calls on unknown
@@ -434,10 +481,9 @@ class SymbolGraph {
     // common method name by bare name, and leave an ambiguous name (>1
     // production candidate) unresolved rather than mis-link. Phase-0 spike:
     // suspect cross-file edges −81% (JS) / −54% (Python), <1% real loss.
-    if (BUILTIN_NAMES.has(name.toLowerCase())) { this.unresolvedAmbiguous++; return null }
+    if (BUILTIN_NAMES.has(name.toLowerCase())) { return this._decline('builtin-fallback', name, fromFileId) }
     if (prodCount === 1) return prodOne
-    this.unresolvedAmbiguous++
-    return null
+    return this._decline(prodCount === 0 ? 'no-match' : 'ambiguous-prod', name, fromFileId)
   }
 
   // The DYNAMIC candidate leg. When a call can't be pinned to ONE static target
@@ -907,11 +953,203 @@ class SymbolGraph {
         if (this.nodes.has(r.source) && this.nodes.has(r.target)) this.addEdge(r)
       }
     }
+    this.finalizeDispatchCandidates()
     this.fileCount = fileCount
     this.builtAt = Date.now()
     this.scanMs = this.builtAt - start
     this.abortedAt = abortedAt          // null or 'symbols'/'edges'
     return this.stats()
+  }
+
+  // Polymorphic-dispatch candidates (post-pass; user bar: "동적은 후보군 최대치").
+  // A typed member call resolving to an interface/base METHOD declaration is a
+  // CORRECT confident edge — but at runtime the dispatch lands on an OVERRIDE in
+  // an implementing/extending class. Without this pass those real targets are
+  // invisible: blast on `Alpha.greet` misses the caller of `Greeter.greet`.
+  // For every confident call edge whose target method's declaring type has
+  // subtypes (reverse extends/implements, transitive), emit `call-candidate`
+  // edges to each subtype's same-named override. Isolated from the confident
+  // call graph (candidate adjacency only), capped to avoid hierarchy explosion.
+  finalizeDispatchCandidates(cap = 24) {
+    if (!this.extendsOut.size) return
+    // Reverse subtype index: baseClassId → Set<subClassId>
+    const subsOf = new Map()
+    for (const [sub, bases] of this.extendsOut) {
+      for (const base of bases) {
+        if (!subsOf.has(base)) subsOf.set(base, new Set())
+        subsOf.get(base).add(sub)
+      }
+    }
+    const allSubsOf = (typeId) => {
+      const out = new Set(); const q = [typeId]
+      while (q.length) {
+        const cur = q.pop()
+        const subs = subsOf.get(cur)
+        if (!subs) continue
+        for (const s of subs) { if (!out.has(s)) { out.add(s); q.push(s) } }
+      }
+      return out
+    }
+    // Snapshot — addEdge below appends to this.edges; never iterate a growing list.
+    const callEdges = this.edges.filter((e) => e.kind === 'call')
+    const pending = []
+    for (const e of callEdges) {
+      const t = this.nodes.get(e.target)
+      if (!t || !t.qualifiedName || !t.qualifiedName.includes('.') || t.qualifiedName === t.name) continue
+      const dot = t.qualifiedName.lastIndexOf('.')
+      const typeName = t.qualifiedName.slice(0, dot)
+      const methodName = t.qualifiedName.slice(dot + 1)
+      const typeIds = this.byName.get(typeName.toLowerCase())
+      if (!typeIds) continue
+      let emitted = 0
+      for (const tid of typeIds) {
+        const tn = this.nodes.get(tid)
+        if (!tn || tn.name !== typeName) continue
+        for (const subId of allSubsOf(tid)) {
+          if (emitted >= cap) break
+          const sub = this.nodes.get(subId)
+          if (!sub) continue
+          const overrides = this.byName.get(methodName.toLowerCase())
+          if (!overrides) continue
+          for (const oid of overrides) {
+            const o = this.nodes.get(oid)
+            if (!o || oid === e.target || o.qualifiedName !== `${sub.name}.${methodName}`) continue
+            pending.push({ source: e.source, target: oid, kind: 'call-candidate', line: e.line, candidate: true, dispatch: 'override' })
+            emitted++
+            if (emitted >= cap) break
+          }
+        }
+      }
+    }
+    for (const e of pending) this.addEdge(e)
+  }
+
+  // ── Accounting completeness (user bar #4): EVERY symbol gets exactly one
+  //    label — entry / reachable (confident call chain from an entry) /
+  //    possible (only via candidate-dispatch or value-reference, i.e. could be
+  //    live) / dead (statically unreachable). unexplained is 0 BY CONSTRUCTION;
+  //    the bar test asserts the partition sums to the total.
+  //    HONESTY CAVEATS (returned, never hidden): a "dead" verdict is a static
+  //    floor — dynamicSiteCount > 0 means unnameable call sites exist that
+  //    could invoke anything; entry detection itself can miss framework-implicit
+  //    entries. Dead therefore means "no static evidence of life", not proof.
+  accounting(entryIds = null) {
+    const entries = new Set()
+    if (entryIds && entryIds.length) {
+      for (const id of entryIds) if (this.nodes.has(id)) entries.add(id)
+    } else {
+      // Default entries: exported symbols + module pseudo-symbols (top-level code).
+      for (const n of this.nodes.values()) {
+        if (n.exported || n.kind === 'module') entries.add(n.id)
+      }
+    }
+    // Tier 1 — confident reach: BFS over call edges from entries.
+    const reachable = new Set(entries)
+    const q1 = [...entries]
+    while (q1.length) {
+      const cur = q1.pop()
+      const outs = this.callOut.get(cur)
+      if (outs) for (const t of outs) if (!reachable.has(t)) { reachable.add(t); q1.push(t) }
+    }
+    // Tier 2 — possible reach: from anything live, follow candidate-dispatch and
+    // value-reference edges too (a callback passed somewhere can run; a dispatch
+    // candidate can be the runtime target). Newly reached symbols are 'possible',
+    // and their own confident callees are possible as well.
+    const refOut = new Map()
+    for (const e of this.edges) {
+      if (e.kind !== 'ref') continue
+      if (!refOut.has(e.source)) refOut.set(e.source, new Set())
+      refOut.get(e.source).add(e.target)
+    }
+    const possible = new Set()
+    const seen = new Set(reachable)
+    const q2 = [...reachable]
+    while (q2.length) {
+      const cur = q2.pop()
+      for (const m of [this.callOut.get(cur), this.candOut.get(cur), refOut.get(cur)]) {
+        if (!m) continue
+        for (const t of m) if (!seen.has(t)) { seen.add(t); possible.add(t); q2.push(t) }
+      }
+    }
+    const dead = []
+    for (const id of this.nodes.keys()) {
+      if (!reachable.has(id) && !possible.has(id)) dead.push(id)
+    }
+    const total = this.nodes.size
+    const entryCount = entries.size
+    const reachableCount = reachable.size - entries.size
+    const possibleCount = possible.size
+    const deadCount = dead.length
+    return {
+      total,
+      entryCount, reachableCount, possibleCount, deadCount,
+      unexplained: total - (entryCount + reachableCount + possibleCount + deadCount),
+      dead: dead.slice(0, 200),
+      deadTruncated: dead.length > 200,
+      // Caveats — the consumer must see WHY dead is a floor, not proof.
+      dynamicSiteCount: [...this.dynamicSites.values()].reduce((a, l) => a + l.length, 0),
+      entryDetection: entryIds && entryIds.length ? 'explicit' : 'exports+modules (framework-implicit entries may be missed)',
+    }
+  }
+
+  // ── Runtime tracing (Leg C). Map a runtime stack frame (file id + 1-based
+  //    line) to the TIGHTEST enclosing symbol. See docs/design-runtime-tracing.md.
+  symbolAtLine(fileId, line) {
+    const ids = this.byFile.get(fileId)
+    if (!ids) return null
+    let best = null, bestSpan = Infinity
+    for (const id of ids) {
+      const n = this.nodes.get(id)
+      if (!n || n.startLine == null || n.endLine == null) continue
+      if (line >= n.startLine && line <= n.endLine) {
+        const span = n.endLine - n.startLine
+        if (span < bestSpan) { bestSpan = span; best = n }
+      }
+    }
+    return best
+  }
+
+  // Classify a batch of OBSERVED runtime call edges against the static graph.
+  // `pairs` = [{ cf, cl, ef, el }] (caller file/line, callee file/line; 1-based).
+  // Pure — no mutation. Returns how many observed edges confirm a static `call`,
+  // confirm a `call-candidate` (resolved a real ambiguity), or are NEW (dynamic,
+  // invisible to static) — plus observed-coverage so it is never read as the
+  // whole graph (runtime sees only exercised paths).
+  observeRuntimeEdges(pairs) {
+    const observed = new Set()
+    const touched = new Set()
+    let unmapped = 0
+    for (const p of pairs || []) {
+      const a = this.symbolAtLine(p.cf, p.cl)
+      const b = this.symbolAtLine(p.ef, p.el)
+      if (a) touched.add(a.id)
+      if (b) touched.add(b.id)
+      if (!a || !b) { unmapped++; continue }
+      if (a.id === b.id) continue
+      observed.add(a.id + '\t' + b.id)
+    }
+    let confirmedStatic = 0, confirmedCandidate = 0, newDynamic = 0
+    const newDynamicSamples = []
+    for (const key of observed) {
+      const i = key.indexOf('\t')
+      const a = key.slice(0, i), b = key.slice(i + 1)
+      if (this.callOut.get(a) && this.callOut.get(a).has(b)) confirmedStatic++
+      else if (this.candOut.get(a) && this.candOut.get(a).has(b)) confirmedCandidate++
+      else {
+        newDynamic++
+        if (newDynamicSamples.length < 50) newDynamicSamples.push({ from: a, to: b })
+      }
+    }
+    return {
+      observedEdges: observed.size,
+      confirmedStatic,
+      confirmedCandidate,
+      newDynamic,
+      newDynamicSamples,
+      symbolsTouched: touched.size,
+      totalSymbols: this.nodes.size,
+      unmappedFrames: unmapped,
+    }
   }
 
   stats() {
@@ -933,6 +1171,15 @@ class SymbolGraph {
       builtAt: this.builtAt,
       abortedAt: this.abortedAt || null,   // null | 'symbols' | 'edges'
       unresolvedAmbiguous: this.unresolvedAmbiguous,  // calls we declined to guess
+      declineReasons: this.declineReasons,  // breakdown: stdlib-correct vs genuine gap
+      // Zero-silence ledger summary — sites whose callee static analysis cannot
+      // even NAME. Nonzero here means "the call graph for these symbols is a
+      // floor"; per-symbol detail via this.dynamicSites.
+      dynamicSiteCount: [...this.dynamicSites.values()].reduce((a, l) => a + l.length, 0),
+      dynamicSiteSymbols: this.dynamicSites.size,
+      // Per-call samples are diagnostic-only — omitted from the shipped response
+      // unless CS_DBG populated them (keeps the AI-consumed payload lean).
+      ...(this.declineSamples.length ? { declineSamples: this.declineSamples } : {}),
       parseFailures: this.parseFailures,   // files whose parser threw (swallowed to [])
       emptyFiles: this.emptyFiles,         // files parsed OK but with 0 symbols
     }
