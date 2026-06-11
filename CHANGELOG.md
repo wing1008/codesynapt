@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.0.3 — beta (2026-06-11)
+
+> Beta / pre-release — APIs and formats may still change.
+
+### Added — runtime tracing (the dynamic half of the graph)
+- **`cs trace run [--no-merge] -- <command>`** runs any command under the V8
+  CPU profiler, maps the sampled call tree to symbols, and classifies each
+  observed edge against the static graph: confirms a static call, resolves an
+  ambiguous candidate, or surfaces a **NEW dynamic edge static analysis cannot
+  see**. Merged edges persist (mtime-guarded: observations on edited files
+  expire rather than re-attaching to the wrong symbol) and survive rebuilds.
+- **`cs trace watch [--interval <sec>] -- <command>`** attaches to a
+  long-running process (dev server, worker) and profiles in cycles — each
+  cycle's observations merge into the live graph immediately.
+- **Live 3D updates**: runtime-witnessed edges render **amber** in the symbol
+  layer and appear the moment a trace merges (no restart); symbols containing
+  dynamic call sites get a warm uncertainty tint. Each merge also leaves a
+  trace-timeline entry ("runtime: N edges observed …").
+
+### Added — honesty surfaces (the graph now states its own limits)
+- **Zero-silence dynamic-site ledger**: call sites whose callee cannot even be
+  named statically (`obj[k]()`, `getattr(o,n)()`, local callbacks) are recorded
+  per symbol instead of silently dropped, and counted in summaries.
+- **`cs symbol accounting`** (+ `GET /symbol/accounting`, MCP
+  `cs_symbol_summary {accounting:true}`): every symbol labelled
+  entry / reachable / possible / dead with `unexplained: 0` by construction —
+  dead is always presented as a static floor with its caveats, never proof.
+- `cs symbol summary` ends with a **static-floor resolution footer** (precise
+  vs candidate counts, stdlib-vs-genuine declines, dynamic-site count);
+  symbol blast reports **`dynamicSitesInImpact`**; node views carry per-symbol
+  `dynamicSites`.
+- **Polymorphic dispatch candidates**: a typed call resolving to an interface/
+  base method declaration now also surfaces every subtype override as
+  `call-candidate` edges — blast on an implementation no longer misses callers
+  of its interface.
+
+### Fixed — graph accuracy
+- **C# emitted no inheritance edges at all** (`class A : IGreeter` was
+  invisible — base_list unhandled).
+- **`super()` / `super.` / `base.` candidate spray**: these calls resolved
+  against every same-named method in the project (measured: 69% of one repo's
+  candidate edges, with the real target often NOT among them). They now resolve
+  statically to the declared parent — precise edge for an in-repo parent,
+  counted `super-external` decline (no spray) for an external one.
+  Candidates on a real ML repo dropped 4377 → 1222.
+- **JS computed-call phantom**: `o[k]()` treated the subscript variable `k` as
+  the callee name and could phantom-match a user symbol named `k`.
+- Async POST replies were silently dropped by the request-lifecycle guard
+  (`close` fires on normal body completion) — affected every body-carrying
+  endpoint served asynchronously.
+
+### Fixed — daemon reliability
+- **Zombie daemon accumulation**: on Windows, lease-file renames collide with
+  concurrent readers (EPERM) — updates were silently lost and a chronic touch
+  failure starved the idle-reap check, accumulating daemons until the port
+  range was exhausted (desktop "control API disabled"). Lease writes now retry
+  and fall back to a plain overwrite; the reap check can no longer be starved;
+  orphaned `.tmp` lease files are swept.
+- The daemon no longer self-exits while still serving a request (a large
+  repo's first symbol build outlives the idle grace window).
+- `cs trace run`/`watch` hold a session lease for their whole duration.
+
+### Verification
+- **4-language completeness bar** (JS, Python, Java, C#) committed as
+  known-answer fixtures: static recall, precision (no phantom edges,
+  wrong-file decoys), dynamic honesty (max candidates + zero silence),
+  accounting, and a real-repo regression bar with build-determinism checks —
+  all languages gated green simultaneously (227 tests).
+
 ## 0.0.2 — beta (2026-06-10)
 
 > Beta / pre-release — APIs and formats may still change.
