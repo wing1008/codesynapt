@@ -70,6 +70,40 @@ resolution is common-pattern level, not a full compiler type solver — unresolv
 patterns are DOCUMENTED, never silently dropped; any bar change is a user
 decision, never an assistant shortcut.
 
+## Locked MACRO order (user-approved 2026-06-11, supersedes step 3-5 above)
+```
+① All remaining languages to the Layer-2 bar (go → rust → kotlin → swift →
+   php → cpp → scala → lua/bash). Bar = the SAME DONE definition (static +
+   marking + max candidates); per-language runtime tracers are explicitly
+   deferred to ⑤ — the marking/candidate machinery keeps the gap VISIBLE
+   (never silent) in the meantime.
+② Always-on live map (continuous symbol-layer updates on change), INCLUDING
+   the observed↔static cross-check = automatic recall-miss discovery.
+③ Realtime potential-issue alerts (interpretation layer ON TOP of ②).
+④ Release bundle. (Interim releases — e.g. 0.0.3 — are NOT held hostage to
+   this plan; ship when the user says so.)
+⑤ Per-language runtime tracers (Python sys.monitoring first, then JVM/.NET).
+⑥ Expression layer (design-expression-layer.md) →
+⑦ realtime issues+map extended onto expressions.
+```
+**Fixture depth is NOT a phase** — it is a standing ratchet rule across all
+phases: every real-world miss becomes a known-answer fixture case (red → fix →
+whole-suite green → committed).
+
+### Auto-discovery safety rules (part of ②, non-negotiable)
+The observed↔static cross-check flags "an observed edge whose call site looks
+statically resolvable but has neither a call nor a candidate edge" as a
+RECALL-MISS SUSPECT. At the discovery moment:
+1. **Suspicion, never verdict** — sampling attribution, line-boundary mapping
+   and legitimate ambiguity all mimic a miss; conservative predicate only.
+2. **No auto-fix, no interruption** — suspects are deduped, capped and quietly
+   appended to a review queue (+ one summary count line); the parser is never
+   modified automatically and the user is never toasted mid-work.
+3. **The map is already correct at that moment** — the observed edge is merged
+   before the check runs, so discovery carries zero urgency and cannot break
+   the live session; the parser fix is an offline ratchet cycle
+   (review → fixture case red → fix → ALL-green gate → commit).
+
 ## Anti-false-verification contract
 - A language is "done" ONLY when its committed fixture test is green. The
   assistant may not claim completion from a single ad-hoc measurement again.
