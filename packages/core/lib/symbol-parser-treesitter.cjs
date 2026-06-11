@@ -631,6 +631,13 @@ function extractInheritance(node, lang) {
       // Swift — single base type or protocol
       const name = walkType(c)
       if (name) out.push({ name, kind: 'extends' })
+    } else if (ct === 'delegation_specifier') {
+      // Kotlin — `class Alpha : Greeter` (one specifier per parent; a
+      // constructor-invocation parent wraps the type one level deeper, which
+      // walkType already unwraps). Without this Kotlin had NO inheritance
+      // edges at all — interface dispatch candidates never fired.
+      const name = walkType(c)
+      if (name) out.push({ name, kind: 'implements' })
     } else if (ct === 'base_list') {
       // C# — `class Alpha : Base, IGreeter` puts everything in one base_list;
       // class-vs-interface is not syntactically distinguishable. Label the
@@ -1127,8 +1134,13 @@ function genericWalkParams(fnNode, map, lang) {
   const visit = (n, depth) => {
     if (!n || depth > 4) return
     if (n.type === pt) {
-      const tf = n.childForFieldName?.('type')
-      const tn = typeNameOf(tf)
+      // Kotlin's `parameter` (and some other grammars) exposes NO `type`
+      // field — fall back to the last named child that resolves to a type
+      // name, so `e: Engine` harvests e→Engine like everywhere else.
+      let tn = typeNameOf(n.childForFieldName?.('type'))
+      if (!tn) {
+        for (let i = n.namedChildCount - 1; i >= 1; i--) { tn = typeNameOf(n.namedChild(i)); if (tn) break }
+      }
       if (tn) { const nm = n.childForFieldName?.('name') || (() => { for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (IDENT_TYPES.has(c.type) || c.type === 'variable_name' || c.type === 'simple_identifier') return c } return null })(); const name = recvName(nm); if (name) map.set(name, tn) }
       return
     }
