@@ -55,7 +55,9 @@
     "LICENSES.md",
     "CHANGELOG.md",
     "README.md",
-    "!scripts/competitor-watch.mjs"
+    "!scripts/competitor-watch.mjs",
+    "!**/.codesynapt/**",
+    "!**/*.test.cjs"
   ],
   "scripts": {
     "postinstall": "node scripts/copy-vendor.js",

@@ -163,6 +163,7 @@ class SymbolGraph {
     // SUSPICION, never verdict (safety rules in design-symbol-completeness.md)
     // — review queue material, no auto-fix, capped.
     this.recallSuspects = []
+    this._suspectKeys = new Set()   // dedup — re-observing an edge must not refill the cap
     // Honest signal #2: parser outcomes per file, so a broken-language /
     // crashed-parser file is distinguishable from a legitimately symbol-less
     // one. parseFailures = files whose parser THREW (extractSymbols or
@@ -202,6 +203,7 @@ class SymbolGraph {
     this.declineSamples = []
     this.dynamicSites.clear()
     this.recallSuspects = []
+    this._suspectKeys = new Set()
     this.parseFailures = 0
     this.emptyFiles = 0
   }
@@ -1166,7 +1168,8 @@ class SymbolGraph {
           const unique = sameName && sameName.size === 1
           const related = an.file === bn.file
             || (this.fileImports.get(an.file) && this.fileImports.get(an.file).has(bn.file))
-          if (unique && related && !BUILTIN_NAMES.has((bn.name || '').toLowerCase())) {
+          if (unique && related && !BUILTIN_NAMES.has((bn.name || '').toLowerCase()) && !this._suspectKeys.has(key)) {
+            this._suspectKeys.add(key)
             this.recallSuspects.push({ from: a, to: b, fromFile: an.file, toFile: bn.file, name: bn.qualifiedName || bn.name })
           }
         }

@@ -227,16 +227,20 @@ function appendObservedBatch(root, pairs) {
     const f = observedFileFor(root)
     if (fs.existsSync(f) && fs.statSync(f).size > 512 * 1024) {
       const valid = loadValidObservedPairs(root)
-      const mt = {}
-      for (const p of valid.pairs) {
-        for (const file of [p.cf, p.ef]) {
-          if (mt[file] !== undefined) continue
-          try { mt[file] = Math.floor(fs.statSync(path.join(root, file)).mtimeMs) } catch { mt[file] = -1 }
-        }
+      // Reuse the VALIDATION-TIME mtimes (returned by the loader) — re-statting
+      // here would "revive" pairs whose file changed in the validate→compact
+      // window with a fresh mtime, the exact lie the guard prevents. Write via
+      // temp+rename so a crash mid-compaction cannot wipe the whole history.
+      const data = valid.pairs.length
+        ? JSON.stringify({ ts: Date.now(), compacted: true, mtimes: valid.mtimes || {}, pairs: valid.pairs }) + '\n'
+        : ''
+      const tmp = f + '.' + process.pid + '.compact.tmp'
+      try {
+        fs.writeFileSync(tmp, data)
+        fs.renameSync(tmp, f)
+      } catch {
+        try { fs.unlinkSync(tmp) } catch {}
       }
-      fs.writeFileSync(f, valid.pairs.length
-        ? JSON.stringify({ ts: Date.now(), compacted: true, mtimes: mt, pairs: valid.pairs }) + '\n'
-        : '')
     }
   } catch { /* compaction is best-effort */ }
   const mtimes = {}
@@ -291,6 +295,11 @@ function loadValidObservedPairs(root) {
       else out.stale++
     }
   }
+  // The mtimes AT VALIDATION TIME — compaction must reuse these, not re-stat:
+  // a file edited between validate and re-stat would get its stale pairs
+  // re-stamped with the NEW mtime ("revived" — the exact line-shift lie the
+  // guard exists to prevent).
+  out.mtimes = Object.fromEntries(curMtime)
   return out
 }
 

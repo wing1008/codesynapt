@@ -328,7 +328,15 @@ function walk(node, ctx) {
       // first before we can resolve the parent name).
       if (ctx.passTwo) {
         for (const { name: parentName, kind } of supers) {
-          const target = ctx.resolve(parentName, { forCall: true })
+          // DOTTED parents (`nn.Module`) must resolve by EXACT qualified name
+          // only: the plain resolve path degrades a qualified miss to the bare
+          // tail ('Module'), which linked external bases to any same-named
+          // LOCAL class — a phantom extends edge that then poisoned the MRO
+          // walk into a confident wrong call (reproduced: `net.helper()` →
+          // decoy Module.helper). A dotted name that misses → NO edge.
+          const target = parentName.includes('.')
+            ? (ctx.resolveQualified ? ctx.resolveQualified(parentName) : null)
+            : ctx.resolve(parentName, { forCall: true })
           if (!target || target.id === sym.id) continue
           const key = sym.id + '|' + target.id + '|' + kind
           if (ctx.seen.has(key)) continue
@@ -457,9 +465,10 @@ function walk(node, ctx) {
         // bare fallback. Recovers real `self.repo.save()`-style edges the
         // untyped path declines.
         let superUnresolved = false
+        let typedMiss = false   // receiver type KNOWN but Type.method missing
         if (ctx.lang === 'python' && ctx.resolveQualified) {
           const rc = pyReceiverType(node, ctx)
-          if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
+          if (rc) { target = ctx.resolveQualified(`${rc}.${calleeName}`); if (!target) typedMiss = true }
           // `super().m()` that did NOT resolve (external base like nn.Module,
           // or base extraction missed): the target is the base's m and NOTHING
           // else — the bare fallback and the candidate spray can only produce
@@ -468,10 +477,10 @@ function walk(node, ctx) {
           if (!target && pyIsSuperCall(node)) superUnresolved = true
         } else if (ctx.lang === 'go' && ctx.resolveQualified) {
           const rc = goReceiverType(node, ctx)
-          if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
+          if (rc) { target = ctx.resolveQualified(`${rc}.${calleeName}`); if (!target) typedMiss = true }
         } else if (RECV_OF[ctx.lang] && ctx.resolveQualified) {
           const rc = genericReceiverType(node, ctx)
-          if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
+          if (rc) { target = ctx.resolveQualified(`${rc}.${calleeName}`); if (!target) typedMiss = true }
           // `super.m()` / `base.M()` that did not resolve (external/unresolved
           // parent): the target is the parent's m and NOTHING else — suppress
           // the bare fallback and the candidate spray (mirrors Python super()).
@@ -494,6 +503,12 @@ function walk(node, ctx) {
         // first. Typed members were already resolved above (Python qualified).
         if (!target && !superUnresolved) {
           const member = isMemberCallNode(node)
+          // Typed-receiver MISS must not degrade a MEMBER call to the bare-name
+          // path: "type known, method not found" grabbing a same-file/imported
+          // same-named method is exactly the babel B-2 phantom class
+          // (reproduced here: `net: Net; net.helper()` confidently linked to a
+          // decoy class's helper). Candidates below still surface the honest
+          // "could be one of these" set.
           // Rust: an untyped MEMBER call (`x.method()` / `Vec::with`) whose
           // receiver type we couldn't resolve is almost always a std-library
           // method (the std surface is huge — iter/to_owned/unwrap/with_capacity
@@ -502,7 +517,8 @@ function walk(node, ctx) {
           // `RawValue.to_owned`). Refuse — typed receivers already resolved
           // above via the qualified path. Bare FUNCTION calls `foo()` still
           // resolve (member=false).
-          if (ctx.lang === 'rust' && member) { /* no bare-fallback for untyped Rust member calls */ }
+          if (typedMiss && member) { /* no bare degrade for typed misses (see comment above) */ }
+          else if (ctx.lang === 'rust' && member) { /* no bare-fallback for untyped Rust member calls */ }
           else target = ctx.resolve(calleeName, { forCall: !member, memberCall: member })
         }
         if (target && target.id !== src) {
