@@ -31,6 +31,8 @@ describe('KNOWN ENGINE BUG — cross-grammar wasm corruption (web-tree-sitter 0.
   // (see lua.test.js). Production impact: a polyglot repo mixing affected
   // grammar pairs mis-extracts. Fix path: upgrade the web-tree-sitter +
   // tree-sitter-wasms pair (ABI-coupled). Tracked in docs/BACKLOG.md (HIGH).
+  // NB: run THIS FILE WHOLE — filtering with -t skips the scala contamination
+  // source above, the parse succeeds, and vitest flips it.fails into a failure.
   it.fails('lua parsed AFTER scala in one process keeps all functions', async () => {
     const g = await buildGraph([{ id: 'after.lua', ext: 'lua', content: `
 local function leaf()
