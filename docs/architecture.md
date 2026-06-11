@@ -247,6 +247,51 @@ The pass is **tiered by cost**, wired up in `buildSymbolGraph()`:
 - **`CS_SUBENGINE_OFF=1`** — disables ALL enrichment (escape hatch if the
   TS post-pass ever misbehaves).
 
+### Runtime tracing — the `observed` edge kind (0.0.3)
+
+Static analysis is a **floor**: computed calls (`obj[k]()`), reflection and
+DI are statically undecidable. `cs trace run -- <cmd>` (one-shot) and
+`cs trace watch -- <cmd>` (cyclic, for long-running processes) attach the V8
+CPU profiler, map sampled frames to symbols via `SymbolGraph.symbolAtLine()`
+(start/end line containment), and classify each witnessed caller→callee pair
+(`observeRuntimeEdges()`): confirms a static `call`, resolves a
+`call-candidate`, or is a **NEW dynamic edge** static analysis could not see.
+With `merge` (default) the pair becomes an **`observed`** edge — indexed into
+the real caller/callee adjacency (blast, dead-code and callers() see it)
+while `byEdgeKind` keeps its provenance distinct; the 3D layer renders it
+amber. Raw frame pairs persist in `.codesynapt/observed-edges.jsonl`
+(compacted past 512KB) with per-file **mtimes — observations on edited files
+EXPIRE** on re-apply rather than re-attaching to the wrong symbol. Both
+servers re-apply valid pairs after every graph rebuild.
+
+### Zero-silence ledger, accounting and recall-miss auto-discovery (0.0.3)
+
+- **Dynamic-site ledger** (`SymbolGraph.dynamicSites`): call sites whose
+  callee cannot even be NAMED statically (computed members, `getattr(...)()`,
+  local callbacks, unresolved bare names net of harvested imports) are
+  recorded per enclosing symbol — `dynamicSitesInImpact` rides every blast
+  answer and node views carry per-symbol counts.
+- **Accounting** (`SymbolGraph.accounting()`): every symbol gets exactly one
+  label — entry / reachable (confident call chain) / possible (candidate or
+  value-reference only) / dead — with `unexplained: 0` by construction. Dead
+  is a STATIC FLOOR; its caveats (dynamic-site count, entry-detection mode)
+  always ride along. Surfaced via `cs symbol accounting`,
+  `GET /symbol/accounting` and the MCP summary tool.
+- **Recall-miss auto-discovery**: an observed edge that LOOKS statically
+  resolvable (unique target name, same-file/imported, non-builtin) but had no
+  static edge is flagged a SUSPECT into `.codesynapt/recall-suspects.jsonl`
+  (deduped, capped) — suspicion never verdict, no auto-fix, no interruption;
+  the map is already correct at discovery because the observed edge merged
+  first. See docs/design-symbol-completeness.md for the locked safety rules.
+
+### The completeness bar (tests/lang-completeness/)
+
+All 13 symbol languages are gated by committed known-answer fixtures —
+static recall, precision (wrong-file decoys, no phantom edges), dynamic
+honesty (max candidates + zero silence), accounting and a real-repo
+regression bar with build-determinism checks — **all green simultaneously**,
+so fixing one language cannot silently regress another.
+
 Layer-2 is surfaced to AI agents through the `cs_symbol_*` MCP tools and
 the function-level `cs_blast({action:'function'})`; see
 [docs/mcp-setup.md](./mcp-setup.md).

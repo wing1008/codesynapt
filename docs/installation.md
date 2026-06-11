@@ -90,7 +90,7 @@ version:
 ```sh
 git clone https://github.com/wing1008/codesynapt.git
 cd codesynapt
-git checkout v0.0.0
+git checkout v0.0.3   # or the latest release tag
 npm ci                    # exact dependency versions from package-lock.json
 npm run dist              # build for your OS
 
