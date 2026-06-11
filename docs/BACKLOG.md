@@ -15,4 +15,6 @@
 - [ ] **⑤ 잔여 — 트레이서 미커버 영역** (PR#28 이후): ①Python은 `trace run`만 — `trace watch`(연속) 미지원 ②JVM 에이전트·.NET 프로파일러 트레이서 미구현(각각 별도 대형 공사; Java/C#는 정적바+마킹으로 커버 중) ③언더스코어 시작 파일(`_x.py`)은 스캐너 ignore라 트레이스 시 "no in-repo frames"로 침묵 — 에러 메시지에 힌트 추가 가치. (2026-06-11)
 - [ ] **it.fails 단독실행 의미론**: misc-langs의 wasm 오염 expected-fail은 `-t` 필터 단독실행 시 오염원(scala)이 skip돼 통과→fail로 뒤집힘 (2차 점검 실증). 주석 또는 가드 보강.
 - [ ] **토스트 문구 다듬기**: 비전문가 가독성 + 이름 3개 이하일 때 '…' 고정 출력 (2차 점검 LOW).
-- [ ] **HIGH: 데스크톱 watcher 간헐 사망**: 같은 날 같은 절차에서 desk_live3은 file-changed→invalidate→재빌드 작동(newly-dead e2e 성공), 이후 신선 인스턴스 2연속(desk_sig3/4)은 수정 후 25회 폴링(~100s)에도 재빌드 0(embeddings 1회뿐)·이벤트 0 — Layer-2 라이브맵·이슈알림(③⑦) 전체가 무력화됨. 재현: electron 기동→symbol summary(베이스라인)→public/backend.js 수정→재빌드 횟수 관찰. 의심: chokidar 기동 실패/이번 세션의 잦은 electron 강제종료 잔재/HMR 경합. graphVersion이 /health에 없어(기존 패리티 갭) 외부 판정도 어려움 — 패리티 수정과 함께 진단 로그 추가 가치. (2026-06-11 ⑦ e2e 중 발견)
+- [x] ~~HIGH: 데스크톱 watcher 간헐 사망~~ → **오진. 진범=유령 데스크톱**: 전날 사용자가 띄운 인스턴스가 taskkill //IM에 침묵 면역(다른 세션/권한, stderr 숨김)인 채 7707 점유 — e2e가 구코드 쌍둥이에게 질의. PowerShell Stop-Process로 제거 후 깨끗한 인스턴스에서 ⑦ 전체 체인 라이브 증명(signature changed 이벤트). 남는 제품 교훈 2건 아래. (2026-06-11)
+- [ ] **같은 프로젝트 데스크톱 중복 기동 경고**: 두 데스크톱이 같은 프로젝트를 열면 레지스트리 heartbeat 끼리 thrash + 클라이언트가 구버전 인스턴스로 오라우팅(유령 사건의 본질). 기동 시 레지스트리에 동일 projectHash의 살아있는 desktop 엔트리가 있으면 사용자에게 경고/포커스 이전 제안.
+- [ ] **newly-dead 경보 과발화 의심**: 시그니처 프로브 1개 수정에 +102 newly-dead 동반 — enrichment(TS서브엔진/임베딩) 비동기 완료 시점이 accounting 스냅샷 사이에 끼면 도달성이 출렁이는 듯. diff를 enrichment 완료 후로 옮기거나 임계 둘 가치. (2026-06-11 관찰)
