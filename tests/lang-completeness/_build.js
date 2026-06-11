@@ -11,10 +11,16 @@ const sg = require(path.resolve(__dirname, '../../packages/core/lib/symbol-graph
 
 export const { SymbolGraph } = sg
 
-export async function buildGraph(files) {
+// files: [{id, ext, content}]; fileImports (optional): { 'b.js': ['a.js'] } —
+// the Layer-1 import map the scanner normally provides, needed for
+// imported-name disambiguation across files.
+export async function buildGraph(files, fileImports = null) {
   parsers.registerAll()
   const PARSERS = sg.PARSERS
   const g = new sg.SymbolGraph()
+  if (fileImports) {
+    g.fileImports = new Map(Object.entries(fileImports).map(([k, v]) => [k, new Set(v)]))
+  }
   for (const f of files) {
     const p = PARSERS[f.ext]
     if (!p || !p.extractSymbols) continue
@@ -62,6 +68,18 @@ export function refExists(g, toName) {
 
 export function symbolNames(g) {
   return [...g.nodes.values()].map((n) => n.name)
+}
+
+// File-pinned variant: the confident edge must land on toName declared IN toFile.
+export function hasCallTo(g, fromName, toName, toFile) {
+  for (const [src, set] of g.callOut) {
+    if (!nameMatch(g.nodes.get(src), fromName)) continue
+    for (const t of set) {
+      const tn = g.nodes.get(t)
+      if (nameMatch(tn, toName) && tn.file === toFile) return true
+    }
+  }
+  return false
 }
 
 // Zero-silence ledger: forms of dynamic call sites recorded inside a symbol.
