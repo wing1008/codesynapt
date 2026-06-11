@@ -7,3 +7,4 @@
 - [x] ~~**`cs trace watch`**~~ → 구현(PR#18). 원문:: 장기실행 프로세스(dev server 등)에 inspector(CDP Profiler.start/stop 주기) 붙여 연속 관측 → 주기적 observe POST → 지도가 계속 박동. ws optionalDep 활용.
 - [x] ~~**Java/C# `super./base.` 호출 정밀화**~~ → 적용(PR#19). 원문:: Python super()와 동일 메커니즘 적용 가능 (treesitter, classStack.bases 재활용).
 - [ ] **표현식 layer / 다언어 확장**: 락된 계획 Phase 4·5.
+- [ ] **데스크톱 /health에 epoch 누락 (패리티)**: 헤드리스는 epoch 반환(재부트스트랩 커서), 데스크톱 main.cjs /health는 undefined — 순수클라가 데스크톱 백엔드에 붙을 때 epoch 기반 재부트스트랩이 무력화될 수 있음. (2026-06-11 도그푸딩 C5에서 실증)
