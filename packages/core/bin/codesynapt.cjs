@@ -1230,15 +1230,29 @@ async function main() {
         }
 
         if (sub === 'flow') {
-          // Expression layer E1: per-function dataflow facts (lazy, JS family).
-          if (!rest[0]) return die('usage: cs symbol flow <name|id> [--json]')
+          // Expression layer E1/E2: per-function dataflow facts (lazy, JS
+          // family); with a <param> argument → argument-level blast.
+          if (!rest[0]) return die('usage: cs symbol flow <name|id> [<param>] [--json]')
           const id = await resolveSymbol(rest[0])
-          const r = await req('GET', '/symbol/flow', { id })
+          const paramArg = rest[1] && !rest[1].startsWith('--') ? rest[1] : null
+          const r = await req('GET', '/symbol/flow', paramArg ? { id, q: paramArg } : { id })
           if (r.status === 404) return die(r.json?.error || `symbol not found: ${id}`)
           if (r.status !== 200) return die(r.json?.error || `failed (status ${r.status})`)
           const j = r.json
           if (asJson) { printJson(j); break }
           if (j.scope) { process.stdout.write(`${j.name}: ${j.scope}\n`); break }
+          if (paramArg) {
+            // E2 argument-level blast rendering.
+            process.stdout.write(`argument blast — ${j.name}(${paramArg})  ${j.file}:${j.line}\n`)
+            if (j.returnsParam) process.stdout.write(`  ↩ flows into this function's RETURN value\n`)
+            if (!(j.impacted || []).length) process.stdout.write(`  (no downstream call sites receive it through confident edges)\n`)
+            for (const h of j.impacted || []) {
+              process.stdout.write(`  d${h.depth}  ${h.qualifiedName}(${h.param})  ${h.file}:${h.line}\n`)
+            }
+            if (j.unresolvedTargets) process.stdout.write(`  ${j.unresolvedTargets} call(s) had no single confident target — walk stopped there (counted, not guessed)\n`)
+            if (j.truncated) process.stdout.write(`  (truncated at 100 hits)\n`)
+            break
+          }
           process.stdout.write(`flow facts — ${j.name}  ${j.file}:${j.line}\n`)
           process.stdout.write(`  params: ${(j.params || []).join(', ') || '(none)'}\n`)
           for (const c of j.calls || []) {
