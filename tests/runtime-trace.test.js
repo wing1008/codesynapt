@@ -70,3 +70,62 @@ describe('observeRuntimeEdges — classify observed vs static', () => {
     expect(r.totalSymbols).toBe(4)
   })
 })
+
+// ── Merge: observed edges join the live graph (and persistence is honest) ──
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+import { createRequire } from 'module'
+const _require = createRequire(import.meta.url)
+const traceStore = _require('../packages/core/lib/trace-store.cjs')
+
+describe('observeRuntimeEdges merge — observed edges become real graph edges', () => {
+  it('merge:true adds kind "observed" into caller/callee adjacency', () => {
+    const g = fixtureGraph()
+    const r = g.observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'b.js', el: 12 }], { merge: true }) // foo→qux: NEW dynamic
+    expect(r.newDynamic).toBe(1)
+    expect(r.merged).toBe(1)
+    // The witnessed edge is now REAL: callers/callees/blast/reachability see it.
+    expect([...(g.callOut.get('a#foo@1') || [])]).toContain('b#qux@10')
+    expect(g.callersOf('b#qux@10').map((n) => n.id)).toContain('a#foo@1')
+    // Provenance stays distinct in byEdgeKind.
+    expect(g.stats().byEdgeKind.observed).toBe(1)
+  })
+
+  it('merge is idempotent (re-observing the same edge adds nothing)', () => {
+    const g = fixtureGraph()
+    g.observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'b.js', el: 12 }], { merge: true })
+    const r2 = g.observeRuntimeEdges([{ cf: 'a.js', cl: 9, ef: 'b.js', el: 13 }], { merge: true }) // same pair, other lines
+    expect(r2.merged).toBe(0)
+    expect(g.stats().byEdgeKind.observed).toBe(1)
+  })
+
+  it('without merge the graph is untouched (report-only)', () => {
+    const g = fixtureGraph()
+    g.observeRuntimeEdges([{ cf: 'a.js', cl: 8, ef: 'b.js', el: 12 }])
+    expect(g.stats().byEdgeKind.observed).toBeUndefined()
+  })
+})
+
+describe('persisted observations — mtime staleness guard', () => {
+  it('replays pairs while files are unchanged, EXPIRES them when a file changes', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-obs-'))
+    fs.writeFileSync(path.join(dir, 'a.js'), 'function foo(){}\n')
+    fs.writeFileSync(path.join(dir, 'b.js'), 'function baz(){}\n')
+    const pairs = [{ cf: 'a.js', cl: 1, ef: 'b.js', el: 1 }]
+    expect(traceStore.appendObservedBatch(dir, pairs)).toBe(1)
+    // Unchanged → valid.
+    let loaded = traceStore.loadValidObservedPairs(dir)
+    expect(loaded.pairs.length).toBe(1)
+    expect(loaded.stale).toBe(0)
+    // Touch one involved file (content + mtime change) → the pair EXPIRES.
+    await new Promise((r) => setTimeout(r, 20))
+    fs.writeFileSync(path.join(dir, 'b.js'), 'function baz(){ return 1 }\n')
+    const t = Date.now() + 2000
+    fs.utimesSync(path.join(dir, 'b.js'), new Date(t), new Date(t))
+    loaded = traceStore.loadValidObservedPairs(dir)
+    expect(loaded.pairs.length).toBe(0)
+    expect(loaded.stale).toBe(1)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+})

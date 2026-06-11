@@ -105,20 +105,27 @@ function symbolGraphPayload(g, limit = 12000) {
   limit = Math.min(40000, Math.max(1, parseInt(limit, 10) || 12000))
   const symbols = []
   for (const n of g.nodes.values()) {
-    symbols.push({ id: n.id, file: n.file, name: n.qualifiedName || n.name, kind: n.kind, line: n.startLine })
+    const s = { id: n.id, file: n.file, name: n.qualifiedName || n.name, kind: n.kind, line: n.startLine }
+    // B-2 marker data: this symbol contains statically-unnameable call sites —
+    // the 3D layer renders an uncertainty marker. 0 omitted (payload lean).
+    const ds = g.dynamicSites?.get(n.id)?.length
+    if (ds) s.ds = ds
+    symbols.push(s)
     if (symbols.length >= limit) break
   }
   const ids = new Set(symbols.map((s) => s.id))
   const calls = []; const maxCalls = limit * 3
   for (const e of g.edges) {
-    if (e.kind !== 'call') continue
+    // 'observed' = runtime-witnessed (cs trace run) — rendered distinctly so the
+    // user sees which links static analysis could NOT find but the run proved.
+    if (e.kind !== 'call' && e.kind !== 'observed') continue
     // Carry `via` (sub-engine provenance, e.g. 'ts') so the UI can distinguish
     // type-checker-resolved edges from heuristic ones. Undefined for plain
     // AST-resolved calls — JSON drops it, so the payload stays compact.
-    if (ids.has(e.source) && ids.has(e.target)) calls.push({ s: e.source, t: e.target, via: e.via })
+    if (ids.has(e.source) && ids.has(e.target)) calls.push({ s: e.source, t: e.target, via: e.kind === 'observed' ? 'observed' : e.via })
     if (calls.length >= maxCalls) break
   }
-  return { symbols, calls, truncated: g.nodes.size > symbols.length, total: { symbols: g.nodes.size, calls: g.edges.filter((e) => e.kind === 'call').length } }
+  return { symbols, calls, truncated: g.nodes.size > symbols.length, total: { symbols: g.nodes.size, calls: g.edges.filter((e) => e.kind === 'call' || e.kind === 'observed').length } }
 }
 
 // GET /symbol/<sub>. Returns { status, body } for the SHARED endpoints, or null

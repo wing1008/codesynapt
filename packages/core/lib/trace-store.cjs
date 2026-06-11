@@ -206,6 +206,69 @@ class TraceStore {
   }
 }
 
+// ── Persisted runtime observations (observed call edges) ──
+// `cs trace run` merges witnessed call edges into the LIVE graph; the graph is
+// rebuilt on every rescan, so the raw frame pairs are persisted here and
+// re-applied after each rebuild. STALENESS GUARD: each batch records the
+// mtime of every involved file — when a file changes, its observations are
+// EXPIRED (a line-shifted mapping would silently attach the edge to the wrong
+// symbol, which would be a lie). Expired pairs are skipped and counted, never
+// silently kept.
+
+function observedFileFor(root) { return path.join(root, HISTORY_DIR_NAME, 'observed-edges.jsonl') }
+
+// pairs: [{cf,cl,ef,el}] — appends one batch line with per-file mtimes.
+function appendObservedBatch(root, pairs) {
+  if (!root || !pairs || !pairs.length) return 0
+  const mtimes = {}
+  for (const p of pairs) {
+    for (const f of [p.cf, p.ef]) {
+      if (mtimes[f] !== undefined) continue
+      try { mtimes[f] = Math.floor(fs.statSync(path.join(root, f)).mtimeMs) } catch { mtimes[f] = -1 }
+    }
+  }
+  const dir = path.join(root, HISTORY_DIR_NAME)
+  try { fs.mkdirSync(dir, { recursive: true }) } catch {}
+  try {
+    fs.appendFileSync(observedFileFor(root), JSON.stringify({ ts: Date.now(), mtimes, pairs }) + '\n')
+    return pairs.length
+  } catch { return 0 }
+}
+
+// Returns { pairs: [...still-valid pairs], stale: n } — a pair survives only if
+// BOTH involved files are unchanged since it was recorded.
+function loadValidObservedPairs(root) {
+  const out = { pairs: [], stale: 0 }
+  if (!root) return out
+  let raw
+  try { raw = fs.readFileSync(observedFileFor(root), 'utf8') } catch { return out }
+  const curMtime = new Map()
+  const mtimeOf = (f) => {
+    if (curMtime.has(f)) return curMtime.get(f)
+    let m = -2
+    try { m = Math.floor(fs.statSync(path.join(root, f)).mtimeMs) } catch {}
+    curMtime.set(f, m)
+    return m
+  }
+  const seen = new Set()
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    let batch
+    try { batch = JSON.parse(line) } catch { continue }
+    for (const p of batch.pairs || []) {
+      const key = `${p.cf}:${p.cl}>${p.ef}:${p.el}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const ok = batch.mtimes
+        && batch.mtimes[p.cf] === mtimeOf(p.cf)
+        && batch.mtimes[p.ef] === mtimeOf(p.ef)
+      if (ok) out.pairs.push(p)
+      else out.stale++
+    }
+  }
+  return out
+}
+
 module.exports = {
   TraceStore,
   computeTraceStats,
@@ -213,6 +276,9 @@ module.exports = {
   readTraceSession,
   traceDirFor,
   traceFileFor,
+  observedFileFor,
+  appendObservedBatch,
+  loadValidObservedPairs,
   HISTORY_DIR_NAME,
   TRACE_DIR_NAME,
 }
