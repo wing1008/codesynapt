@@ -103,3 +103,20 @@ class Sibling:
     expect(g.stats().declineReasons['super-external']).toBeGreaterThanOrEqual(1)
   })
 })
+
+describe('Python super() — dotted external base (inspection fix #2)', () => {
+  const FIX = `
+class Module:
+    def __init__(self):
+        pass
+
+class Net(nn.Module):
+    def __init__(self):
+        super().__init__()
+`
+  it('never phantom-links super() on nn.Module to a same-named USER class', async () => {
+    const g = await buildGraph([{ id: 'net.py', ext: 'py', content: FIX }])
+    expect(hasCall(g, 'Net.__init__', 'Module.__init__')).toBe(false)
+    expect(g.stats().declineReasons['super-external']).toBeGreaterThanOrEqual(1)
+  })
+})

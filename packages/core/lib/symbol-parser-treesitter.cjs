@@ -424,6 +424,18 @@ function walk(node, ctx) {
     }
     for (let i = 0; i < node.namedChildCount; i++) collect(node.namedChild(i))
   }
+  // Rust `use a::b::{c, d as e};` / PHP `use Ns\Fn;` — harvest every identifier
+  // leaf (over-collection is harmless: it only suppresses ledger entries for
+  // names that ARE imports, i.e. external calls, not dynamic sites).
+  if (ctx.passTwo && ctx.importedNames
+      && (t === 'use_declaration' || t === 'namespace_use_declaration')) {
+    const collectLeaves = (n, d) => {
+      if (!n || d > 6) return
+      if (n.namedChildCount === 0) { if (IDENT_TYPES.has(n.type)) ctx.importedNames.add(n.text); return }
+      for (let i = 0; i < n.namedChildCount; i++) collectLeaves(n.namedChild(i), d + 1)
+    }
+    collectLeaves(node, 0)
+  }
   // Call expressions (pass 2 only — checked via ctx.passTwo flag)
   if (ctx.passTwo && cfg.call?.includes(t)) {
     const src = ctx.fnStack[ctx.fnStack.length - 1]
@@ -656,9 +668,16 @@ function extractInheritance(node, lang) {
         if (name) { out.push({ name, kind: first ? 'extends' : 'implements' }); first = false }
       }
     } else if (ct === 'argument_list' && lang === 'python') {
-      // Python `class Foo(Bar, Baz):` — base classes as `argument_list`
+      // Python `class Foo(Bar, Baz):` — base classes as `argument_list`.
+      // DOTTED bases (`nn.Module`) keep their FULL text: collapsing to the
+      // last segment ('Module') made super().__init__() resolve CONFIDENTLY
+      // to any same-named USER class — a reproduced phantom edge (violates
+      // the "no wrong edges" rule). The full dotted name never matches a
+      // local qualifiedName, so super() on an external base now takes the
+      // honest `super-external` decline path instead.
       for (let j = 0; j < c.namedChildCount; j++) {
-        const name = walkType(c.namedChild(j))
+        const child = c.namedChild(j)
+        const name = (child && child.type === 'attribute') ? child.text : walkType(child)
         if (name) out.push({ name, kind: 'extends' })
       }
     } else if (ct === 'type_spec_list' && lang === 'go') {
@@ -1268,7 +1287,17 @@ const KEYWORDS = {
   java:       new Set(['if','else','while','for','do','switch','case','break','continue','return','new','this','super','try','catch','finally','throw','throws','class','interface','enum','extends','implements','public','private','protected','static','final','abstract','synchronized','void','int','long','short','byte','char','boolean','float','double','String','true','false','null','import','package','var']),
   kotlin:     new Set(['if','else','for','while','do','when','return','break','continue','fun','val','var','class','object','interface','enum','sealed','data','companion','public','private','internal','protected','open','final','abstract','override','suspend','inline','crossinline','noinline','this','super','it','true','false','null']),
   swift:      new Set(['if','else','for','in','while','repeat','do','switch','case','break','continue','return','throw','throws','try','catch','rethrows','defer','guard','where','as','is','let','var','func','class','struct','enum','protocol','extension','import','self','super','init','deinit','static','final','public','private','internal','open','fileprivate','true','false','nil','some','any','Self','Optional','print','String','Int','Bool','Double','Float','Array','Dictionary']),
+  // The five 2026-06-11 bar languages previously had NO kwSet at all, so their
+  // stdlib bare calls (PHP count/strlen/…) flooded the zero-silence ledger —
+  // the exact "cries wolf" class the Python import filter was built to stop.
+  php:        new Set(['if','else','elseif','for','foreach','while','do','switch','case','break','continue','return','function','class','interface','trait','extends','implements','new','echo','print','isset','unset','empty','require','require_once','include','include_once','use','namespace','public','private','protected','static','const','true','false','null','array','count','strlen','strtolower','strtoupper','substr','str_replace','sprintf','printf','implode','explode','in_array','array_map','array_filter','array_merge','array_keys','array_values','json_encode','json_decode','preg_match','preg_replace','trim','intval','floatval','strval','is_array','is_string','is_int','is_null','die','exit','list','compact','extract']),
+  cpp:        new Set(['if','else','for','while','do','switch','case','break','continue','return','new','delete','class','struct','enum','union','template','typename','namespace','using','public','private','protected','virtual','override','static','const','constexpr','inline','void','int','long','short','char','bool','float','double','auto','true','false','nullptr','this','sizeof','printf','fprintf','sprintf','malloc','calloc','realloc','free','memcpy','memset','strlen','strcmp','strcpy','assert','throw','try','catch','operator','std','move','forward','make_unique','make_shared']),
+  scala:      new Set(['if','else','for','while','do','match','case','return','def','val','var','class','object','trait','extends','with','new','import','package','implicit','override','private','protected','sealed','final','lazy','yield','true','false','null','this','super','println','print','require','assert','Some','None','Nil','List','Map','Set','Seq','Vector','Option','Either','Future','toString','apply','unapply']),
+  lua:        new Set(['if','then','else','elseif','end','for','while','repeat','until','do','function','local','return','break','and','or','not','in','true','false','nil','print','pairs','ipairs','next','type','tostring','tonumber','require','error','pcall','xpcall','assert','select','unpack','rawget','rawset','setmetatable','getmetatable','table','string','math','io','os','coroutine']),
+  bash:       new Set(['if','then','else','elif','fi','for','while','until','do','done','case','esac','function','return','break','continue','echo','printf','read','cd','exit','export','local','set','unset','shift','source','eval','exec','trap','test','true','false','let','declare','readonly','wait','kill','pwd','dirname','basename','grep','sed','awk','cat','ls','rm','cp','mv','mkdir','touch','chmod','curl','git','npm','node']),
 }
+KEYWORDS.c = KEYWORDS.cpp
+KEYWORDS.sh = KEYWORDS.bash
 
 function makeResolver(fileId, index) {
   // Two modes. `forCall=true` permits the loose "any same-named

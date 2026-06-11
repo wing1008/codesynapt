@@ -232,6 +232,9 @@ const USAGE = `CodeSynapt CLI — usage:
                               # function-level overview: symbol/edge counts,
                               #   top hubs (most-called functions), coverage.
                               #   (Layer-2 equivalent of \`cs summary\`.)
+  cs symbol accounting [--json]
+                              # EVERY symbol labelled: entry / reachable /
+                              #   possible / dead (static floor, with caveats).
   cs symbol find <query> [--json]
                               # functions/classes/… whose NAME contains <query>.
                               #   prints  id  kind  file:line.
@@ -442,7 +445,7 @@ async function runHeadlessServe(args) {
 
   let currentRoot = abs
   const scanner = new Scanner(abs)
-  const { startControlServer, stopControlServer, epoch: csEpoch, inFlight: csInFlight } = createControlServer({
+  const { startControlServer, stopControlServer, epoch: csEpoch, inFlight: csInFlight, lastRequestAt: csLastReqAt } = createControlServer({
     scanner,
     getCurrentRoot: () => currentRoot,
     // No IPC callbacks in headless mode — onBlast/onFocus/onOpen omitted
@@ -516,6 +519,9 @@ async function runHeadlessServe(args) {
             // In-flight guard: never exit while still serving a request (a big
             // repo's first /symbol/summary build can outlive the grace window).
             if (typeof csInFlight === 'function' && csInFlight() > 0) return
+            // Activity guard: an actively-used daemon (CLI hitting it without a
+            // session lease — every plain `cs <cmd>`) must not reap mid-use.
+            if (typeof csLastReqAt === 'function' && Date.now() - csLastReqAt() < 30000) { _emptyTicks = 0; return }
             process.stderr.write('[cs] no live sessions/viewers — daemon self-exit\n')
             try { registry.remove('daemon', phash) } catch {}
             process.exit(0)
@@ -1200,7 +1206,7 @@ async function main() {
             for (const d of j.deadSymbols.slice(0, 30)) {
               process.stdout.write(`  [${(d.kind || '?').padEnd(8)}] ${d.name}  ${d.file}:${d.line}\n`)
             }
-            if (j.deadSymbols.length > 30) process.stdout.write(`  … ${j.deadSymbols.length - 30} more (--json for all)\n`)
+            if (j.deadSymbols.length > 30) process.stdout.write(`  … ${j.deadSymbols.length - 30} more shown via --json${j.deadTruncated ? ` (server caps the list at 200 of ${j.dead})` : ''}\n`)
           }
           break
         }
@@ -1305,7 +1311,7 @@ async function main() {
           break
         }
 
-        return die(`unknown symbol subcommand: ${sub}\n  valid: summary | find | callers | callees | blast | node`)
+        return die(`unknown symbol subcommand: ${sub}\n  valid: summary | accounting | find | callers | callees | blast | node`)
       }
       case 'safety': {
         if (!args[0]) return die('usage: cs safety <id> [--deep] [--json] [--locale ko|en]')
@@ -2491,7 +2497,10 @@ async function main() {
           _holdLease()
           process.stdout.write(`watching: ${cmd.join(' ')}\n  (inspector cycles every ${intervalMs / 1000}s — observed edges merge into the live map; Ctrl-C to stop)\n  note: attaches to the FIRST node process the command starts.\n\n`)
           const nodeOpts = `${process.env.NODE_OPTIONS || ''} --inspect=0`.trim()
-          const ch = cp.spawn(cmd[0], cmd.slice(1), {
+          // One quoted command STRING for shell:true (avoids DEP0190 + unquoted
+          // space breakage — see the trace run handler).
+          const watchCmd = cmd.map((c) => (/\s/.test(c) ? `"${c.replace(/"/g, '\\"')}"` : c)).join(' ')
+          const ch = cp.spawn(watchCmd, {
             cwd: PROJECT_ROOT, stdio: ['inherit', 'inherit', 'pipe'], shell: true,
             env: { ...process.env, NODE_OPTIONS: nodeOpts },
           })
@@ -2590,16 +2599,23 @@ async function main() {
           const flagPart = args.slice(0, args.indexOf('--') >= 0 ? args.indexOf('--') : args.length)
           const doMerge = !flagPart.includes('--no-merge')
           const cp = require('child_process')
+          // One quoted command STRING for shell:true — the (cmd, args[]) form
+          // both triggers Node's DEP0190 warning on every run and concatenates
+          // args unquoted, silently breaking when a piece contains spaces.
+          const shellCmd = cmd.map((c) => (/\s/.test(c) ? `"${c.replace(/"/g, '\\"')}"` : c)).join(' ')
           const profDir = path.join(PROJECT_ROOT, '.codesynapt', 'traces', `prof-${Date.now()}`)
           try { fs.mkdirSync(profDir, { recursive: true }) } catch (e) { return die(`cannot create profile dir: ${e.message}`) }
           // Hold a session lease for the whole run so an idle `cs serve` daemon
           // does NOT idle-reap mid-trace (a long `npm test` easily outlives the
           // ~20s grace). See the shared _holdLease above.
           _holdLease()
-          const nodeOpts = `${process.env.NODE_OPTIONS || ''} --cpu-prof --cpu-prof-dir=${profDir}`.trim()
+          // profDir is QUOTED — NODE_OPTIONS supports double-quoted values, and
+          // an unquoted path with spaces ("OneDrive - Corp", "My Projects")
+          // silently broke profiling on very common Windows setups.
+          const nodeOpts = `${process.env.NODE_OPTIONS || ''} --cpu-prof --cpu-prof-dir="${profDir}"`.trim()
           process.stdout.write(`tracing: ${cmd.join(' ')}\n  (CPU profiler attached — observed edges cover only paths the run exercises)\n\n`)
           const code = await new Promise((resolve) => {
-            const ch = cp.spawn(cmd[0], cmd.slice(1), {
+            const ch = cp.spawn(shellCmd, {
               cwd: PROJECT_ROOT, stdio: 'inherit', shell: true,
               env: { ...process.env, NODE_OPTIONS: nodeOpts },
             })

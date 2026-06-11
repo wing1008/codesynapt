@@ -156,9 +156,19 @@ available; pick whichever matches the question.
 
 ### `cs_symbol_summary` — symbol-mode overview (call first for symbol work)
 
-No arguments. Returns total symbol count, breakdown by kind
-(function / class / struct / …) and by edge kind. The first call after a
-project is loaded triggers the symbol scan (it is built lazily).
+No arguments for the default summary. Returns total symbol count, breakdown
+by kind (function / class / struct / …) and by edge kind — including honesty
+counters: `dynamicSiteCount` (call sites static analysis cannot even name),
+`declineReasons` (stdlib-correct vs genuinely-unresolved declines) and
+`byEdgeKind.observed` (runtime-witnessed edges merged by `cs trace run` /
+`cs trace watch` — these are REAL calls a run proved, including dynamic ones
+static analysis cannot see). The first call after a project is loaded
+triggers the symbol scan (it is built lazily).
+
+Pass `{ "accounting": true }` for the completeness partition instead: every
+symbol labelled entry / reachable / possible / dead with `unexplained: 0` —
+use it for "what code is unused?" questions, and treat `dead` as a STATIC
+FLOOR (its caveats ride along), never proof.
 
 **WHEN**: once at the start of a function-level investigation.
 

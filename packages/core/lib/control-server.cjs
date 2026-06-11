@@ -1704,8 +1704,14 @@ function createControlServer(opts) {
       }
       // POST /symbol/observe — runtime tracing (Leg C). Body { edges:[{cf,cl,
       //   ef,el}] } of OBSERVED caller→callee frames; we map each to the
-      //   enclosing symbol and classify against the static graph. Read-only (no
-      //   mutation, no auth — same trust level as the GET symbol views).
+      //   enclosing symbol and classify against the static graph.
+      //   TRUST NOTE (the old comment falsely said "no mutation"): with
+      //   merge!==false this ADDS 'observed' edges to the live graph and
+      //   appends to .codesynapt/. It stays unauthenticated like the GET views
+      //   because the server binds loopback-only and the data written is
+      //   derived, additive and capped — but it is a mutation, and if
+      //   CS_AUTH_TOKEN-style gating ever extends to symbol routes this
+      //   endpoint should be included.
       if (req.method === 'POST' && seg0 === 'symbol' && rest[0] === 'observe') {
         let bodyChunks = [], bodyLen = 0, tooBig = false
         req.on('data', (c) => {
@@ -2281,6 +2287,7 @@ function createControlServer(opts) {
   // ── Server lifecycle ──────────────────────────────────────────
   let server = null
   let _inFlight = 0
+  let _lastReqAt = 0
   function startControlServer(port, host = '127.0.0.1') {
     return new Promise((resolve, reject) => {
       if (server) {
@@ -2297,6 +2304,7 @@ function createControlServer(opts) {
       _inFlight = 0
       server.on('request', (rq, rs) => {
         _inFlight++
+        _lastReqAt = Date.now()
         rs.on('close', () => { _inFlight = Math.max(0, _inFlight - 1) })
       })
       server.listen(port, host, () => {
@@ -2317,7 +2325,7 @@ function createControlServer(opts) {
     })
   }
 
-  return { handleControlRequest, startControlServer, stopControlServer, epoch, inFlight: () => _inFlight }
+  return { handleControlRequest, startControlServer, stopControlServer, epoch, inFlight: () => _inFlight, lastRequestAt: () => _lastReqAt }
 }
 
 module.exports = { createControlServer }
