@@ -1966,7 +1966,14 @@ async function handleControlRequest(req, res) {
           direction: url.searchParams.get('direction'),
         }
         const r = symbolViews.handleSymbolView(g, sub, params,
-          { files: scanner.files, supportedExts: SUPPORTED_EXTS })
+          { files: scanner.files, supportedExts: SUPPORTED_EXTS,
+            // Root-scoped whole-file reader (flow E1) — parity with control-server.
+            readFile: (file) => {
+              const rootAbs = path.resolve(currentRoot || '')
+              const fullAbs = path.resolve(path.join(currentRoot || '', file))
+              if (fullAbs !== rootAbs && !fullAbs.startsWith(rootAbs + path.sep)) return null
+              return fs.readFileSync(fullAbs, 'utf8')
+            } })
         if (r) return writeJson(res, r.status, r.status === 200 ? withMeta(r.body) : r.body)
         if (sub === 'node') {
           const n = g.nodes.get(params.id)
