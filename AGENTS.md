@@ -124,10 +124,16 @@ docs/                 User-facing docs
 and MCP server (`packages/core/bin/codesynapt-mcp.cjs`) are both thin wrappers around
 that HTTP API — they don't talk to the scanner directly. This means:
 
-- The desktop app must be running for CLI / MCP to work
-- Adding a new graph capability = add an HTTP endpoint in `main.cjs`,
-  then surface it in both `packages/core/bin/codesynapt.cjs` (command) and
-  `packages/core/bin/codesynapt-mcp.cjs` (tool definition)
+- A backend must be running for CLI / MCP — the desktop app OR the headless
+  `cs serve` daemon (the MCP server also auto-starts its own backend when
+  none is up; per-project discovery goes through the daemon registry)
+- Adding a new graph capability = add the HTTP endpoint in **BOTH servers**
+  — `electron/main.cjs` AND `packages/core/lib/control-server.cjs` (shared
+  logic belongs in `packages/core/lib/symbol-views.cjs` so they cannot
+  drift) — then surface it in `packages/core/bin/codesynapt.cjs` (command)
+  and `packages/core/bin/codesynapt-mcp.cjs` (tool definition). Skipping
+  one server is how `/symbol/observe` 404'd for every desktop user while
+  working headless (0.0.3 inspection finding).
 - UI control commands (`POST /focus/:id`, `/open/:id`) relay through
   `mainWindow.webContents.send('control:focus'|'control:open'|...)`
   → renderer listens via the preload `onControl` bridge
