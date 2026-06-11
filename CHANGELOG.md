@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.0.4 — beta (2026-06-12)
+
+> Beta / pre-release — APIs and formats may still change.
+
+### Added — Python runtime tracing
+- **`cs trace run -- python app.py`** now records real Python call edges
+  through the same observe/merge pipeline as the Node tracer: a
+  `sys.setprofile` bootstrap captures in-repo caller→callee pairs, filters
+  site-packages, survives a crashing script, and the witnessed edges merge
+  into the live graph (amber in 3D) — including dynamic calls
+  (`globals()[name]()`) static analysis cannot see.
+
+### Added — the expression layer (file → function → **expression**)
+- **`cs symbol flow <name|id>`** — per-function dataflow facts, computed
+  lazily for one function (never project-wide): which parameter / local /
+  call-result / literal flows into each call argument, plus return
+  provenance. CERTAIN flows only (direct identifiers + simple binding
+  chains); object/closure/mutation flows are counted in `unresolvedFlows`,
+  never guessed. Covers the reference four: **JS/TS, Python, Java, C#**.
+- **`cs symbol flow <name|id> <param>`** — argument-level blast: "if I
+  change THIS parameter, which downstream call sites receive the value?"
+  Walks confident call edges only; ambiguous targets stop the walk and are
+  counted (JS family in this release).
+- **Signature-change alerts**: editing a function's parameter list raises an
+  immediate desktop toast + a trace-timeline `issue` entry with the caller
+  count, pointing at `cs symbol flow` for the argument impact. Line-shift
+  proof keys; colliding same-named object methods are excluded rather than
+  false-flagged.
+
+### Fixed / hardened
+- Desktop `/health` gains `epoch` / `graphVersion` / `traceVersion`
+  (pure-client re-bootstrap against a desktop backend was disabled).
+- Lua bare calls were all misclassified as member calls — the zero-silence
+  ledger was mute for Lua and plain user calls hit the builtin guard.
+- **Duplicate-desktop warning**: a second desktop opening the same project
+  now warns loudly (it silently fought the first over discovery — clients
+  could flip-flop onto a stale instance).
+- newly-unreachable alerts suppress mass flips (>30 — an enrichment-timing
+  baseline artifact, not real orphans).
+- Trace "no frames" messages hint at scan-ignore rules (underscore-prefixed
+  files traced to silence).
+
 ## 0.0.3 — beta (2026-06-11)
 
 > Beta / pre-release — APIs and formats may still change.
