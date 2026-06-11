@@ -312,12 +312,15 @@ function walk(node, ctx) {
       ctx.symbols.push(sym)
       const propTypes = new Map()
       if (ctx.passTwo && ctx.lang === 'python') harvestPyClassProps(node, propTypes, ctx)
-      ctx.classStack.push({ name, sym, propTypes })
+      // bases: the declared parent names, kept on the stack entry so
+      // `super().method()` can resolve to the base statically (Python first
+      // base = the MRO next class for the common case).
+      const supers = ctx.passTwo ? extractInheritance(node, ctx.lang) : []
+      ctx.classStack.push({ name, sym, propTypes, bases: supers.map((s) => s.name) })
       pushedCls = true
       // Inheritance edges (pass 2 only — we need every symbol indexed
       // first before we can resolve the parent name).
       if (ctx.passTwo) {
-        const supers = extractInheritance(node, ctx.lang)
         for (const { name: parentName, kind } of supers) {
           const target = ctx.resolve(parentName, { forCall: true })
           if (!target || target.id === sym.id) continue
@@ -420,9 +423,16 @@ function walk(node, ctx) {
         // links and is never mis-guessed; unknown receivers fall through to the
         // bare fallback. Recovers real `self.repo.save()`-style edges the
         // untyped path declines.
+        let superUnresolved = false
         if (ctx.lang === 'python' && ctx.resolveQualified) {
           const rc = pyReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
+          // `super().m()` that did NOT resolve (external base like nn.Module,
+          // or base extraction missed): the target is the base's m and NOTHING
+          // else — the bare fallback and the candidate spray can only produce
+          // wrong answers (sibling classes' same-named methods). Suppress both
+          // and decline with an explicit reason instead.
+          if (!target && pyIsSuperCall(node)) superUnresolved = true
         } else if (ctx.lang === 'go' && ctx.resolveQualified) {
           const rc = goReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
@@ -445,7 +455,7 @@ function walk(node, ctx) {
         // guess is a phantom), so member calls resolve same-file/imported only
         // + reject builtin method names. Matches the babel parser, precision-
         // first. Typed members were already resolved above (Python qualified).
-        if (!target) {
+        if (!target && !superUnresolved) {
           const member = isMemberCallNode(node)
           // Rust: an untyped MEMBER call (`x.method()` / `Vec::with`) whose
           // receiver type we couldn't resolve is almost always a std-library
@@ -467,6 +477,12 @@ function walk(node, ctx) {
               line: node.startPosition.row + 1,
             })
           }
+        } else if (superUnresolved) {
+          // Honest decline — counted, never silently dropped, and NO candidate
+          // spray (the real target — the external/unresolved base's method — is
+          // not among any user-code candidates, so a spray would violate the
+          // "real target is among these" guarantee).
+          ctx.index?._decline?.('super-external', calleeName, ctx.fileId)
         } else if (!target && ctx.candidates) {
           // Dynamic candidate leg: no single static target → expose the maximal
           // honest candidate set as isolated `call-candidate` edges (not in the
@@ -805,8 +821,30 @@ function pyObjType(obj, ctx) {
     }
     return null
   }
-  if (obj.type === 'call') { const n = pyResolveCalledNode(obj, ctx); return n?.returnType || null }
+  if (obj.type === 'call') {
+    // `super().method()` — the receiver IS statically known: the enclosing
+    // class's first base (Python MRO next for the common case). Lets every
+    // `super().__init__()` resolve precisely instead of spraying candidates
+    // to every class's __init__ (measured: 3009/4377 candidates on one repo —
+    // and a GUARANTEE VIOLATION when the base is external, since the real
+    // target was not among the sprayed user candidates).
+    const fnNode = obj.childForFieldName?.('function')
+    if (fnNode?.type === 'identifier' && fnNode.text === 'super') {
+      return ctx.classStack[ctx.classStack.length - 1]?.bases?.[0] || null
+    }
+    const n = pyResolveCalledNode(obj, ctx); return n?.returnType || null
+  }
   return null
+}
+
+// Is this Python call `super().something(...)`?
+function pyIsSuperCall(callNode) {
+  const fn = callNode.childForFieldName?.('function')
+  if (!fn || fn.type !== 'attribute') return false
+  const obj = fn.childForFieldName?.('object')
+  if (!obj || obj.type !== 'call') return false
+  const inner = obj.childForFieldName?.('function')
+  return !!inner && inner.type === 'identifier' && inner.text === 'super'
 }
 // Symbol node a call resolves to (one receiver level; bounded by AST depth for
 // chains). Used only for reading the target's return type — precision-safe

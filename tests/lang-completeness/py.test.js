@@ -61,3 +61,45 @@ describe('symbol-completeness bar — Python', () => {
     expect(dynamicSiteForms(g, 'dispatch')).toContain('indirect')
   })
 })
+
+describe('symbol-completeness bar — Python super() resolution (Leg A)', () => {
+  const SUPER_FIX = `
+class Base:
+    def setup(self):
+        return 1
+
+class Child(Base):
+    def init(self):
+        return super().setup()      # EDGE init -> Base.setup (statically known)
+
+class FromExternal(SomeExternalLib):
+    def __init__(self):
+        super().__init__()          # base is EXTERNAL: decline honestly,
+                                    # NEVER spray candidates to sibling __init__s
+
+class Sibling:
+    def __init__(self):
+        pass
+`
+  it('super().method() resolves PRECISELY to the base class method', async () => {
+    const g = await buildGraph([{ id: 'sup.py', ext: 'py', content: SUPER_FIX }])
+    expect(hasCall(g, 'init', 'Base.setup')).toBe(true)
+  })
+
+  it('external-base super(): no phantom, no candidate spray, counted decline', async () => {
+    const g = await buildGraph([{ id: 'sup.py', ext: 'py', content: SUPER_FIX }])
+    // No confident edge to anything (the real target is external).
+    expect(hasCall(g, 'FromExternal.__init__', 'Sibling.__init__')).toBe(false)
+    // CRITICAL: no candidate to the sibling's __init__ either — the real
+    // target is NOT among user candidates, so a spray would be a lie.
+    let sprayed = false
+    for (const [src, set] of g.candOut) {
+      const sn = g.nodes.get(src)
+      if (sn?.qualifiedName !== 'FromExternal.__init__') continue
+      for (const t of set) if (g.nodes.get(t)?.qualifiedName === 'Sibling.__init__') sprayed = true
+    }
+    expect(sprayed).toBe(false)
+    // Counted, not silent.
+    expect(g.stats().declineReasons['super-external']).toBeGreaterThanOrEqual(1)
+  })
+})
