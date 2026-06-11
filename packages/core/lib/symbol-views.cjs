@@ -184,8 +184,8 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
       const n = g.nodes.get(id)
       if (!n) return { status: 404, body: { error: 'symbol not found', id } }
       const ext = (n.file.split('.').pop() || '').toLowerCase()
-      if (!['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs'].includes(ext)) {
-        return { status: 200, body: { id, name: n.qualifiedName || n.name, file: n.file, scope: 'E1 covers the JS family only — other languages are planned increments (docs/design-expression-layer.md).' } }
+      if (!['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'pyw', 'pyi', 'java', 'cs'].includes(ext)) {
+        return { status: 200, body: { id, name: n.qualifiedName || n.name, file: n.file, scope: 'flow covers JS/TS, Python, Java and C# (the reference four) — remaining languages follow the proven template (docs/design-expression-layer.md).' } }
       }
       if (typeof ctx.readFile !== 'function') return { status: 501, body: { error: 'flow unavailable on this server (no file reader wired)' } }
       let src = null
@@ -196,6 +196,10 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
       // E2: ?param=<name> → argument-level blast ("change THIS param — which
       // downstream call sites receive the value"), walked over confident call
       // edges only; ambiguous targets stop the walk and are counted.
+      const jsFamily = ['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs'].includes(ext)
+      if (params.q && params.q !== '' && !jsFamily) {
+        return { status: 200, body: { id, name: n.qualifiedName || n.name, file: n.file, scope: 'argument-level blast (E2) is JS-family for now — multilang follows the flow-facts template.' } }
+      }
       if (params.q && params.q !== '') {
         const blast = flowMod.argBlast(g, ctx.readFile, n, params.q, { depth: parseInt(params.depth, 10) || 4 })
         return { status: 200, body: {
@@ -204,12 +208,11 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
           note: 'Argument-level blast over CONFIDENT call edges only — an ambiguous/unknown call target stops the walk (unresolvedTargets), never guessed.',
         } }
       }
-      const facts = flowMod.extractFlow(src, n.file, { name: n.name, startLine: n.startLine, endLine: n.endLine })
-      return { status: 200, body: {
+      return Promise.resolve(flowMod.extractFlowAuto(src, n.file, { name: n.name, startLine: n.startLine, endLine: n.endLine })).then((facts) => ({ status: 200, body: {
         id, name: n.qualifiedName || n.name, file: n.file, line: n.startLine,
         ...facts,
-        note: 'CERTAIN flows only (direct identifiers + simple const/let chains); object/closure/mutation flows are counted in unresolvedFlows, never guessed.',
-      } }
+        note: 'CERTAIN flows only (direct identifiers + simple binding chains); object/closure/mutation flows are counted in unresolvedFlows, never guessed.',
+      } }))
     }
     case 'accounting': {
       // Accounting completeness (every symbol labelled; unexplained 0 by

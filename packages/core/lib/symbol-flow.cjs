@@ -230,4 +230,16 @@ function signatureDelta(prevMap, g) {
   return out
 }
 
-module.exports = { extractFlow, argBlast, collectSignatures, signatureDelta }
+// Language-routing entry: JS family -> the sync babel walker; py/java/cs ->
+// the tree-sitter walker (symbol-flow-ts.cjs); others -> unsupported note.
+async function extractFlowAuto(source, fileId, sym) {
+  const ext = (fileId.split(".").pop() || "").toLowerCase()
+  if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext)) return extractFlow(source, fileId, sym)
+  let tsf
+  try { tsf = require("./symbol-flow-ts.cjs") } catch { tsf = null }
+  const lang = tsf && tsf.TS_FLOW_EXT[ext]
+  if (lang) return tsf.extractFlowTS(source, lang, sym)
+  return { params: [], calls: [], returns: [], unresolvedFlows: 0, capped: false, unsupported: true }
+}
+
+module.exports = { extractFlow, extractFlowAuto, argBlast, collectSignatures, signatureDelta }
