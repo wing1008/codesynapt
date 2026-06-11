@@ -2696,7 +2696,7 @@ async function main() {
             if (!pairs.length) {
               _releaseLease()
               try { fs.rmSync(profDir, { recursive: true, force: true }) } catch {}
-              process.stdout.write(`\nno in-repo python frames observed (script outside the project, or it crashed before any call). exit=${code}\n`)
+              process.stdout.write(`\nno in-repo python frames observed (script outside the project, ignored by scan rules — e.g. _underscore-prefixed files — or crashed before any call). exit=${code}\n`)
               break
             }
           } else {
@@ -2724,7 +2724,7 @@ async function main() {
           try { profiles = fs.readdirSync(profDir).filter((f) => f.endsWith('.cpuprofile')) } catch {}
           if (!profiles.length) {
             _releaseLease()
-            process.stdout.write(`\nno .cpuprofile produced (command not a Node process, or it crashed before exit). exit=${code}\n`)
+            process.stdout.write(`\nno .cpuprofile produced (command not a Node process, file ignored by scan rules — e.g. _underscore prefix — or it crashed before exit). exit=${code}\n`)
             break
           }
           process.stderr.write(`  ${profiles.length} profile(s) collected, extracting call edges…\n`)

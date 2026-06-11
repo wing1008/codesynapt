@@ -1568,6 +1568,12 @@ async function handleControlRequest(req, res) {
         // control-server /health. scanPhase: 'scanning' | 'building' | 'ready'.
         initialScanComplete: scanner ? scanner.initialScanComplete === true : false,
         scanPhase: scanner ? (scanner.scanPhase || (scanner.initialScanComplete ? 'ready' : 'scanning')) : 'scanning',
+        // Parity with the headless /health (dogfood-found gap): pure clients
+        // attached to a DESKTOP backend re-bootstrap on epoch change and cursor
+        // on graphVersion - undefined here disabled both.
+        epoch: DESKTOP_EPOCH,
+        graphVersion: scanner ? (scanner.snapshotVersion || 0) : 0,
+        traceVersion: _trace ? _trace.log.length : 0,
       })
     }
 
@@ -1927,7 +1933,13 @@ async function handleControlRequest(req, res) {
               const deadNow = new Set(acc.dead)
               if (_prevDeadSet) {
                 const newlyDead = [...deadNow].filter((id) => !_prevDeadSet.has(id))
-                if (newlyDead.length) {
+                // Overfire guard (observed: +102 on a one-param probe —
+                // async enrichment landing between accounting snapshots makes
+                // reachability swing). A mass flip is a baseline artifact, not
+                // 102 real orphans: suppress the alert, keep one log line.
+                if (newlyDead.length > 30) {
+                  console.warn('[symbol] newly-dead diff suppressed (' + newlyDead.length + ' — baseline instability, likely enrichment timing)')
+                } else if (newlyDead.length) {
                   const names = newlyDead.slice(0, 8).map((id) => { const n = g.nodes.get(id); return n ? (n.qualifiedName || n.name) : id })
                   mainWindow?.webContents.send('symbol-issues', { newlyDead: names, total: newlyDead.length, dynamicSiteCount: acc.dynamicSiteCount })
                   emitTrace('issue', `newly unreachable after edit: ${names.slice(0, 3).join(', ')}${newlyDead.length > 3 ? ` +${newlyDead.length - 3}` : ''} (static floor — dynamic/framework entries may still invoke)`)
@@ -2529,6 +2541,19 @@ function registerDesktopDaemon() {
     if (_deskRegPhash && _deskRegPhash !== phash) {   // folder swapped → drop old entry
       try { _deskRegistry.remove('daemon', _deskRegPhash) } catch {}
     }
+    // GHOST-TWIN guard (2026-06-11 incident): a SECOND desktop on the same
+    // project silently fought the first over the registry heartbeat - clients
+    // flip-flopped between instances (one possibly running stale code). Warn
+    // loudly instead of competing in silence.
+    try {
+      const existing = _deskRegistry.readDaemon(phash, 60000)
+      if (existing && existing.desktop && existing.pid !== process.pid && existing.epoch !== DESKTOP_EPOCH) {
+        const msg = 'another desktop already serves this project (pid ' + existing.pid + ', port ' + existing.port + ') - two instances thrash discovery; close one.'
+        console.warn('[cs] ' + msg)
+        try { emitTrace('issue', 'duplicate desktop: ' + msg) } catch {}
+        setTimeout(() => { try { mainWindow?.webContents.send('error', { message: '⚠ ' + msg }) } catch {} }, 3000)
+      }
+    } catch {}
     _deskRegPhash = phash
     const touch = () => { try { _deskRegistry.touch('daemon', phash, {
       projectRoot: _deskRegistry.canonicalRoot(currentRoot), port: controlPort,

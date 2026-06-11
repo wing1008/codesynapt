@@ -1337,6 +1337,16 @@ function makeResolver(fileId, index) {
 // names (.map/.get/.then…) instead of grabbing a same-file free function of
 // that name — the same guard the babel JS parser uses.
 function isMemberCallNode(callNode) {
+  // Lua wraps EVERY callee in a variable node - a bare call is variable >
+  // single identifier, a member/colon call has a deeper shape. Without this,
+  // all Lua calls counted as member calls: the zero-silence ledger was MUTE
+  // for Lua and the builtin guard rejected plain user calls (2026-06-05 bug,
+  // confirmed in the round-2 inspection).
+  {
+    const fn0 = callNode.childForFieldName?.("function") || callNode.namedChild(0)
+    if (fn0 && fn0.type === "variable" && fn0.namedChildCount === 1
+        && IDENT_TYPES.has(fn0.namedChild(0).type)) return false
+  }
   const fn = callNode.childForFieldName?.('function') || callNode.childForFieldName?.('name')
   if (fn && NAV_TYPES.has(fn.type)) return true
   for (let i = 0; i < callNode.namedChildCount; i++) {
