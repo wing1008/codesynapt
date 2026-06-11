@@ -59,3 +59,31 @@ describe('symbol-completeness bar — C#', () => {
     expect(r.dynamicPatterns).toContain('reflection')
   })
 })
+
+describe('symbol-completeness bar — C# base. resolution (Leg A)', () => {
+  const SUPER_FIX = `
+class Parent {
+  public int Setup() { return 1; }
+}
+class Kid : Parent {
+  int Init() { return base.Setup(); }    // EDGE Init -> Parent.Setup (statically known)
+}
+class FromExternal : SomeLibBase {
+  void Boot() { base.Boot(); }           // parent EXTERNAL: decline, NEVER spray
+}
+class Sibling {
+  public int Boot() { return 9; }
+}
+`
+  it('base.Method() resolves PRECISELY to the parent class method', async () => {
+    const g = await buildGraph([{ id: 'Sup.cs', ext: 'cs', content: SUPER_FIX }])
+    expect(hasCall(g, 'Init', 'Parent.Setup')).toBe(true)
+  })
+
+  it('external-parent base.: no phantom, no candidate spray, counted decline', async () => {
+    const g = await buildGraph([{ id: 'Sup.cs', ext: 'cs', content: SUPER_FIX }])
+    expect(hasCall(g, 'FromExternal.Boot', 'Sibling.Boot')).toBe(false)
+    expect(hasCandidate(g, 'FromExternal.Boot', 'Sibling.Boot')).toBe(false)
+    expect(g.stats().declineReasons['super-external']).toBeGreaterThanOrEqual(1)
+  })
+})

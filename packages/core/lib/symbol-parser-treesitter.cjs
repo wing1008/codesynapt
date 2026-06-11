@@ -439,6 +439,10 @@ function walk(node, ctx) {
         } else if (RECV_OF[ctx.lang] && ctx.resolveQualified) {
           const rc = genericReceiverType(node, ctx)
           if (rc) target = ctx.resolveQualified(`${rc}.${calleeName}`)
+          // `super.m()` / `base.M()` that did not resolve (external/unresolved
+          // parent): the target is the parent's m and NOTHING else — suppress
+          // the bare fallback and the candidate spray (mirrors Python super()).
+          if (!target && isSuperBaseReceiver(node, ctx.lang)) superUnresolved = true
         }
         // Implicit-this bare call: in Java/C#/Kotlin/Swift/Scala/C++ a bare
         // `save()` inside a method means `this.save()` — resolve it to the
@@ -1116,10 +1120,28 @@ function genericHarvest(fnNode, map, ctx) {
   ctx._harvestRoot = fnNode
   genericScanDecls(fnNode, map, ctx, lang)
 }
+// Is this member call's receiver the parent-class keyword (`super.m()` in
+// Java/Kotlin, `base.M()` in C#)? Mirrors the Python super() handling.
+function isSuperBaseReceiver(callNode, lang) {
+  const rf = RECV_OF[lang]
+  if (!rf) return false
+  const r = rf(callNode)
+  if (!r) return false
+  return r.type === 'super' || r.type === 'super_expression' || r.type === 'base_expression'
+      || r.text === 'super' || r.text === 'base'
+}
 function genericReceiverType(callNode, ctx) {
   const rf = RECV_OF[ctx.lang]
   if (!rf) return null
   const recv = rf(callNode)
+  // `super.m()` / `base.M()`: the receiver IS statically known — the enclosing
+  // class's first declared parent (kept on the class stack). Without this the
+  // call fell to the bare fallback and sprayed candidates to every same-named
+  // method (the same guarantee violation the Python super() fix closed).
+  if (recv && (recv.type === 'super' || recv.type === 'super_expression' || recv.type === 'base_expression'
+               || recv.text === 'super' || recv.text === 'base')) {
+    return ctx.classStack[ctx.classStack.length - 1]?.bases?.[0] || null
+  }
   const nm = recvName(recv)
   if (!nm) return null
   if (nm === 'this' || nm === 'self') return ctx.classStack[ctx.classStack.length - 1]?.name || null

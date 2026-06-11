@@ -60,3 +60,31 @@ describe('symbol-completeness bar — Java', () => {
     expect(r.dynamicPatterns).toContain('reflection')
   })
 })
+
+describe('symbol-completeness bar — Java super. resolution (Leg A)', () => {
+  const SUPER_FIX = `
+class Parent {
+  int setup() { return 1; }
+}
+class Kid extends Parent {
+  int init() { return super.setup(); }   // EDGE init -> Parent.setup (statically known)
+}
+class FromExternal extends SomeLibBase {
+  void boot() { super.boot(); }          // parent EXTERNAL: decline, NEVER spray
+}
+class Sibling {
+  int boot() { return 9; }
+}
+`
+  it('super.method() resolves PRECISELY to the parent class method', async () => {
+    const g = await buildGraph([{ id: 'Sup.java', ext: 'java', content: SUPER_FIX }])
+    expect(hasCall(g, 'init', 'Parent.setup')).toBe(true)
+  })
+
+  it('external-parent super.: no phantom, no candidate spray, counted decline', async () => {
+    const g = await buildGraph([{ id: 'Sup.java', ext: 'java', content: SUPER_FIX }])
+    expect(hasCall(g, 'FromExternal.boot', 'Sibling.boot')).toBe(false)
+    expect(hasCandidate(g, 'FromExternal.boot', 'Sibling.boot')).toBe(false)
+    expect(g.stats().declineReasons['super-external']).toBeGreaterThanOrEqual(1)
+  })
+})
