@@ -518,7 +518,12 @@ async function runHeadlessServe(args) {
           const sess = registry.readLive('session', { ttlMs: _LEASE_TTL, filter: (s) => { try { return registry.projectHash(s.projectRoot) === phash } catch { return false } } })
           const view = registry.readLive('viewer', { ttlMs: _LEASE_TTL, filter: (v) => v.attachedProjectHash === phash })
           _emptyTicks = (sess.length + view.length === 0) ? _emptyTicks + 1 : 0
-          if (Date.now() - _bornAt > _GRACE_MS && _emptyTicks >= _EMPTY_LIMIT) {
+          // Only an AUTO-spawned daemon (via `cs ensure`, lifecycle-managed by
+          // its sessions) self-exits when idle. A daemon a user launched
+          // directly with `cs serve` advertises "Ctrl-C to stop" and must stay
+          // up until the user stops it (insp-004: it was self-exiting ~35s in,
+          // contradicting its own help text).
+          if (process.env.CS_DAEMON_AUTOEXIT === '1' && Date.now() - _bornAt > _GRACE_MS && _emptyTicks >= _EMPTY_LIMIT) {
             // In-flight guard: never exit while still serving a request (a big
             // repo's first /symbol/summary build can outlive the grace window).
             if (typeof csInFlight === 'function' && csInFlight() > 0) return
@@ -878,6 +883,14 @@ async function main() {
   const [cmd, ...args] = process.argv.slice(2)
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     process.stdout.write(USAGE + '\n'); return
+  }
+  if (cmd === '--version' || cmd === '-v' || cmd === 'version') {
+    let ver = 'unknown'
+    for (const p of ['../../../package.json', '../../package.json', '../package.json']) {
+      try { ver = require(p).version || ver; if (ver !== 'unknown') break } catch {}
+    }
+    process.stdout.write(ver + '\n')
+    return
   }
   try {
     switch (cmd) {
@@ -1658,7 +1671,10 @@ async function main() {
           }
           const spawnDaemon = () => {
             const child = cp.spawn(process.execPath, [__filename, 'serve', abs], {
-              detached: true, stdio: 'ignore', env: { ...process.env },
+              // CS_DAEMON_AUTOEXIT: this is a lifecycle-managed daemon — it self-
+              // exits once no session/viewer references it. A direct `cs serve`
+              // does NOT set this and stays up until Ctrl-C (insp-004).
+              detached: true, stdio: 'ignore', env: { ...process.env, CS_DAEMON_AUTOEXIT: '1' },
             })
             child.unref()
           }
@@ -2457,7 +2473,7 @@ async function main() {
         }
         const r = await req('POST', '/write/' + encId(args[0]), null, { content })
         if (r.status !== 200) return die(r.json?.error || 'failed')
-        process.stdout.write(`wrote ${r.json.size}B to ${args[0]}\n`)
+        process.stdout.write(`wrote ${r.json.bytes ?? r.json.size ?? Buffer.byteLength(content, 'utf8')}B to ${args[0]}\n`)
         break
       }
       case 'edit': {
