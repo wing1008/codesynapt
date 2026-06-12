@@ -22,3 +22,4 @@
 ## insp-004 (2026-06-12 풀점검) 후속 — Wave 2/3에서 처리
 - [ ] **aliased destructure-require 미해결**: `const { orig: local } = require('./mod'); local()` 는 caller 엣지 안 생김 — ESM `import { orig as local }`도 공유하는 기존 한계(rename→source 매핑 부재). Wave1에서 non-alias destructure(#52 핵심 6호출)는 수정됨. 처리경로: 파서가 import 별칭 binding을 {module, exportedName}로 매핑해 resolveCall에 원래 이름 전달.
 - [ ] **확정 57건 정본**: `docs/inspections/2026-06-12-insp-004/confirmed.json` (HIGH 21·MED 19·LOW 17). clean.md=재배포 제외 목록(burn-spots/blockers). critic.md=점검 사각 8.
+- [ ] **표현식 람다/comprehension 스코프 shadow (#20)**: `lambda x: g(x)` / `[a for a in items]` 에서 inner 바인딩이 outer param을 가리면 g(x)의 x를 param:x로 오판 가능. Wave2에서 다중쓰기/자기참조/증강/기본값/call-of-call은 정직강등 완료. nested-scope shadow는 별도(스코프 스택 필요). 처리경로: lambda/comprehension 진입 시 바인딩 이름을 shadow 집합에 넣어 그 스코프 안 식별자는 param/local 귀속 차단.

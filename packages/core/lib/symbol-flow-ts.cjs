@@ -47,6 +47,10 @@ const TS_FLOW_EXT = { py: 'python', pyw: 'python', pyi: 'python', java: 'java', 
 function tsCalleeName(node, cfg) {
   const fn = node.childForFieldName?.('function') || node.childForFieldName?.('name')
   if (fn) {
+    // Call-of-call `make(a)(b)`: the callee is itself a call — it has no static
+    // name, so don't invent one from a descendant identifier (insp-004: this
+    // recorded a call named after the inner argument).
+    if (cfg.callTypes.has(fn.type)) return null
     if (cfg.identTypes.has(fn.type)) return fn.text
     let last = null
     const walk = (n, d) => {
@@ -85,18 +89,27 @@ async function extractFlowTS(source, lang, sym) {
   find(tree.rootNode)
   if (!fn) { tree.delete?.(); return out }
 
-  // Params: binding names only — typed wrappers take the LAST identifier
-  // (Java/C# `int a` -> a, py `a: int` -> a); self/this skipped.
+  // Params: binding names only. A typed/defaulted param wraps the binding name
+  // as its FIRST identifier (Java/C# `int a` -> a since the type isn't an
+  // identifier node; py `a: int` -> a; py `b=DEFAULT` -> b, NOT DEFAULT — the
+  // old "last identifier" rule captured the default value as a parameter,
+  // insp-004). self/this skipped.
   const pickParams = (n, d) => {
     if (!n || d > 3) return
     if (cfg.paramsTypes.has(n.type)) {
       for (let i = 0; i < n.namedChildCount; i++) {
         const p = n.namedChild(i)
         if (cfg.identTypes.has(p.type)) { if (!cfg.selfNames.has(p.text)) out.params.push(p.text); continue }
+        // Prefer an explicit name field (default/typed params expose it);
+        // otherwise the first identifier descendant is the binding name.
         let name = null
-        for (let j = 0; j < p.namedChildCount; j++) {
-          const c = p.namedChild(j)
-          if (cfg.identTypes.has(c.type)) name = c.text
+        const nf = p.childForFieldName?.('name')
+        if (nf && cfg.identTypes.has(nf.type)) name = nf.text
+        else {
+          for (let j = 0; j < p.namedChildCount; j++) {
+            const c = p.namedChild(j)
+            if (cfg.identTypes.has(c.type)) { name = c.text; break }
+          }
         }
         if (name && !cfg.selfNames.has(name)) out.params.push(name)
       }
@@ -107,10 +120,51 @@ async function extractFlowTS(source, lang, sym) {
   pickParams(fn, 0)
   const paramSet = new Set(out.params)
 
+  // Pre-pass (parity with the JS walker, insp-004): a binding that is reassigned,
+  // augmented (+=), self-referential (`b = f(b)`), declared more than once, or a
+  // reassigned parameter is NOT a single certain source. Mark it uncertain so it
+  // resolves to unknown + counted instead of a wrong claim. Self-reference also
+  // fixes the order bug where `b = fspath(b)` labelled fspath's own argument with
+  // fspath's own result.
+  const assignCount = new Map()
+  const uncertain = new Set()
+  const mentions = (n, name) => {
+    if (!n) return false
+    if (cfg.identTypes.has(n.type) && n.text === name) return true
+    for (let i = 0; i < n.namedChildCount; i++) if (mentions(n.namedChild(i), name)) return true
+    return false
+  }
+  const leftRightOf = (node) => {
+    const left = node.childForFieldName?.('left') || node.childForFieldName?.('name')
+      || (() => { for (let i = 0; i < node.namedChildCount; i++) { const c = node.namedChild(i); if (cfg.identTypes.has(c.type)) return c } return null })()
+    let right = node.childForFieldName?.('right') || node.childForFieldName?.('value')
+    if (!right) { for (let i = 0; i < node.namedChildCount; i++) { const c = node.namedChild(i); if (c.type === 'equals_value_clause' && c.namedChildCount) { right = c.namedChild(c.namedChildCount - 1); break } } }
+    return { left, right }
+  }
+  const pre = (node, isRoot) => {
+    if (!node) return
+    if (!isRoot && cfg.fnTypes.has(node.type)) return
+    if (cfg.assignTypes.has(node.type) || node.type === 'augmented_assignment') {
+      const { left, right } = leftRightOf(node)
+      if (left && cfg.identTypes.has(left.type)) {
+        const nm = left.text
+        assignCount.set(nm, (assignCount.get(nm) || 0) + 1)
+        const op = node.childForFieldName?.('operator')
+        if (node.type === 'augmented_assignment' || (op && op.text && op.text !== '=')) uncertain.add(nm)
+        if (right && mentions(right, nm)) uncertain.add(nm)
+      }
+    }
+    for (let i = 0; i < node.namedChildCount; i++) pre(node.namedChild(i), false)
+  }
+  pre(fn.childForFieldName?.('body') || fn, true)
+  for (const [nm, c] of assignCount) if (c > 1) uncertain.add(nm)
+  for (const nm of assignCount.keys()) if (paramSet.has(nm)) uncertain.add(nm)
+
   const locals = new Map()
   const sourceOf = (node) => {
     if (!node) return 'unknown'
     if (cfg.identTypes.has(node.type)) {
+      if (uncertain.has(node.text)) return 'unknown'   // multiply-written: not a single certain source
       if (paramSet.has(node.text)) return 'param:' + node.text
       if (locals.has(node.text)) return locals.get(node.text)
       return 'unknown'
@@ -142,7 +196,7 @@ async function extractFlowTS(source, lang, sym) {
         }
       }
       if (left && right && cfg.identTypes.has(left.type)) {
-        const src = sourceOf(right)
+        const src = uncertain.has(left.text) ? 'unknown' : sourceOf(right)
         locals.set(left.text, src)
         if (src === 'unknown') out.unresolvedFlows++
       }
