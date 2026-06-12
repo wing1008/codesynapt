@@ -42,6 +42,34 @@
 - Trace "no frames" messages hint at scan-ignore rules (underscore-prefixed
   files traced to silence).
 
+### Fixed — pre-release inspection sweep (insp-004)
+A multi-agent + manual adversarial inspection before release surfaced and fixed
+release-blocking and accuracy bugs, each anchored by a known-answer test:
+- **Installed-package Layer-2 restored.** The grammar wasm was resolved by a
+  hard-coded `../../../node_modules` path that only exists in the dev repo, so a
+  hoisted `npm install` silently disabled Layer-2 for **every** tree-sitter
+  language (Python/Java/C#/…) while coverage still reported 100%. Now resolved
+  via `require.resolve`; a CI job proves Layer-2 parses from a real install.
+- **Honest coverage.** A language whose parser fails to load this session is no
+  longer counted as covered — it's reported as degraded with a warning.
+- **Python tracer** flushes observed edges on `sys.exit()` (the common
+  `sys.exit(main())` path discarded them), puts the script dir on `sys.path`
+  (sibling imports work under tracing), and supports `-m module`.
+- **Expression flow no longer makes wrong claims**: reassigned / `+=` /
+  self-referential / branch-assigned / default / parameter-property bindings
+  resolve to `unknown` (counted), never a stale value; interpolated strings are
+  not "literal"; TS default & constructor-property params keep their names.
+- **Signature alerts** only fire on real parameter changes — body-only,
+  whitespace-only and comment-only edits no longer raise a false alert, and
+  destructured params are tracked.
+- **No false call edges**: an untyped member call `x.foo()` no longer resolves
+  to an unrelated free function `foo`; a `new C()`-constructed class keeps its
+  constructor (and `super()` chain) out of the dead set; CJS
+  `const {f} = require()` call sites now show their callers.
+- CLI: `cs --version`, `cs blast` shows the dynamic-incompleteness caveat, the
+  scanner ignores its own `.codesynapt/` data dir, a directly-launched
+  `cs serve` stays up until Ctrl-C.
+
 ## 0.0.3 — beta (2026-06-11)
 
 > Beta / pre-release — APIs and formats may still change.

@@ -89,6 +89,59 @@ jobs:
       - name: Run vitest suite
         run: npx vitest run
 
+  # ─── Installed-tarball smoke (hoisted layout) ───────────
+  # The dev-repo test suite runs against the repo's own node_modules, where
+  # the grammar wasm happens to sit at the same path the (now-fixed) hard-coded
+  # lookup used — so it CANNOT catch a packaging/path regression that only
+  # surfaces once installed. insp-004: every tree-sitter language was silently
+  # dead in npm installs (coverage still 100%) while the suite stayed green.
+  # This job packs the tarball, installs it into a throwaway project (real npm
+  # hoisting), and proves py/java/c# Layer-2 actually parses from there — plus
+  # checks the tarball ships pytracer.py and leaks no .codesynapt/test data.
+  install-smoke:
+    name: Installed-tarball smoke
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pack tarball
+        run: npm pack
+
+      - name: Tarball contents — ship pytracer, leak nothing
+        shell: bash
+        run: |
+          TGZ=$(ls codesynapt-*.tgz)
+          echo "packed: $TGZ"
+          if tar -tzf "$TGZ" | grep -E '(^|/)\.codesynapt/|\.test\.cjs$|observed-edges|recall-suspects'; then
+            echo "❌ tarball leaks data/test files"; exit 1
+          fi
+          tar -tzf "$TGZ" | grep -q 'packages/core/lib/pytracer.py' || { echo "❌ pytracer.py missing from tarball"; exit 1; }
+          echo "✅ tarball contents OK"
+
+      - name: Install into a throwaway project (real hoisting)
+        shell: bash
+        run: |
+          TGZ="$GITHUB_WORKSPACE/$(ls codesynapt-*.tgz)"
+          mkdir -p "$RUNNER_TEMP/smoke" && cd "$RUNNER_TEMP/smoke"
+          npm init -y >/dev/null
+          npm install "$TGZ"
+
+      - name: Layer-2 alive from the installed copy
+        shell: bash
+        run: |
+          node "$GITHUB_WORKSPACE/scripts/ci-install-smoke.mjs" "$RUNNER_TEMP/smoke/node_modules/codesynapt"
+
   # ─── Blast-radius PR comment ────────────────────────────
   # Wires in the composite Action at .github/actions/blast-radius,
   # which was previously shipped but never invoked by any workflow —
