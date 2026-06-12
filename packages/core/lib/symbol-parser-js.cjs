@@ -799,6 +799,17 @@ function extractReferences(content, fileId, index) {
               // specifier; its parent is the ImportDeclaration carrying `source`.
               const decl = b.path.parent
               nsModule = resolveImportSource(decl?.source?.value)
+            } else if (b && b.path && b.path.isVariableDeclarator && b.path.isVariableDeclarator()) {
+              // CJS namespace import: `const ns = require('./mod'); ns.fn()`.
+              // Same as an ESM namespace import — `fn` is a free function in the
+              // required module, so resolve imported-only and pin to that module
+              // (insp-004: otherwise the member-call guard below would drop it).
+              const init = b.path.node.init
+              if (init && init.type === 'CallExpression' && init.callee && init.callee.type === 'Identifier'
+                  && init.callee.name === 'require' && init.arguments[0] && /Literal$/.test(init.arguments[0].type)) {
+                memberViaImport = true
+                nsModule = resolveImportSource(init.arguments[0].value)
+              }
             }
           }
         } else if (obj?.type === 'ThisExpression' && currentClass) {

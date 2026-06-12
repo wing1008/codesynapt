@@ -195,6 +195,7 @@ class SymbolGraph {
     this._reexportReach.clear()
     this._moduleReachCache?.clear()
     this.fileExportAlias.clear()
+    this._ctorIdx = null
     this.builtAt = 0
     this.fileCount = 0
     this.scanMs = 0
@@ -450,6 +451,15 @@ class SymbolGraph {
       // (calling the IMPORTED free `dumps`) resolve to the import instead of
       // self-shadowing to the enclosing method.
       if (!memberCall && node.qualifiedName && node.qualifiedName.includes('.') && node.qualifiedName !== node.name) continue
+      // Symmetric guard: an untyped member call `x.foo()` (unknown receiver)
+      // targets a METHOD on that receiver, never a free function `foo`.
+      // Confidently resolving it to an imported/same-file free function is a
+      // wrong dataflow edge — `sock.encode(p)` does NOT call codec's free
+      // `encode` (insp-004). Free-function candidates are left to the dynamic
+      // candidate leg, which surfaces them honestly as "could be". A
+      // namespace/default-import member call (`ns.fn()`, importedOnly) DOES
+      // legitimately target the module's free function, so it is exempt.
+      if (memberCall && !importedOnly && (!node.qualifiedName || !node.qualifiedName.includes('.') || node.qualifiedName === node.name)) continue
       // importedOnly (a namespace/default-import member call `ns.fn()`): the
       // target is in the IMPORTED module, never same-file — don't break on a
       // same-file match (that was the `ns.fn()` → same-file phantom), keep
@@ -704,12 +714,48 @@ class SymbolGraph {
   // handlers), so a `reachable: false` flag is a *hint*, not a
   // verdict — we expose it as data and let the ranker / UI choose
   // how strongly to weight it.
+  // Map each class id -> its constructor method ids. A `new C()` call lands its
+  // edge on the CLASS node (callers of C), not on C's constructor method, so
+  // without this a statically-constructed class's constructor — and the super()
+  // chain it calls — looks dead (insp-004). Cached; invalidated on clear().
+  _constructorIndex() {
+    if (this._ctorIdx) return this._ctorIdx
+    const idx = new Map()
+    const classByQN = new Map()
+    for (const n of this.nodes.values()) {
+      if (n.kind === 'class') classByQN.set(n.file + '␞' + (n.qualifiedName || n.name), n.id)
+    }
+    for (const n of this.nodes.values()) {
+      if (n.kind !== 'method' && n.kind !== 'function') continue
+      const qn = n.qualifiedName || ''
+      const dot = qn.lastIndexOf('.')
+      if (dot < 0) continue
+      const clsQN = qn.slice(0, dot)
+      const mname = qn.slice(dot + 1)
+      const className = clsQN.slice(clsQN.lastIndexOf('.') + 1)
+      // constructor (JS) / __init__ (py) / same-name method (Java/C++/C#).
+      if (mname === 'constructor' || mname === '__init__' || mname === className) {
+        const cid = classByQN.get(n.file + '␞' + clsQN)
+        if (cid) { if (!idx.has(cid)) idx.set(cid, []); idx.get(cid).push(n.id) }
+      }
+    }
+    this._ctorIdx = idx
+    return idx
+  }
+
   computeReachability(isEntry) {
     const reachable = new Set()
     const queue = []
+    const ctorIdx = this._constructorIndex()
+    const enqueue = (id) => {
+      if (reachable.has(id)) return
+      reachable.add(id); queue.push(id)
+      const cs = ctorIdx.get(id)
+      if (cs) for (const cid of cs) enqueue(cid)
+    }
     for (const node of this.nodes.values()) {
       try {
-        if (isEntry(node)) { reachable.add(node.id); queue.push(node.id) }
+        if (isEntry(node)) enqueue(node.id)
       } catch {}
     }
     // BFS over the CALL graph only. A symbol reached solely by a structural
@@ -725,9 +771,7 @@ class SymbolGraph {
       const id = queue[head]
       const callees = this.callOut.get(id)
       if (!callees) continue
-      for (const c of callees) {
-        if (!reachable.has(c)) { reachable.add(c); queue.push(c) }
-      }
+      for (const c of callees) enqueue(c)
     }
     this._reachable = reachable
     return reachable
@@ -1057,13 +1101,23 @@ class SymbolGraph {
         if (n.exported || n.kind === 'module') entries.add(n.id)
       }
     }
-    // Tier 1 — confident reach: BFS over call edges from entries.
-    const reachable = new Set(entries)
-    const q1 = [...entries]
+    // Tier 1 — confident reach: BFS over call edges from entries. A live class
+    // pulls in its constructor (and the super() chain) — `new C()` edges land on
+    // the class, not the ctor method (insp-004).
+    const ctorIdx = this._constructorIndex()
+    const reachable = new Set()
+    const q1 = []
+    const enqueue1 = (id) => {
+      if (reachable.has(id)) return
+      reachable.add(id); q1.push(id)
+      const cs = ctorIdx.get(id)
+      if (cs) for (const cid of cs) enqueue1(cid)
+    }
+    for (const id of entries) enqueue1(id)
     while (q1.length) {
       const cur = q1.pop()
       const outs = this.callOut.get(cur)
-      if (outs) for (const t of outs) if (!reachable.has(t)) { reachable.add(t); q1.push(t) }
+      if (outs) for (const t of outs) enqueue1(t)
     }
     // Tier 2 — possible reach: from anything live, follow candidate-dispatch and
     // value-reference edges too (a callback passed somewhere can run; a dispatch

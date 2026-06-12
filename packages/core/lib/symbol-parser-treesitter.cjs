@@ -1361,6 +1361,15 @@ function isMemberCallNode(callNode) {
     if (fn0 && fn0.type === "variable" && fn0.namedChildCount === 1
         && IDENT_TYPES.has(fn0.namedChild(0).type)) return false
   }
+  // Bash: a `command` is a bare invocation `funcname args` — the command_name
+  // is the callee, there is no receiver, so it is NOT a member call. (It used to
+  // be misclassified as a member call and only resolved because resolveCall then
+  // grabbed a same-named free function; the insp-004 member-call guard removed
+  // that crutch, so classify it correctly here.)
+  {
+    const fn0 = callNode.childForFieldName?.('function') || callNode.namedChild(0)
+    if (fn0 && fn0.type === 'command_name') return false
+  }
   const fn = callNode.childForFieldName?.('function') || callNode.childForFieldName?.('name')
   if (fn && NAV_TYPES.has(fn.type)) return true
   for (let i = 0; i < callNode.namedChildCount; i++) {

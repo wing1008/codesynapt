@@ -1,0 +1,49 @@
+import { describe, it, expect } from 'vitest'
+import { buildGraph, hasCall, hasCandidate } from './_build.js'
+
+// ── insp-004: two resolveCall / reachability honesty fixes ──
+// (1) an untyped member call `x.foo()` must NOT confidently resolve to an
+//     imported/same-file FREE function `foo` — wrong dataflow edge.
+// (2) a class constructed via `new C()` must not have its constructor (nor the
+//     super() chain) labelled dead — the `new` edge lands on the class node.
+
+const js = (id, content) => ({ id, ext: 'js', content })
+
+describe('resolveCall — untyped member call never grabs a free function', () => {
+  it('sock.encode(p) is NOT a confident call to the imported free encode', async () => {
+    const g = await buildGraph([
+      js('codec.js', 'function encode(v){ return v }\nmodule.exports = { encode }\n'),
+      js('main.js',
+        "const { encode } = require('./codec.js')\n" +
+        "function send(payload, sock){ encode('h'); return sock.encode(payload) }\n" +
+        "function sendOnly(payload, sock2){ return sock2.encode(payload) }\n" +
+        'module.exports = { send, sendOnly }\n'),
+    ], { 'main.js': ['codec.js'] })
+    expect(hasCall(g, 'sendOnly', 'encode')).toBe(false)   // the wrong edge
+    expect(hasCandidate(g, 'sendOnly', 'encode')).toBe(true) // surfaced honestly instead
+    expect(hasCall(g, 'send', 'encode')).toBe(true)         // a real bare call still resolves
+  })
+
+  it('CJS namespace `ns.fn()` still resolves (no regression)', async () => {
+    const g = await buildGraph([
+      js('x.cjs', 'function build(o){ return {} }\nmodule.exports = { build }\n'),
+      js('c.cjs', "const x = require('./x.cjs')\nfunction startC(){ return x.build({}) }\n"),
+    ], { 'c.cjs': ['x.cjs'] })
+    expect(hasCall(g, 'startC', 'build')).toBe(true)
+  })
+})
+
+describe('reachability — a constructed class keeps its constructor alive', () => {
+  it('new C() does not leave C.constructor (or its super chain) dead', async () => {
+    const g = await buildGraph([
+      js('base.js', 'class Shape { constructor(t){ this.t=t }\n  area(){ return 0 } }\nmodule.exports = { Shape }\n'),
+      js('circle.js', "const { Shape } = require('./base.js')\nclass Circle extends Shape { constructor(r){ super('circle'); this.r=r } }\nmodule.exports = { Circle }\n"),
+      js('app.js', "const { Circle } = require('./circle.js')\nexport function runApp(){ return new Circle(2) }\n"),
+    ], { 'circle.js': ['base.js'], 'app.js': ['circle.js'] })
+    const dead = g.accounting().dead.map((id) => g.nodes.get(id)?.qualifiedName || id)
+    expect(dead.some((d) => /Circle\.constructor/.test(d))).toBe(false)
+    expect(dead.some((d) => /Shape\.constructor/.test(d))).toBe(false)
+    // genuinely-unused method is still reported (proves we didn't blanket-revive)
+    expect(dead.some((d) => /Shape\.area/.test(d))).toBe(true)
+  })
+})
