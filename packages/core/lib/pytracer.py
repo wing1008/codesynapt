@@ -23,7 +23,12 @@ import sys
 def _main():
     out_path = os.environ.get("CS_PYTRACE_OUT")
     root = os.environ.get("CS_PYTRACE_ROOT") or os.getcwd()
-    root = os.path.abspath(root)
+    # realpath, not abspath: on macOS the temp/cwd lives under /var which is a
+    # symlink to /private/var, and the import system reports module __file__ as
+    # the resolved /private/var path. Comparing an abspath root against realpath
+    # frame paths dropped those frames (e.g. `-m module` sibling imports). Both
+    # sides go through realpath so the prefix test matches.
+    root = os.path.realpath(root)
     root_norm = root.replace("\\", "/").rstrip("/") + "/"
 
     if len(sys.argv) < 2:
@@ -80,8 +85,9 @@ def _main():
             return None
         # runpy/import can yield RELATIVE co_filename (e.g. the script passed as
         # 'app.py') — resolve against cwd or everything gets filtered out.
+        # realpath to match root (symlinked /var -> /private/var on macOS).
         f = filename if os.path.isabs(filename) else os.path.abspath(filename)
-        f = f.replace("\\", "/")
+        f = os.path.realpath(f).replace("\\", "/")
         if not f.startswith(root_norm) or "/site-packages/" in f or "/node_modules/" in f:
             rel_cache[filename] = ""
             return None
