@@ -18,7 +18,7 @@ const IGNORE_DIRS = new Set([
   'target', '.cache', '.parcel-cache',
   '.idea', '.vscode', '.DS_Store',
   'coverage', '.nyc_output',
-  '.filegraph3d',
+  '.filegraph3d', '.codesynapt',   // our own data dir (trace/history/observed) — never project files
   // Editor/note vaults: Obsidian, etc. — third-party plugin/theme code
   // would otherwise dominate hub/orphan/url stats.
   '.obsidian', '.logseq', '.foam',

@@ -1,0 +1,572 @@
+[
+ {
+  "item": "flow-real",
+  "title": "Reassigned variable keeps stale 'param:'/initializer provenance — wrong claims on real stdlib code (paramSet consulted before locals; reassignment loses)",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:113-115 (sourceOf: paramSet checked before locals); same pattern packages/core/lib/symbol-flow.cjs:78-80",
+  "evidence": "Python stdlib bisect.py insort_right (line 4): lo is reassigned in BOTH branches (`lo = bisect_right(...)` lines 15/17) before `a.insert(lo, x)` line 18 — the true provenance of insert's arg0 is unconditionally call:bisect_right. Tool output: insort_right insert@18: {\"name\":\"insert\",\"line\":18,\"args\":[{\"index\":0,\"from\":\"param:lo\"},{\"index\":1,\"from\":\"param:x\"}]} — claims param:lo, a wrong (not unknown) provenance. Root cause: sourceOf() returns 'param:'+name whenever the identifier is in paramSet, even though locals already holds 'call:bisect_right' for lo.",
+  "repro": "node -e \"const fs=require('fs');const{extractFlowAuto}=require('F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-flow.cjs');(async()=>{const py=fs.readFileSync('C:/Users/USER/AppData/Local/Programs/Python/Python313/Lib/bisect.py','utf8');const r=await extractFlowAuto(py,'bisect.py',{name:'insort_right',startLine:4,endLine:18});console.log(JSON.stringify(r.calls.find(c=>c.name==='insert')))})()",
+  "v1": "Reproduced independently on clean main (a937e97; git status shows no local modifications to either flow file) with a fresh node process: extractFlowAuto on real stdlib bisect.py insort_right returns insert@18 arg0 from='param:lo' even though lo is unconditionally reassigned to bisect_right(...) in b",
+  "v2": "Finding holds and is release-gating. Re-reproduced twice on main a937e97: (1) stdlib bisect.py insort_right via extractFlowAuto -> insert@18 arg0 'param:lo' despite lo being unconditionally reassigned to bisect_right(...) in both branches (true provenance call:bisect_right); (2) JS walker on 'functi"
+ },
+ {
+  "item": "flow-real",
+  "title": "JS walker ignores AssignmentExpression/+= entirely — accumulator returns claimed 'literal' (wrong) and the lost flow is NOT counted in unresolvedFlows",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow.cjs:92-127 (walk has handlers only for VariableDeclarator/Call/Return; no AssignmentExpression/UpdateExpression)",
+  "evidence": "Real npm code wrap-ansi/index.js `exec` (line 103): `let returnValue = ''` (L108) is accumulated via `returnValue += ...` in a loop (L172,188,192,196,200), then `return returnValue` (L205). Tool output: exec returns: [{\"line\":105,\"from\":\"literal\"},{\"line\":205,\"from\":\"literal\"}] unresolvedFlows: 20 — return@205 claims 'literal' (wrong: the value is the accumulated wrapped string) AND it is not counted (hand-derived correct count = 21: 16 unknown args + 4 unknown declarators + this return). Violates both halves of the bar: a wrong claim, and a silent (uncounted) unknown.",
+  "repro": "node -e \"const fs=require('fs');const{extractFlowAuto}=require('F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-flow.cjs');(async()=>{const s=fs.readFileSync('F:/MyProg/3dgit/filegraph3d/node_modules/wrap-ansi/index.js','utf8');const r=await extractFlowAuto(s,'wrap-ansi/index.js',{name:'exec',startLine:103,endLine:206});console.log(JSON.stringify(r.returns),r.unresolvedFlows)})()\" → [{105 lit",
+  "v1": "Finding CONFIRMED, method sound, genuine defect against the product's own bar. (1) Independent repro on current code (main a937e97, fresh node from repo path): extractFlow/extractFlowAuto on node_modules/wrap-ansi/index.js exec(103-206) returns [{line:105,from:\"literal\"},{line:205,from:\"literal\"}] w",
+  "v2": "HIGH is correct for a release gate; root cause is in product code, not the inspection setup. (1) Re-reproduced on main a937e97: extractFlowAuto on node_modules/wrap-ansi/index.js exec(103-206) again returns [{line:105,from:\"literal\"},{line:205,from:\"literal\"}] with unresolvedFlows=20 — the +=-accumu"
+ },
+ {
+  "item": "flow-real",
+  "title": "Self-referential assignment `x = f(x)` labels the call's own argument with the call's own result (locals updated before RHS args are read) — wrong claim on real stdlib code, all 3 tree-sitter languages",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:132-149 (assignment handler runs and locals.set() fires before the RHS call node is visited at :150-169)",
+  "evidence": "Python stdlib posixpath.py join (line 72), loop body `b = os.fspath(b)` (L82): the argument b is the raw loop element of *p (provenance not derivable → must be unknown+counted). Tool output: {\"name\":\"fspath\",\"line\":82,\"args\":[{\"index\":0,\"from\":\"call:fspath\"}]} — labels the input of fspath with fspath's own result. Same class confirmed in auditor-authored Java (`result = decorate(result)` → decorate arg from=call:decorate, truth call:toString) and C# (`text = Decorate(text)` → Decorate arg from=call:Decorate, truth call:Render), and `count = bump(count)` → bump arg from=call:bump.",
+  "repro": "node -e \"const fs=require('fs');const{extractFlowAuto}=require('F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-flow.cjs');(async()=>{const s=fs.readFileSync('C:/Users/USER/AppData/Local/Programs/Python/Python313/Lib/posixpath.py','utf8');const r=await extractFlowAuto(s,'posixpath.py',{name:'join',startLine:72,endLine:92});console.log(JSON.stringify(r.calls.filter(c=>c.name==='fspath')))})()\"",
+  "v1": "CONFIRMED, could not refute. (1) Reproduced the exact original repro on current code (HEAD a937e97, fresh node from repo path): posixpath.py join, fspath@82 arg0 = {\"from\":\"call:fspath\"} — the tool claims fspath's own result feeds fspath's own argument, when truth is the raw loop element of *p rebou",
+  "v2": "UPHELD as release-gating HIGH. (1) Re-ran the exact repro myself on current code: posixpath.py join yields fspath@77 arg0=param:a (correct) but fspath@82 arg0=call:fspath — the tool asserts fspath's own result feeds fspath's own argument, which is causally impossible here (the for-target `for b in p"
+ },
+ {
+  "item": "flow-real",
+  "title": "Path-insensitive last-write treated as CERTAIN + augmented assignment (+=) node types not in assignTypes — posixpath.join's return claimed call:fspath; per-branch/loop-zero-iteration cases overclaimed",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:14-43 (assignTypes lacks python 'augmented_assignment'; java/cs augmented forms also unhandled) + :110 single flat locals map",
+  "evidence": "posixpath.join (stdlib L72): return path@92 — truth: path is param a (p empty), b, or the `path += sep + b` accumulation (the dominant case). Tool output: join returns: [{\"line\":92,\"from\":\"call:fspath\"}] unresolvedFlows: 1 (hand-derived correct: return unknown+counted, unresolvedFlows 3). The `+=` writes are silently invisible and the conditional `path = b` (taken only when a component is absolute) is reported as the certain provenance — contradicts the file's own contract \"only flows that are CERTAIN are attributed\". Same class: auditor Java countMatching return@39=call:bump (truth: literal 0",
+  "repro": "node F:/tmp/csflow_audit/run.cjs py1  (and cases 'java m3', 'cs c3'). Minimal: same node -e as finding 3, print r.returns and r.unresolvedFlows → [{92, call:fspath}], 1. Reproduced twice.",
+  "v1": "Reproduced independently in fresh node processes from the repo at current main: posixpath.join's return is attributed CERTAIN provenance \"call:fspath\" with unresolvedFlows=1, when the dominant runtime value is a `path += sep + b` string accumulation — the += write is silently invisible (not tracked,",
+  "v2": "UPHELD as HIGH / release-gating. (1) Real 0.0.4 npm user impact: confirmed. Root package.json is `codesynapt 0.0.4`, `files` ships `packages/core/`, and bin `cs` -> packages/core/bin/codesynapt.cjs which exposes `cs symbol flow <name>` (codesynapt.cjs:238, :1232-1265) backed by GET /symbol/flow (sym"
+ },
+ {
+  "item": "flow-real",
+  "title": "Java constructor calls (`new StringBuilder(sep)`) silently dropped — call not recorded and its param-carrying argument flow never appears nor counts as a call-arg unknown (C# constructors ARE recorded — inconsistent)",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:47-65 (tsCalleeName: java object_creation_expression's type child is 'type_identifier', not in identTypes {'identifier'} → returns null) + :150-151 (name null → call skipped, args never scanned)",
+  "evidence": "Auditor Java Inventory.describe(sep) L49 `StringBuilder sb = new StringBuilder(sep)`. Tool output calls: [{\"name\":\"append\",...},{\"name\":\"toString\",...},{\"name\":\"decorate\",...}] — no StringBuilder entry; the param:sep→constructor flow is invisible (only a generic declarator-unknown +1 is counted, indistinguishable from any opaque RHS). Identical C# shape `new Widget(sep)` IS recorded: {\"name\":\"Widget\",\"line\":47,\"args\":[{\"index\":0,\"from\":\"param:sep\"}]}. Per product bar this is silence (a real call+arg flow that is neither attributed nor visible as an unresolved call argument).",
+  "repro": "node F:/tmp/csflow_audit/run.cjs \"java m5\"  → 'call MISSING (truth): {\"name\":\"StringBuilder\",\"line\":49,\"args\":[\"param:sep\"]}'. Minimal node -e repro in F:/tmp (java describe vs cs Describe dump). Reproduced twice.",
+  "v1": "Reproduced independently on current main (a937e97) with fresh node processes and my OWN minimal snippets (not just the auditor's harness). Java 'StringBuilder sb = new StringBuilder(sep)' → calls contain only toString; constructor call absent, param:sep arg flow never scanned (only a generic declara",
+  "v2": ""
+ },
+ {
+  "item": "e2-blast",
+  "title": "FALSE argument-flow edge: unknown-receiver method call confidently resolved to same-named free function, argBlast then claims the param reaches it (runtime counterexample disproves)",
+  "severity": "HIGH",
+  "file": "F:\\MyProg\\3dgit\\filegraph3d\\packages\\core\\lib\\symbol-graph.cjs:476,483 (root cause, resolveCall sameFile/importedCandCount==1 legs) -> packages\\core\\lib\\symbol-flow.cjs:165-183 (argBlast presents it as a confident dataflow claim)",
+  "evidence": "Fixture fx6: codec.js declares the ONLY project symbol named `encode` (free fn, param v). main.js: `function sendOnly(payload, sock2) { return sock2.encode(payload) }` — sock2 is a function parameter, receiver unknown. L2: `cs symbol callees main.js#sendOnly@16` -> callees: [codec.js#encode@3] CONFIDENT (not candidate). E2: `cs symbol flow main.js#sendOnly@16 payload` -> 'd1  encode(v)  codec.js:17' — claims payload reaches codec.encode's v. Runtime counterexample (runner.js passes {encode: gz}) prints 'gz:secret-payload' — the actual callee is the receiver's own method, never codec.encode. Sa",
+  "repro": "mkdir fx6; codec.js: function encode(v){return v} module.exports={encode}; main.js: const {encode}=require('./codec.js'); function send(payload,sock){ encode('header'); return sock.encode(payload) } function sendOnly(payload,sock2){ return sock2.encode(payload) } module.exports={send,sendOnly}; then: cd fx6 && node F:/MyProg/3dgit/filegraph3d/packages/core/bin/codesynapt.cjs serve . --port 17437 &",
+  "v1": "Reproduced independently on current code (main a937e97) with a self-authored fresh fixture (F:\\tmp\\skeptic-fx6) and a fresh `cs serve` instance on port 17582, launched directly from the repo bin (no stale install). The finding holds in all three variants and the method is sound: (1) the inspector di",
+  "v2": "CONFIRMED as release-gating HIGH. (1) Independent re-repro: I authored a fresh fixture (F:\\tmp\\v2-fx6) and a fresh server (port 17699) from repo bin. `symbol callees main.js#sendOnly@6` returns codec.js#encode@1 in the CONFIDENT callees array (not candidates); `symbol flow ... payload` returns impac"
+ },
+ {
+  "item": "e2-blast",
+  "title": "Depth-limit truncation is SILENT: real downstream flow dropped with truncated:false, unresolvedTargets:0, no frontier count; CLI cannot pass --depth at all",
+  "severity": "MED",
+  "file": "F:\\MyProg\\3dgit\\filegraph3d\\packages\\core\\lib\\symbol-flow.cjs:182 (`if (tParam && depth + 1 < maxDepth) queue.push(...)` — drop uncounted); packages\\core\\bin\\codesynapt.cjs:1238 (no depth param sent)",
+  "evidence": "Fixture fx3 chain f1->f2->f3->f4->f5->f6 each passing the param. depth=8: impacted [f2:d1,f3:d2,f4:d3,f5:d4,f6:d5]. Default depth (4, CLI hardwired): impacted ends at f5:d4, f6 dropped — output: {\"unresolvedTargets\":0,\"truncated\":false}. depth=2: ends at f3:d2, same flags. The REAL continuation (f6 receives the param, proven by the depth-8 run) vanishes with nothing counted and no flag — 'unknown and uncounted' per the product bar. truncated only reports the 100-hit cap. The CLI `cs symbol flow <id> <param>` sends {id,q} only (codesynapt.cjs:1238), so CLI/MCP users are permanently at depth 4 w",
+  "repro": "fx3/chain.js: function f6(p6){return p6} f5(p5){return f6(p5)} ... f1(p1){return f2(p1)}; serve --port 17433; curl 'http://127.0.0.1:17433/symbol/flow?id=chain.js%23f1%408&q=p1&depth=4' vs depth=8 — compare impacted lists and flags",
+  "v1": "Reproduced independently on current code (main repo bin, fresh `cs serve` of a freshly authored fixture on my own port 17961, then cleaned up). Chain f1(p1)->f2->f3->f4->f5->f6 each forwarding the param. Results: depth=8 → impacted [f2:d1,f3:d2,f4:d3,f5:d4,f6:d5]; depth=4 (server default) and no-dep",
+  "v2": ""
+ },
+ {
+  "item": "e2-blast",
+  "title": "Impacted entries carry incoherent file:line — target's FILE paired with the call-site LINE from the caller's file; CLI renders nonexistent locations (codec.js:17 in a 4-line file)",
+  "severity": "MED",
+  "file": "F:\\MyProg\\3dgit\\filegraph3d\\packages\\core\\lib\\symbol-flow.cjs:179 (`file: target.file, line: call.line`); rendered at packages\\core\\bin\\codesynapt.cjs:1250 (`${h.file}:${h.line}`)",
+  "evidence": "fx6 blast output: 'd1  encode(v)  codec.js:10' and 'd1  encode(v)  codec.js:17'. codec.js is 4 lines (`wc -l codec.js` -> 4); lines 10/17 are the call-site lines in main.js. JSON: {fn:'encode', file:'codec.js', line:17}. A user (or the alert layer consuming this) is pointed at a location that does not exist; in single-file fixtures the mismatch is invisible (fx3 looked plausible), so this silently mis-locates every cross-file hit. Reproduced on both fx6 server instances (17436, 17437).",
+  "repro": "Same fx6 setup; CS_PORT=17437 node .../codesynapt.cjs symbol flow 'main.js#sendOnly@16' payload  -> compare reported codec.js:17 with `wc -l fx6/codec.js` (4 lines); the target fn encode is declared at codec.js:3",
+  "v1": "The finding reproduces independently on current code (main working tree) and the method is sound. I did NOT reuse the inspector's servers or fixtures: I rebuilt a fresh cross-file fixture (codec.js 4 lines with `encode` declared at line 3; main.js with `sendOnly` at line 16 calling `encode(payload)`",
+  "v2": ""
+ },
+ {
+  "item": "e2-blast",
+  "title": "Default-parameter (`b = 5`) reported as '(pattern)' and the walk's continuation through it silently lost — downstream sink not reported, nothing counted in blast output",
+  "severity": "MED",
+  "file": "F:\\MyProg\\3dgit\\filegraph3d\\packages\\core\\lib\\symbol-flow.cjs:68-70 (AssignmentPattern lumped into '(pattern)' instead of .left.name) and :176-182 ('(pattern)' enqueued as a param name that can never match)",
+  "evidence": "fx6: function sink(s){return s} function mid(a, b = 5){ return sink(b) } function top(x){ return mid(1, x) }. Blast top.x -> impacted: [{fn:'mid', param:'(pattern)', argIndex:1, depth:1}], unresolvedTargets:0, truncated:false — sink is ABSENT although x->b->sink(b) is a real flow (b is a plain identifier with a default, trivially nameable). E1 view of mid counts it ('1 flow(s) not trackable'), but the E2 blast output the user/alert-layer sees shows zero unresolved anything — the lost trail is uncounted at the E2 surface. Same '(pattern)' label on fx5 caller->withDefaults. Reproduced twice (fx5",
+  "repro": "fx6 main.js as above; CS_PORT=17437 node .../codesynapt.cjs symbol flow 'main.js#top@23' x --json — sink missing, unresolvedTargets 0; then symbol flow 'main.js#mid@22' (E1) shows params 'a, (pattern)' and sink(unknown)",
+  "v1": "Finding CONFIRMED on current main (a937e97) via two independent routes. (1) Full product surface: fresh fixture (function sink(s){return s}; function mid(a, b = 5){return sink(b)}; function top(x){return mid(1,x)}) served by a fresh `cs serve` headless daemon on my own port 17561 — `symbol flow 'mai",
+  "v2": ""
+ },
+ {
+  "item": "e2-blast",
+  "title": "100-hit cap overshoots: 120 impacted entries delivered (cap checked only at dequeue, one node's fan-out pushes unbounded) — reported via truncated:true so honest, but the documented cap is not the actual bound",
+  "severity": "LOW",
+  "file": "F:\\MyProg\\3dgit\\filegraph3d\\packages\\core\\lib\\symbol-flow.cjs:156 (cap check at loop top only; inner for-loop at :165-183 pushes without re-check)",
+  "evidence": "fx7: hub(p) calls c1(p)..c120(p), all uniquely resolvable. Blast hub.p -> 'impacted: 120 truncated: true unresolvedTargets: 0 returnsParam: true'. 120 > 100; a hub with 100k same-function carrying calls would emit them all in one dequeue (MAX_FACTS=200 in E1 bounds it to ~200 per node, so bounded overall — hence LOW).",
+  "repro": "Generate fan.js with 120 functions ci(qi) and hub(p) calling each with p; serve --port 17438; CS_PORT=17438 node .../codesynapt.cjs symbol flow 'fan.js#hub@122' p --json | check impacted.length and truncated",
+  "v1": "Reproduced independently on current code (main, fresh `serve` on port 17438, my own freshly authored fixture in F:\\tmp\\skeptic-e2blast — NOT the inspector's scratch files). hub(p) calling c1(p)..c120(p): `cs symbol flow hub p --json` returned impacted.length=120, truncated=true, unresolvedTargets=0,",
+  "v2": ""
+ },
+ {
+  "item": "sig-alerts",
+  "title": "False 'signature changed (callers affected)' alert on BODY-only edit of expression-body arrow functions",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-parser-js.cjs:134-141 (signatureOf), consumed by packages/core/lib/symbol-flow.cjs:213 and surfaced at electron/main.cjs:1961",
+  "evidence": "Probe (h): before `const f = (a) => a + 1`, after `const f = (a) => a + 2` (pure body edit, params identical). Driver output (both runs identical): FAIL (h) PROBE arrow expr-body, body-only edit -> expect 0 delta   delta=[{\"n\":\"f\",\"b\":\"f = (a) => a + 1\",\"a\":\"f = (a) => a + 2\"}]. Root cause: signatureOf cuts raw source at the first '{' (symbol-parser-js.cjs:138 `content.indexOf('{', startIdx)`); an expression-body arrow has no '{', so the BODY (up to 200 chars) is baked into the 'signature'. The desktop then emits `signature changed: f ... (N callers affected ...)` (main.cjs:1961) — a wrong cla",
+  "repro": "node F:/tmp/sigaudit/drive.cjs  (case h; driver requires repo modules by absolute path F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-flow.cjs in a fresh node process; reproduced twice with identical output)",
+  "v1": "CONFIRMED. I rebuilt the repro from scratch (my own driver in my own scratch dir F:/tmp/skeptic-sig-17431, since removed; fresh node process; repo modules loaded by absolute path; pipeline mirrors the repo's own tests/lang-completeness/_build.js, which is the same parser->SymbolGraph->collectSignatu",
+  "v2": "CONFIRMED as release-gating, HIGH stands. (1) Repro re-run once myself: `node F:/tmp/sigaudit/drive.cjs` in a fresh node process loading repo modules by absolute path — probe (h) FAILs deterministically: body-only edit `const f = (a) => a + 1` -> `a + 2` yields delta=[{n:'f', b:'f = (a) => a + 1', a"
+ },
+ {
+  "item": "sig-alerts",
+  "title": "SILENT missed alert: param-list changes after/inside a '{' (destructured params, object-default params) produce NO signature delta and are uncounted",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-parser-js.cjs:138 (signatureOf brace cut); packages/core/lib/symbol-flow.cjs:194-231 inherits the blindness",
+  "evidence": "Probe (j): `function f({ a }) {}` -> `function f({ a }, b) {}` (param ADDED) => delta=[] . Probe (j2): `function f({ a }) {}` -> `function f({ a, b }) {}` => delta=[]. Probe (i): `function f(a = {}) {}` -> `function f(a = {}, b) {}` => delta=[]. Root cause proven via collectSignatures raw values (rootcause.cjs, run twice): i-before == i-after == \"function f(a =\"; j-before == j-after == \"function f(\" — the signature string is truncated at the first '{' (destructure brace / default-value brace), so everything after it is invisible to signatureDelta. No truncation flag/counter exists anywhere (gr",
+  "repro": "node F:/tmp/sigaudit/drive.cjs  (cases i, j, j2) ; node F:/tmp/sigaudit/rootcause.cjs  (prints identical before/after signature strings). Both run twice, identical output.",
+  "v1": "Reproduced independently on current code (HEAD a937e972562a..., both files unmodified per git status) with my OWN fixture and harness (F:\\tmp\\skeptic-sig\\probe.cjs), fresh node processes, run twice with identical output. The harness includes a discriminating CONTROL case — plain `function f(a)` -> `",
+  "v2": ""
+ },
+ {
+  "item": "sig-alerts",
+  "title": "False 'signature changed' alert on whitespace-only param-list reformat (e.g. Prettier run)",
+  "severity": "LOW",
+  "file": "packages/core/lib/symbol-parser-js.cjs:140 (`.replace(/\\s+/g,' ')` collapses runs but cannot equate `(a,b)` with `(a, b)`)",
+  "evidence": "Probe (k): `function f(a,b) {}` -> `function f(a, b) {}` => FAIL ... delta=[{\"n\":\"f\",\"b\":\"function f(a,b)\",\"a\":\"function f(a, b)\"}]. A formatter pass over a file would fire 'callers affected' alerts (capped at 20 per signatureDelta symbol-flow.cjs:228) for purely cosmetic changes — wrong claims, though the before/after strings in the alert at least reveal the change is cosmetic.",
+  "repro": "node F:/tmp/sigaudit/drive.cjs  (case k); reproduced twice",
+  "v1": "Reproduced independently on current main (a937e97) with a fresh node process and my own script (not just the inspector's driver): a whitespace-only param-list edit `function f(a,b)` -> `function f(a, b)` produces a signatureDelta entry claiming 1 caller affected. Controls validated the harness (iden",
+  "v2": ""
+ },
+ {
+  "item": "sig-alerts",
+  "title": "False 'signature changed' alert on comment-only edit between param list and opening brace",
+  "severity": "LOW",
+  "file": "packages/core/lib/symbol-parser-js.cjs:134-141 (raw text slice includes comments before the first '{')",
+  "evidence": "Probe (d2): `function f(a) /* v1 */ { return a }` -> `function f(a) /* v2 */ { return a }` => FAIL ... delta=[{\"n\":\"f\",\"b\":\"function f(a) /* v1 */\",\"a\":\"function f(a) /* v2 */\"}]. Comment-only edit (case d variant) fires an alert because signatureOf slices raw source, not AST params. Rare placement, hence LOW.",
+  "repro": "node F:/tmp/sigaudit/drive.cjs  (case d2); reproduced twice",
+  "v1": "Reproduced independently in a fresh node process against clean HEAD a937e97 using my own script (F:/tmp/skeptic-sigd2/repro.cjs, not the inspector's), loading current repo modules by absolute path. Comment-only edit between param list and opening brace (`function f(a) /* v1 */ {` -> `/* v2 */`) yiel",
+  "v2": ""
+ },
+ {
+  "item": "sig-alerts",
+  "title": "CS_SYMBOL_CACHE=1 cache-hit build path returns early WITHOUT setting _prevSigMap/_prevDeadSet baseline — first edit after a cache-hit launch is silently missed",
+  "severity": "LOW",
+  "file": "electron/main.cjs:1658-1667 (early `return g` at 1667) vs baseline set only at electron/main.cjs:1948 and 1965",
+  "evidence": "Code-read: the disk-cache restore path (1658: `const g = new SymbolGraph()` ... 1665: `symbolGraph = g`; 1666: `_symbolBuilding = null`; 1667: `return g`) bypasses the entire issue-diff block (1931-1966), so `_prevSigMap` stays null after the first (cached) build. Sequence: launch with CS_SYMBOL_CACHE=1 -> first /symbol query hits cache -> baseline never set -> user edits a function signature -> invalidateSymbolGraph (main.cjs:150) -> next query takes the FULL build path, but `if (_prevSigMap)` (1956) is null -> the real signature change is swallowed as 'first build sets the baseline silently'",
+  "repro": "Code inspection: F:/MyProg/3dgit/filegraph3d/electron/main.cjs lines 1629-1671 (cache path) vs 1931-1966 (diff block). Confirmed only two SymbolGraph build sites exist (grep 'new SymbolGraph(' main.cjs -> 1658, 1672).",
+  "v1": "Independently re-verified on current HEAD (a937e97, electron/main.cjs unmodified per git status). The finding holds. (1) The cache-hit restore path (main.cjs:1658-1667) ends with `return g` at 1667, exiting the build IIFE before the issue-diff block at 1931-1966 ever runs. (2) Exhaustive grep shows ",
+  "v2": ""
+ },
+ {
+  "item": "zero-silence",
+  "title": "JS walker ignores reassignment (x = b) and augmented assignment (x += b): stale param:a provenance",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow.cjs:97-101",
+  "evidence": "Case JS-1 `function f(a,b){ let x=a; x=b; g(x) }` -> calls:[{name:'g',args:[{from:'param:a'}]}], unresolvedFlows:0 — value cannot be a. Case JS-2 `let x=a; x+=b; g(x)` -> same 'param:a', unresolvedFlows:0. Root cause: locals map is only updated on VariableDeclarator; AssignmentExpression nodes are never visited as writes, so the first binding's provenance is claimed forever.",
+  "repro": "node F:/tmp/flowaudit/run.cjs  (cases JS-1, JS-2; harness requires F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-flow.cjs directly, reproduced twice with identical output)",
+  "v1": "Reproduced independently and the method is sound. I ran a fresh node process from the repo root (HEAD a937e97, `git status --porcelain` clean for symbol-flow.cjs) with my own minimal inline script, not just the inspector's harness: `function f(a,b){ let x=a; x=b; g(x) }` yields calls:[{name:'g',args",
+  "v2": "Re-reproduced once myself in a fresh node process at HEAD a937e97: both cases (`let x=a; x=b; g(x)` and `x+=b` variant) yield calls:[{name:'g',args:[{index:0,from:'param:a'}]}] with unresolvedFlows:0 — identical to the finding. IMPACT: a real installed 0.0.4 user reaches this directly via `cs symbol"
+ },
+ {
+  "item": "zero-silence",
+  "title": "Interpolated strings claimed as 'literal': JS template literals and Python f-strings with ${a}/{a} report from:'literal'",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow.cjs:83 and packages/core/lib/symbol-flow-ts.cjs:19",
+  "evidence": "Case JS-4 `g(`v=${a}`)` -> args:[{from:'literal'}], unresolvedFlows:0 (line 83: `node.type === 'TemplateLiteral'` -> 'literal'). Case PY-4 `g(f\"v={a}\")` -> args:[{from:'literal'}], unresolvedFlows:0 (tree-sitter-python f-string node type is 'string', which is in python literalTypes). Both values derive from param a; 'literal' asserts no dependency — a wrong claim that also drops the param->arg edge from argBlast. C# was checked and is CLEAN ($\"{a}\" -> unknown+counted) because interpolated_string_expression is not in its literalTypes.",
+  "repro": "node F:/tmp/flowaudit/run.cjs  (cases JS-4, PY-4)",
+  "v1": "Reproduced independently on current code and the method survives audit. (1) Repro: fresh node process, harness requires repo source directly by absolute path (no install/server/port involved); repo HEAD = a937e97 with both files clean in git status. JS-4 `g(`v=${a}`)` returns args:[{from:'literal'}]",
+  "v2": "HIGH stands as a release gate for 0.0.4. (1) Impact on installed usage: the expression layer is the headline feature of the unpublished 0.0.4 (npm latest = 0.0.3; HEAD a937e97 = 'release: 0.0.4 — ... the expression layer'). A real user reaches the bug via `cs symbol flow <id>` (packages/core/bin/cod"
+ },
+ {
+  "item": "zero-silence",
+  "title": "Python augmented assignment (x += b) invisible: 'augmented_assignment' missing from python assignTypes, stale param:a claimed",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:15",
+  "evidence": "Case PY-1 `def f(a,b): x=a; x+=b; g(x)` -> calls g args:[{from:'param:a'}], unresolvedFlows:0. python assignTypes = Set(['assignment']) only; tree-sitter-python emits 'augmented_assignment' for +=, so the write is silently skipped and the pre-+= provenance survives. Plain reassignment (PY-10) IS tracked correctly.",
+  "repro": "node F:/tmp/flowaudit/run.cjs  (case PY-1)",
+  "v1": "The finding holds and I could not refute it. (1) Reproduced independently: a fresh node process from the repo (main a937e97), calling extractFlowTS directly with `def f(a, b):\\n x = a\\n x += b\\n g(x)`, returns calls g args:[{from:'param:a'}] with unresolvedFlows:0 and capped:false — a stale asserted",
+  "v2": "Finding holds and is genuinely release-gating for 0.0.4. (1) IMPACT — real installed-user path, not a repo-internal quirk: root package `codesynapt` ships `packages/core/` in its npm `files` and exposes bin `cs`; `cs symbol flow <name>` (packages/core/bin/codesynapt.cjs:1232-1238, advertised in CLI "
+ },
+ {
+  "item": "zero-silence",
+  "title": "Java/C# compound assignment (x += b) treated as plain assignment: claims param:b for a value that is a+b",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:132-149",
+  "evidence": "Case JAVA-1 `int x=a; x+=b; g(x);` -> g args:[{from:'param:b'}], unresolvedFlows:0. Case CS-1 identical -> 'param:b'. 'assignment_expression' is in assignTypes for both languages but the walker never inspects the operator, so `x += b` overwrites locals[x] with sourceOf(b)='param:b'; the value can never be purely b.",
+  "repro": "node F:/tmp/flowaudit/run.cjs  (cases JAVA-1, CS-1)",
+  "v1": "Reproduced on current code (main repo path, fresh node processes) twice: once via the inspector's harness and once via my own independent minimal script that inspects the raw tree-sitter AST. For Java `int x=a; x+=b; g(x);` and the identical C# case, extractFlowTS returns g/G arg0 from='param:b' wit",
+  "v2": "UPHELD at HIGH. (1) Repro re-run twice: the inspector's harness (node F:/tmp/flowaudit/run.cjs — JAVA-1/CS-1 FAIL exactly as claimed) and my own independent script calling extractFlowTS directly from the repo module with hand-built sources — both return g/G arg0 from='param:b', unresolvedFlows=0 for"
+ },
+ {
+  "item": "zero-silence",
+  "title": "Lambda/comprehension scopes not treated as nested functions: shadowed inner params attributed to the OUTER function's param (py/java/cs)",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:13,24,35 (fnTypes) + :130 (nested-fn skip)",
+  "evidence": "Case PY-3 `def f(a): h(lambda a: g(a))` -> g args:[{from:'param:a'}] (the value is the lambda's own param, never outer a). Case PY-2 `r=[g(a) for a in xs]` -> g args:[{from:'param:a'}] (py3 comprehension var has its own scope). Case JAVA-4 `void f2(int a){ h(a -> g(a)); }` -> g args:[{from:'param:a'}]. Case CS-5 `H(a => G(a))` -> G args:[{from:'param:a'}]. fnTypes for these languages omit lambda/lambda_expression and comprehensions, so the walker descends into them with the outer scope and attributes their internal calls+provenance to the outer symbol. JS is CLEAN here (case JS-10) because FN_",
+  "repro": "node F:/tmp/flowaudit/run.cjs  (cases PY-2, PY-3, JAVA-4, CS-5)",
+  "v1": "CONFIRMED. (1) Reproduced independently: I wrote my own minimal script (F:/tmp/skeptic_flow/check.cjs, fresh node process requiring the repo libs directly) at HEAD a937e97 with a clean working tree for both flow files. All four cases reproduce: PY-3 `def f(a): h(lambda a: g(a))` -> g args [{from:'pa",
+  "v2": "CONFIRMED as release-gating for 0.0.4, with one evidence leg trimmed. (1) Impact: a real installed 0.0.4 user hits this. The npm package ships packages/core/ (root package.json `files`), `cs symbol flow <name>` is a documented CLI subcommand, and extractFlowAuto (packages/core/lib/symbol-flow.cjs:23"
+ },
+ {
+  "item": "zero-silence",
+  "title": "Python default-value identifier becomes a 'parameter': def f(a, b=DEFAULT) yields params [a, DEFAULT], drops b, and any use of global DEFAULT is claimed param:DEFAULT",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:90-107 (pickParams last-identifier rule)",
+  "evidence": "Case PY-5 `def f(a, b=DEFAULT): g(b); h(DEFAULT)` -> params:[\"a\",\"DEFAULT\"]; h args:[{from:'param:DEFAULT'}] (DEFAULT is a module global, not a parameter binding); g(b) -> unknown (b missing from params; at least counted). pickParams takes the LAST identifier inside default_parameter, which is the default-value expression's identifier, not the binding name. Wrong param surface + wrong provenance claim. Literal defaults (b=1) are unaffected; identifier defaults are.",
+  "repro": "node F:/tmp/flowaudit/run.cjs  (case PY-5)",
+  "v1": "Reproduced independently and the method is sound. I wrote my own minimal harness (F:/tmp/skeptic-py5/check.cjs, fresh node process requiring the repo file by absolute path — no server, no port, no install involved) against current main a937e97 with packages/core/lib/symbol-flow-ts.cjs unmodified per",
+  "v2": "UPHELD as HIGH for the 0.0.4 gate. (1) Re-ran the repro myself on main a937e97 (node F:/tmp/skeptic-py5/check.cjs, fresh process requiring the unmodified shipped module): params [\"a\",\"DEFAULT\"], h(DEFAULT) -> from:'param:DEFAULT', g(b) -> 'unknown' (counted), literal-default control correct. Holds e"
+ },
+ {
+  "item": "zero-silence",
+  "title": "Call-of-call invents a wrong callee: make(a)(b) recorded as a call named 'a' with arg param:b, and return claimed 'call:a'",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:47-65 (tsCalleeName last-identifier fallback)",
+  "evidence": "Case PY-6 `def f(a,b): return make(a)(b)` -> calls:[{name:'a',args:[{from:'param:b'}]},{name:'make',args:[{from:'param:a'}]}], returns:[{from:'call:a'}], unresolvedFlows:0. The outer call's function node is the inner call `make(a)`; the fallback walk keeps the LAST identifier seen, which is the inner ARGUMENT 'a'. Fabricated call edge to a non-callable, plus wrong return provenance. Same fallback would name `arr[i](x)` as call:i.",
+  "repro": "node F:/tmp/flowaudit/run.cjs  (case PY-6)",
+  "v1": "Reproduced independently on current code (HEAD a937e97, file unmodified) with a fresh node process and my own minimal script, not the inspector's harness. Python `def f(a,b): return make(a)(b)` via extractFlowTS yields exactly the claimed output: calls=[{name:'a',args:[{from:'param:b'}]},{name:'make",
+  "v2": "Finding holds and is release-gating for 0.0.4. (1) Impact: a real npm 0.0.4 user reaches this via the documented CLI subcommand `cs symbol flow <name>` (packages/core/bin/codesynapt.cjs:238, 1232-1238) -> GET /symbol/flow (routed by both control-server.cjs and electron/main.cjs via handleSymbolView)"
+ },
+ {
+  "item": "parity",
+  "title": "E2 argument blast silently returns empty (and returnsParam:false) for default-valued / typo'd params — silence and a false negative claim",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-flow.cjs:68-70 (param extraction), :139-187 (argBlast)",
+  "evidence": "extractFlow pushes '(pattern)' for ANY non-Identifier param (symbol-flow.cjs:69-70 'else out.params.push((pattern)) // destructured') — but AssignmentPattern (default value, e.g. `depth = 3`) is NOT destructured and its name is statically certain. argBlast (:139) never validates paramName against the seed function's params. Direct proof on the repo walker:\n  node -e \"... extractFlow('function outer(x, y = 1) { inner(y); return y }', ...)\" →\n  E1 facts: {\"params\":[\"x\",\"(pattern)\"],...,\"unresolvedFlows\":2}  (counted — OK)\n  E2 blast for y: {\"seed\":{\"fn\":\"outer\",\"param\":\"y\"},\"impacted\":[],\"unreso",
+  "repro": "1) node -e \"const f=require('F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-flow.cjs');const src='function outer(x, y = 1) { inner(y); return y }\\nfunction inner(z) { return z }\\n';console.log(JSON.stringify(f.extractFlow(src,'t.js',{name:'outer',startLine:1,endLine:1})));const g={calleesOf:()=>[{id:'t.js#inner@2',name:'inner',qualifiedName:'inner',file:'t.js',startLine:2,endLine:2}]};consol",
+  "v1": "CONFIRMED. (1) Reproduced independently: fresh node process loading F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-flow.cjs by absolute path on current code gave byte-identical results to the finding — E1 for `function outer(x, y = 1)` yields params [\"x\",\"(pattern)\"] with unresolvedFlows:2 (co",
+  "v2": ""
+ },
+ {
+  "item": "parity",
+  "title": "Route parity gap: POST /symbol/scan exists on desktop only — 404 on headless control server",
+  "severity": "LOW",
+  "file": "electron/main.cjs:2056 vs packages/core/lib/control-server.cjs (absent)",
+  "evidence": "main.cjs:2056 `if (req.method === 'POST' && sub === 'scan') { return writeJson(res, 200, withMeta(g.stats())) }` (forces symbol-graph rebuild via forceRebuild at :1597). control-server.cjs has no 'scan' string at all (rg \"'scan'\" → no matches); live probe: curl -X POST http://127.0.0.1:18267/symbol/scan → {\"error\":\"unknown endpoint\",\"path\":\"/symbol/scan\"} HTTP 404 (twice). Headless clients cannot force a symbol rebuild. Mitigation: headless scanner.getSymbolGraph() honors _symbolGraphStale (scanner.js:781-789), so file edits do invalidate; only the explicit force-rebuild surface is missing. No",
+  "repro": "node F:/tmp/cs-audit-flow/server.cjs 18267   # headless createControlServer on repo\ncurl -s -X POST http://127.0.0.1:18267/symbol/scan -w ' HTTP %{http_code}'   # → 404\nrg -n \"sub === 'scan'\" electron/main.cjs; rg -n \"'scan'\" packages/core/lib/control-server.cjs",
+  "v1": "Independently reproduced on current code (main worktree) with a fresh node process and my own port (17533, not the inspector's 18267), then cleaned up. The harness (F:/tmp/cs-audit-flow/server.cjs) is sound: it imports the repo's live scanner.js and control-server.cjs directly — no stale install pos",
+  "v2": ""
+ },
+ {
+  "item": "parity",
+  "title": "Headless 404 discovery hint omits 'flow' and 'accounting' (both actually served); desktop 404 shape diverges (no list)",
+  "severity": "LOW",
+  "file": "packages/core/lib/control-server.cjs:1862 vs electron/main.cjs:2088",
+  "evidence": "GET /symbol/bogus-sub on headless → {\"error\":\"unknown symbol endpoint\",\"sub\":\"bogus-sub\",\"valid\":[\"summary\",\"graph\",\"find?q=\",\"node?id=\",\"callers?id=\",\"callees?id=\",\"blast?id=[&depth=&direction=callers|callees]\",\"explore?q=\"]} — 'flow' and 'accounting' are missing although GET /symbol/flow and /symbol/accounting return 200 on this same server (verified live). An agent that discovers endpoints from this hint will never find the new expression layer. Desktop counterpart (main.cjs:2088) returns {error:'unknown symbol endpoint', path} with no valid list — divergent error shape between the two serv",
+  "repro": "curl -s http://127.0.0.1:18267/symbol/nope | python -c \"import json,sys; print(json.load(sys.stdin)['valid'])\"   # run twice — 'flow'/'accounting' absent both times; compare control-server.cjs:1862 and main.cjs:2088",
+  "v1": "Reproduced independently on CURRENT code (main a937e97) with a FRESH node process and my own server — not the inspector's port 18267 instance, eliminating the stale-process/stale-install concern. I started a clean control server (packages/core/lib/control-server.cjs via createControlServer, fresh Sc",
+  "v2": ""
+ },
+ {
+  "item": "diff-review",
+  "title": "Python tracer silently loses ALL observed edges when the traced script exits via sys.exit() — then claims 'no in-repo python frames observed'",
+  "severity": "HIGH",
+  "file": "packages/core/lib/pytracer.py:80-81 (with user-visible wrong message at packages/core/bin/codesynapt.cjs:2696-2699)",
+  "evidence": "pytracer.py:80-81 reads `except SystemExit:\\n        raise` BEFORE the `except BaseException` flush handler and before the success-path `_flush(...)` — so SystemExit (the standard `sys.exit(main())` pattern of argparse/click/CLI scripts) skips _flush entirely; CS_PYTRACE_OUT is never written. Repro output: `result: 42` / `exit=0` / out file `(MISSING)` (twice). Full e2e against a fresh headless server printed: `result: 42` then `no in-repo python frames observed (script outside the project, ignored by scan rules ... or crashed before any call). exit=0` — a wrong claim: frames WERE observed (wo",
+  "repro": "cd F:/tmp/audit004/pyproj; CS_PYTRACE_OUT=F:/tmp/x.jsonl CS_PYTRACE_ROOT=F:/tmp/audit004/pyproj python F:/MyProg/3dgit/filegraph3d/packages/core/lib/pytracer.py app_exit.py  (app_exit.py = def work/def main + `sys.exit(main())`). Out file never created. E2E: CS_PORT=18871 node .../codesynapt.cjs serve (bg) then CS_PORT=18871 node .../codesynapt.cjs trace run -- python app_exit.py",
+  "v1": "Independently reproduced on current main (a937e97) with fresh fixtures in my own scratch dir (F:/tmp/skeptic_pytrace), fresh node processes, and my own headless server on port 17453 (started and cleaned up by me). Tracer-level: identical scripts where the ONLY difference is `sys.exit(main())` vs bar",
+  "v2": "FINDING HOLDS, HIGH is the right severity for a 0.0.4 release gate. (1) Real installed-user impact: `if __name__ == '__main__': sys.exit(main())` is the canonical Python CLI entry idiom (official docs, argparse/click/cookiecutter templates; click's standalone mode and pytest both terminate via Syste"
+ },
+ {
+  "item": "diff-review",
+  "title": "Python tracer breaks multi-file projects: runpy.run_path does not put the script's directory on sys.path — sibling imports raise ModuleNotFoundError under tracing while the same script runs fine directly",
+  "severity": "HIGH",
+  "file": "packages/core/lib/pytracer.py:77 (runpy.run_path; no sys.path adjustment anywhere in the file)",
+  "evidence": "Direct run: `python app.py` → `result: 42`. Via tracer: `ModuleNotFoundError: No module named 'helper'` / exit=1 (reproduced twice). Cause: `python app.py` puts dir(app.py) at sys.path[0]; under `python pytracer.py app.py`, sys.path[0] is the CodeSynapt lib dir and runpy.run_path() of a plain file does not add the target's directory. cwd (PROJECT_ROOT) is also not on sys.path. Any Python project with more than one file — the main use case for call-edge tracing — cannot be traced. The CLI then shows the script's traceback + 'no in-repo python frames observed ... crashed before any call'.",
+  "repro": "F:/tmp/audit004/pyproj has helper.py (def assist) and app.py (`from helper import assist`). `python app.py` works; `CS_PYTRACE_OUT=F:/tmp/y.jsonl CS_PYTRACE_ROOT=F:/tmp/audit004/pyproj python F:/MyProg/3dgit/filegraph3d/packages/core/lib/pytracer.py app.py` → ModuleNotFoundError",
+  "v1": "Reproduced independently on current code (HEAD a937e97, pytracer.py and codesynapt.cjs unmodified per git status) with a freshly authored two-file fixture in my own scratch dir (F:/tmp/skeptic_py, cleaned up afterwards), Python 3.13.7. Direct run `python app.py` from the project dir prints `result: ",
+  "v2": "Finding HOLDS at HIGH for a release gate. (1) Re-reproduced on HEAD: fresh two-file fixture (F:/tmp/verif2_py, since cleaned), Python 3.13 — `python app.py` prints `result: 42` exit 0; the exact CLI-equivalent invocation (`python <lib>/pytracer.py app.py` with cwd=project, CS_PYTRACE_OUT/CS_PYTRACE_"
+ },
+ {
+  "item": "diff-review",
+  "title": "JS flow walker (E1/E2) emits WRONG provenance on let-reassignment: `let c = a; c = 5; use(c)` is reported as use(param:a) with unresolvedFlows=0",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-flow.cjs:97 (walk handles only VariableDeclarator; AssignmentExpression is never processed, so the `locals` map keeps the stale binding)",
+  "evidence": "node -e against the repo module: input `function target(a){ let c = a; c = 5; use(c) }` → output `[{\"index\":0,\"from\":\"param:a\"}] unresolved: 0` (reproduced twice). The value at the call is the literal 5; 'param:a' is a wrong edge and it is NOT counted as unresolved — exactly the forbidden category ('CERTAIN flows only ... never a guess' per the module header and the API `note`). It also feeds argBlast (E2), producing false argument-blast hits. The tree-sitter walker handles assignment_expression, so the identical Python case correctly returns 'literal' — JS is the outlier.",
+  "repro": "cd F:/MyProg/3dgit/filegraph3d && node -e \"const f=require('./packages/core/lib/symbol-flow.cjs');console.log(JSON.stringify(f.extractFlow('function target(a){\\n let c = a\\n c = 5\\n use(c)\\n}','x.js',{name:'target',startLine:1,endLine:5}).calls))\"",
+  "v1": "Reproduced independently on current main (a937e97) with a fresh node process requiring the module directly from the repo path: `let c = a; c = 5; use(c)` yields args [{index:0, from:'param:a'}] with unresolvedFlows=0, while the actual value at the call is the literal 5. This is an asserted WRONG edg",
+  "v2": ""
+ },
+ {
+  "item": "diff-review",
+  "title": "All flow walkers are branch-insensitive (last-write-wins): if/else assignment reports the textually-last branch as the certain source, unresolvedFlows=0",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-flow-ts.cjs:132-148 (locals.set unconditionally overwrites on each assignment in tree order; same pattern in symbol-flow.cjs sourceOf/locals)",
+  "evidence": "Python input `def target(a, cond):\\n if cond: c = a\\n else: c = 5\\n use(c)` → `[{\"index\":0,\"from\":\"literal\"}] unresolved: 0` (reproduced twice). At runtime c may carry param a; claiming 'literal' with zero unresolved is a wrong claim AND a silent miss for E2 argument blast (the param flow through use() is never surfaced nor counted). Per the bar, a variable with multiple conflicting writes should be 'unknown' (counted), not the last write.",
+  "repro": "cd F:/MyProg/3dgit/filegraph3d && node -e \"const f=require('./packages/core/lib/symbol-flow.cjs');f.extractFlowAuto(['def target(a, cond):','    if cond:','        c = a','    else:','        c = 5','    use(c)'].join('\\n'),'x.py',{name:'target',startLine:1,endLine:6}).then(r=>console.log(JSON.stringify(r.calls.find(c=>c.name==='use').args), r.unresolvedFlows))\"",
+  "v1": "Reproduced exactly on current main (a937e97) with a fresh node process from the repo path: the Python if/else fixture returns [{\"index\":0,\"from\":\"literal\"}] with unresolvedFlows=0. To rule out fixture-authored-to-confirm, I varied the test independently: swapping branch order flips the answer to par",
+  "v2": ""
+ },
+ {
+  "item": "diff-review",
+  "title": "`cs trace run -- python -m pkg` (or `py -3 app.py`) treats the flag as the script path — raw FileNotFoundError traceback for '-m'",
+  "severity": "LOW",
+  "file": "packages/core/bin/codesynapt.cjs:2672,2679 (isPython regex matches `py`/`python`, then pyCmd inserts pytracer.py before ALL remaining args, so cmd.slice(1)[0]='-m' becomes pytracer's target)",
+  "evidence": "`python pytracer.py -m app_exit` → `FileNotFoundError: [Errno 2] No such file or directory: 'F:\\\\tmp\\\\audit004\\\\pyproj\\\\-m'` (reproduced twice), then the CLI would print the 'no in-repo python frames observed' message. `python -m pytest` is a very common trace target; usage text only promises `python <script.py>` but there is no flag detection/clear error.",
+  "repro": "CS_PYTRACE_OUT=F:/tmp/z.jsonl CS_PYTRACE_ROOT=F:/tmp/audit004/pyproj python F:/MyProg/3dgit/filegraph3d/packages/core/lib/pytracer.py -m app_exit",
+  "v1": "The finding reproduces exactly on current main (a937e97) and the inspector's method is sound. I reproduced independently in a fresh scratch dir (F:\\tmp\\skeptic_pym, my own fixture: pkg/__init__.py + pkg/__main__.py, Python 3.13.7) at two levels: (1) direct pytracer invocation `python pytracer.py -m ",
+  "v2": ""
+ },
+ {
+  "item": "tarball",
+  "title": "Installed-from-npm copy silently loses Layer-2 for all tree-sitter languages (Python/Java/C#): tree-sitter-wasms resolved via hardcoded __dirname path that only exists in repo dev layout",
+  "severity": "HIGH",
+  "file": "F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-parser-treesitter.cjs:33",
+  "evidence": "Code: `const WASM_DIR = path.join(__dirname, '..', '..', '..', 'node_modules', 'tree-sitter-wasms', 'out')` — from installed location node_modules/codesynapt/packages/core/lib this resolves to node_modules/codesynapt/node_modules/tree-sitter-wasms which does not exist (npm hoists the dep to sibling node_modules/tree-sitter-wasms).\nInstalled serve log (reproduced twice, serve.log and serve2.log): `[symbol] python parser failed — L2 disabled for this language: ENOENT: no such file or directory, open 'F:\\tmp\\insp-tarball\\node_modules\\codesynapt\\node_modules\\tree-sitter-wasms\\out\\tree-sitter-pytho",
+  "repro": "cd F:/MyProg/3dgit/filegraph3d && npm pack --pack-destination F:/tmp/insp-tarball\ncd F:/tmp/insp-tarball && npm init -y && npm install ./codesynapt-0.0.4.tgz\n# sample: F:/tmp/insp-sample with index.js requiring src/util.js, plus calc.py (def double / def main / __main__ guard)\ncd F:/tmp/insp-sample\nCS_PORT=17342 node F:/tmp/insp-tarball/node_modules/codesynapt/packages/core/bin/codesynapt.cjs serv",
+  "v1": "CONFIRMED — reproduced independently end-to-end on current main (a937e97), fresh npm pack, fresh consumer install in my own scratch dir (F:/tmp/skeptic-tarball, distinct from the inspector's), own ports 17561-17563, fresh node processes. (1) Hoisting verified: after `npm install ./codesynapt-0.0.4.t",
+  "v2": "CONFIRMED as release-gating HIGH. (1) Re-reproduced independently in a third, fresh environment (F:/tmp/verif2, port 17471, fresh npm pack of main a937e97 + fresh consumer install): npm hoists tree-sitter-wasms to the consumer's top-level node_modules (F:/tmp/verif2/consumer/node_modules/tree-sitter"
+ },
+ {
+  "item": "tarball",
+  "title": "Parser-load failure is silent at the CLI surface and produces a wrong claim: `cs symbol summary` reports 'coverage: 3/3 files (100%)' while the Python L2 parser is disabled",
+  "severity": "MED",
+  "file": "F:/MyProg/3dgit/filegraph3d/packages/core/lib/symbol-views.cjs (coverage line) + symbol-parser-treesitter.cjs load-failure handler",
+  "evidence": "Installed copy with Python parser ENOENT-disabled prints `coverage: 3/3 files (100%)` — calc.py counted as covered with zero symbols extracted. The ENOENT is logged only to the server's stdout (a CLI/MCP user never sees it). Normal behavior shows uncovered languages explicitly (after the wasm was planted, summary printed `coverage: 3/6 files (50%) · uncovered: json`), so a load-failed language being counted as covered is an inconsistency, not the design. Python trace run likewise reports '2 raw frame-edges' then 'observed call edges: 0' with no explanation of where the 2 frames went. Product b",
+  "repro": "Same setup as the HIGH finding; observe `cs symbol summary` output (claims 100%) vs the serve log line `[symbol] python parser failed — L2 disabled for this language: ENOENT...` which is never surfaced through the CLI.",
+  "v1": "Reproduced independently on current main (a937e97) with fresh node processes from the repo, own ports 17435/17437, CS_PORT pinned (no registry/stale-routing risk). Fixture: 2 JS files + calc.py at F:/tmp/csfix/skcov. I simulated the installed-copy state with a preload shim that makes ONLY tree-sitte",
+  "v2": ""
+ },
+ {
+  "item": "tarball",
+  "title": "CLI has no version command: `cs --version`, `cs -v`, `cs version` all print 'unknown command' + full help",
+  "severity": "LOW",
+  "file": "F:/MyProg/3dgit/filegraph3d/packages/core/bin/codesynapt.cjs",
+  "evidence": "`node node_modules/codesynapt/packages/core/bin/codesynapt.cjs --version` -> `error: unknown command: --version` (exit 1, dumps full help). Same for `-v` and `version`. grep -i version over the installed bin file: no matches. Installed users cannot report which CodeSynapt version they run (support/bug-report friction for a 0.0.4 npm release).",
+  "repro": "node F:/tmp/insp-tarball/node_modules/codesynapt/packages/core/bin/codesynapt.cjs --version",
+  "v1": "Reproduced independently on CURRENT main (a937e97) with a fresh node process running the repo source directly (not the inspector's installed tarball): `node packages/core/bin/codesynapt.cjs --version` prints `error: unknown command: --version` plus the full USAGE block and exits 1; identical for `-v",
+  "v2": ""
+ },
+ {
+  "item": "tarball",
+  "title": "Fresh `npm install codesynapt-0.0.4.tgz` reports 5 vulnerabilities (4 high, 1 critical, 'No fix available') via @xenova/transformers -> onnxruntime-web -> onnx-proto -> protobufjs",
+  "severity": "LOW",
+  "file": "F:/MyProg/3dgit/filegraph3d/package.json (optionalDependencies: @xenova/transformers ^2.17.2)",
+  "evidence": "npm audit in the fresh install: `protobufjs <=7.5.7 / Severity: critical / Arbitrary code execution in protobufjs ... No fix available / @xenova/transformers >=2.0.2 depends on vulnerable versions ... codesynapt * depends on vulnerable versions of @xenova/transformers / 5 vulnerabilities (4 high, 1 critical)`. Optional dep, but npm installs optionals by default, so every installed user sees this banner on install. First impression + supply-chain optics for release.",
+  "repro": "cd F:/tmp/insp-tarball && npm install ./codesynapt-0.0.4.tgz; npm audit",
+  "v1": "Independently reproduced on current code (main working tree, version 0.0.4). I packed a FRESH tarball with `npm pack` from F:/MyProg/3dgit/filegraph3d (no prepack/prepare hooks, so the tarball reflects current tree; shasum 3cb6f6cad9ab...) and installed it into a brand-new empty directory under F:/t",
+  "v2": ""
+ },
+ {
+  "item": "journey",
+  "title": "Packaging: Python (and all tree-sitter languages) Layer-2 silently dead in every npm install — wasm path is not hoist-safe, while coverage still claims the files are covered",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-parser-treesitter.cjs:33",
+  "evidence": "Code: `const WASM_DIR = path.join(__dirname, '..', '..', '..', 'node_modules', 'tree-sitter-wasms', 'out')` — resolves to `node_modules/codesynapt/node_modules/tree-sitter-wasms` in a consumer install, but npm hoists tree-sitter-wasms to the consumer root. Server log (only place the error appears): `[symbol] python parser failed — L2 disabled for this language: ENOENT: no such file or directory, open 'F:\\tmp\\cs-audit-004\\consumer\\node_modules\\codesynapt\\node_modules\\tree-sitter-wasms\\out\\tree-sitter-python.wasm'`. Packed install: `cs symbol summary` → \"function-level graph: 23 symbols ... cove",
+  "repro": "cd F:/MyProg/3dgit/filegraph3d && npm pack --pack-destination F:/tmp/x ; mkdir F:/tmp/x/consumer && cd F:/tmp/x/consumer && npm init -y && npm install ../codesynapt-0.0.4.tgz ; cd <sample with .py files> && CS_PORT=17471 .../consumer/node_modules/.bin/cs serve . --port 17471 & ; cs symbol find greet ; cs symbol summary",
+  "v1": "Independently reproduced from scratch on current main (a937e97) in a fresh scratch dir (F:/tmp/skeptic-l2), with fresh node processes and my own server on dedicated 174xx ports (verified via /health root field, cleaned up afterward). (1) Static analysis: package.json publishes a single package 'code",
+  "v2": "Finding holds at HIGH and is release-gating. I re-ran the repro from scratch on main a937e97 in a fresh dir (F:\\tmp\\verify2-l2): npm pack -> npm install of the tarball into a clean consumer -> ran the INSTALLED cs serve on a 2-file Python+JS sample (port 17492, own process, cleaned up). Result: `cs "
+ },
+ {
+  "item": "journey",
+  "title": "`cs trace run -- python <script>` (0.0.4 headline feature) breaks programs that run fine under plain python: pytracer's runpy.run_path does not put the script's directory on sys.path",
+  "severity": "HIGH",
+  "file": "packages/core/lib/pytracer.py:77",
+  "evidence": "From sample root, plain run: `python py/main.py` → \"hi world / 3 / ... woof\", exit=0. Traced run: `cs trace run -- python py/main.py` → `File \"py/main.py\", line 1, in <module> from helper import greet, add  ModuleNotFoundError: No module named 'helper'` exit=1. Reproduced twice. pytracer.py:77 `runpy.run_path(target, run_name=\"__main__\")` — plain `python script.py` prepends the script's dir to sys.path; the tracer does not. The failure message also misleads: `no in-repo python frames observed (script outside the project, ignored by scan rules — e.g. _underscore-prefixed files — or crashed befo",
+  "repro": "cd F:/tmp/cs-audit-004/sample ; python py/main.py  (exit 0) ; CS_PORT=17471 ../consumer/node_modules/.bin/cs trace run -- python py/main.py  (ModuleNotFoundError, exit 1)",
+  "v1": "Finding CONFIRMED on current code. I reproduced independently at repo HEAD a937e97 (clean tree), deliberately bypassing the auditor's consumer install by invoking the repo's own files: (1) plain `python py/main.py` from F:/tmp/cs-audit-004/sample prints \"hi world / 3 / ... woof\", exit 0; (2) direct ",
+  "v2": "Finding holds and is release-gating. Re-reproduced against the actual installed 0.0.4 package (F:/tmp/cs-audit-004/consumer/node_modules/codesynapt, version 0.0.4, pytracer.py byte-identical to HEAD a937e97): plain `python py/main.py` exits 0; the tracer invocation (exactly as spawned by codesynapt."
+ },
+ {
+  "item": "journey",
+  "title": "`cs symbol accounting` labels statically-invoked constructors \"dead\" (defined as \"NO static evidence of life\") despite explicit `new Class()` in a reachable function — wrong claim, present in BOTH packed and repo code",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-graph.cjs (accounting labeling)",
+  "evidence": "accounting --json deadSymbols: `Shape.constructor base.js:2`, `Circle.constructor circle.js:4`, `Square.constructor square.js:4` — but runApp (entry, reachable) contains `new Circle(2)` and `new Square(3)`, and the graph itself knows it: `cs symbol find Circle` → \"[class] Circle ... (callers 1)\" with runApp as caller; Circle.constructor calls `super('circle')` → Shape.constructor. The dead label's own definition reads: \"NO static evidence of life — a floor, NOT proof: dynamic sites (3) and framework-implicit entries can still invoke these\" — neither caveat applies; this is a plain static `new`",
+  "repro": "cd F:/tmp/cs-audit-004/sample ; CS_PORT=<port> cs symbol accounting --json | jq .deadSymbols ; cs symbol find Circle  (shows callers 1)",
+  "v1": "Reproduced independently on CURRENT repo code (main, F:/MyProg/3dgit/filegraph3d) in a fresh node process, bypassing any packed install or running server: imported packages/core/scanner.js directly, scanned F:/tmp/cs-audit-004/sample, built the symbol graph via the same buildSymbolGraph() path the c",
+  "v2": "Finding CONFIRMED as release-gating, HIGH is the correct severity. (1) Re-ran the repro myself on current main using the real product path (Scanner.start() -> getSymbolGraph() -> accounting(), the same code the control server uses, not a synthetic harness): total=35, dead=5, unexplained=0, with Shap"
+ },
+ {
+  "item": "journey",
+  "title": "`cs serve` prints \"Ctrl-C to stop.\" but self-exits after a few idle minutes — headless user's server disappears mid-journey",
+  "severity": "MED",
+  "file": "packages/core/bin/codesynapt.cjs:528",
+  "evidence": "Startup text: `[cs] Ctrl-C to stop.` Later, with no warning on any client surface, the process exits: `[cs] no live sessions/viewers — daemon self-exit` (code: codesynapt.cjs:528, idle-reap by design, 30s activity guard + empty ticks). Happened three times during this audit (~3-5 min between CLI commands); subsequent `cs symbol ...` / curl calls fail until the user re-runs serve. Plain CLI commands do not hold a session lease, so a human using `cs serve` + occasional commands — the documented headless mode — loses the server repeatedly. Foreground `cs serve` contradicts its own printed contrac",
+  "repro": "cs serve . --port 17471 ; run one cs command ; wait ~5 min ; curl http://127.0.0.1:17471/health → connection refused; serve log ends with \"[cs] no live sessions/viewers — daemon self-exit\"",
+  "v1": "CONFIRMED — and the reality is worse than reported. Independent repro on current main (a937e97), fresh node process from the repo, throwaway project (F:\\tmp\\cs-reap-17483), random 17xxx port: `node packages/core/bin/codesynapt.cjs serve <dir> --port 17483` printed the full startup banner ending in \"",
+  "v2": ""
+ },
+ {
+  "item": "journey",
+  "title": "Korean text in English CLI surfaces: `cs safety` runtime output and several `cs --help` entries are untranslated",
+  "severity": "MED",
+  "file": "packages/core/bin/codesynapt.cjs (help text + safety formatter)",
+  "evidence": "`cs safety src/dynamic.js` → `🟢 SAFE  src/dynamic.js\\n   의존 2  ·  routes 0  ·  외부 API 0  ·  테스트 0`. `cs --help` lines: `cs safety <id> ... 🟢/🟡/🔴 + 한 줄 권고. AI에게 시키기 전 \"이 파일 건드려도 되나\" 즉답.`, `cs bundle ... AI에게 \"이 파일 수정해줘\" 시킬 때 함께 줄 파일 묶음. token 예산(기본 8000) 안에서...`, also cs env / cs suggest / cs feature / cs schema / cs bench / cs vendors / cs secrets / cs url / cs init / cs preflight descriptions. A new (non-Korean) npm user cannot read the safety verdict details or half the help screen.",
+  "repro": "cs --help ; cs safety src/dynamic.js",
+  "v1": "Reproduced independently on current main (a937e97) with fresh node processes and my own headless server (cs serve --port 17431, cleaned up after). Both legs of the finding hold. (1) Help screen: `node packages/core/bin/codesynapt.cjs --help` shows Korean descriptions for cs safety, bundle, env, sugg",
+  "v2": ""
+ },
+ {
+  "item": "journey",
+  "title": "Help claims symbol commands and remote commands need the desktop app, but they work against headless `cs serve` — misleads exactly the headless audience",
+  "severity": "MED",
+  "file": "packages/core/bin/codesynapt.cjs:~324 (help text)",
+  "evidence": "Help section headers: `── Remote (needs the desktop app running at :7707) ──────────` and `── Function / symbol level (Layer 2) — needs desktop app ────`. In this audit every listed command (symbol summary/find/callers/callees/blast/node/flow, accounting, safety, blast, trace) ran fine against `cs serve` with CS_PORT set — no desktop, no :7707. A headless/CI user reading the help would conclude Layer 2 is unavailable to them.",
+  "repro": "cs --help (read section headers) ; then cs serve . --port 17471 ; CS_PORT=17471 cs symbol summary → works",
+  "v1": "Reproduced independently on current main (a937e97) with a fresh node process and my own port (17473, cleaned up afterward). The finding holds: (1) Help text at packages/core/bin/codesynapt.cjs:177 reads \"── Remote (needs the desktop app running at :7707) ──────────\" and line 230 reads \"── Function /",
+  "v2": ""
+ },
+ {
+  "item": "journey",
+  "title": "Per-symbol callees/node views show plain \"(none)\"/\"callees 0\" for a function whose only call is a dynamic site — the dynamic site is counted globally but invisible at point of use",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-views.cjs (callees/node rendering)",
+  "evidence": "`dispatch` body is `return handlers[name]();` (executes onStart/onStop at runtime). `cs symbol callees dispatch` → `callees (what this calls) of src/dynamic.js#dispatch@11\\n  (none)`; `--json` → `\"callees\": []` with no dynamic flag; `cs symbol node src/dynamic.js#dispatch@11` → `callers 1  ·  callees 0`. Only the global `cs symbol summary` reveals `3 dynamic call sites in 3 symbols ... recorded, statically unresolvable`. An agent asking \"what does dispatch call\" gets an answer indistinguishable from a genuinely leaf function. (Contrast: `cs symbol blast` DOES print the dynamic caveat, and `cs ",
+  "repro": "CS_PORT=<port> cs symbol callees dispatch ; cs symbol callees dispatch --json ; cs symbol node \"src/dynamic.js#dispatch@11\"",
+  "v1": "Reproduced exactly on current code from a fresh server/fixture, and the gap is visible directly in source. The \"counted-unknown is by design\" defense does not apply: at the /symbol/callees surface the dynamic site is not counted-unknown — it is entirely absent from the response (no field, no note, J",
+  "v2": ""
+ },
+ {
+  "item": "journey",
+  "title": "Summary text \"runtime tracing (cs trace run) fills them\" overstated: a JS run that executed the dynamic dispatch captured 0 NEW edges (sampling profiler missed the tiny calls)",
+  "severity": "LOW",
+  "file": "packages/core/lib/symbol-views.cjs (summary resolution footer)",
+  "evidence": "`cs symbol summary`: `3 dynamic call sites ... runtime tracing (cs trace run) fills them.` Then `cs trace run -- node src/index.js` (which definitely executed dispatch→onStart; program printed \"started\") reported: `observed call edges: 1 / 1 confirm a static call · 0 resolve a candidate · 0 NEW (dynamic, invisible to static)`; `cs symbol callees dispatch` still `(none)` afterwards. The trace output itself is honest (\"runtime sees only exercised paths — NOT completeness\"), but the summary's flat promise did not hold for a short-lived run.",
+  "repro": "CS_PORT=<port> cs trace run -- node src/index.js ; cs symbol callees dispatch",
+  "v1": "CONFIRMED (severity LOW, wording-level). Reproduced independently on current main (a937e97) with fresh fixtures and own servers (ports 17483/17484, since exited/cleaned). (1) Summary footer reproduces verbatim: \"N dynamic call sites ... runtime tracing (cs trace run) fills them.\" (2) The miss is rea",
+  "v2": ""
+ },
+ {
+  "item": "docs",
+  "title": "README test badge stale: claims 'tests: 174 passing', actual suite is 273 passing (31 files)",
+  "severity": "MED",
+  "file": "F:/MyProg/3dgit/filegraph3d/README.md:10",
+  "evidence": "README.md line 10: '[![Tests](https://img.shields.io/badge/tests-174%20passing-brightgreen)](./tests/)'. Actual: 'Test Files 31 passed (31) / Tests 273 passed (273)' from npx vitest run at commit a937e97. CHANGELOG 0.0.3 itself already says '253 tests'. The hardcoded badge ships a number stale by two releases.",
+  "repro": "cd F:/MyProg/3dgit/filegraph3d && npx vitest run | tail -5; grep -n 'tests-174' README.md",
+  "v1": "Independently reproduced on current HEAD a937e97 with a fresh `npx vitest run` from the repo root: suite exited 0 with \"Test Files 31 passed (31) / Tests 273 passed (273)\" — exactly matching the inspector's numbers, so no stale-install/misread-output issue. README.md:10 contains the static badge `[!",
+  "v2": ""
+ },
+ {
+  "item": "docs",
+  "title": "Scanner does not ignore its own .codesynapt/ data dir (only legacy '.filegraph3d' is in IGNORE_DIRS) — trace/history artifacts are counted as project files, inflate orphan counts, and cs legacy flags the tool's own trace file as a cleanup candidate",
+  "severity": "MED",
+  "file": "F:/MyProg/3dgit/filegraph3d/packages/core/scanner.js:21 (IGNORE_DIRS contains '.filegraph3d' but not '.codesynapt')",
+  "evidence": "After one documented 'cs trace run -- python src/calc.py', 'cs scan . --summary' went files:6→7 and 'cs ls' lists '.codesynapt/traces/runtime-1781223833069.json' as a tracked file. 'cs legacy' then reports: '[0.60] orphan   .codesynapt/traces/runtime-1781223833069.json — no incoming or outgoing edges' (a wrong cleanup claim about the tool's own data). 'cs tour' said 'project has 7 files' while summary said 6 (same artifact). By end of session 'cs bench' scanned '16 files' in a 9-source-file fixture — every trace run adds a new permanently-counted file. README:51 calls .codesynapt 'your local .",
+  "repro": "In any project: node .../codesynapt.cjs serve . --port P &; CS_PORT=P node .../codesynapt.cjs trace run -- python somefile.py; node .../codesynapt.cjs scan . --summary (file count grew); CS_PORT=P node .../codesynapt.cjs legacy (trace json flagged as orphan).",
+  "v1": "Reproduced end-to-end on current code (HEAD a937e97) with a fresh fixture (F:\\tmp\\cs-skeptic-1, 3 source files), my own server on port 17371, CS_PORT set explicitly — no stale process or wrong-port risk (my serve even logged that it kept the pre-existing lock at 17841 untouched). Sequence: baseline ",
+  "v2": ""
+ },
+ {
+  "item": "docs",
+  "title": "CLI help for 'cs symbol flow' is stale: says '(JS family; certain flows only, rest counted)' while 0.0.4 ships and CHANGELOG claims the 'reference four' JS/TS, Python, Java, C# — all four verified working",
+  "severity": "LOW",
+  "file": "F:/MyProg/3dgit/filegraph3d/packages/core/bin/codesynapt.cjs:240",
+  "evidence": "cs --help line: 'cs symbol flow <name|id>  # expression-layer E1 ... (JS family; certain flows only, rest counted).' CHANGELOG.md:21: 'Covers the reference four: JS/TS, Python, Java, C#.' Execution confirms the CHANGELOG, not the help: flow facts returned for login (JS), compute (py, with '1 flow(s) not trackable in E1 ... counted, not guessed'), Greeter.greet (java), Worker.Run (cs). The shipped help understates coverage; the two published surfaces contradict each other.",
+  "repro": "node .../codesynapt.cjs --help | grep -A2 'symbol flow'; then with a daemon up: cs symbol flow compute / greet / Run on py/java/cs fixtures — all return flow facts.",
+  "v1": "Reproduced independently on current HEAD (a937e97) with a fresh node process: `node F:\\MyProg\\3dgit\\filegraph3d\\packages\\core\\bin\\codesynapt.cjs --help` still prints \"(JS family; certain flows only, rest counted)\" for `cs symbol flow`, while CHANGELOG.md:21 for 0.0.4 claims \"Covers the reference fou",
+  "v2": ""
+ },
+ {
+  "item": "docs",
+  "title": "'cs write' success message prints 'wrote undefinedB' — byte count is undefined in the documented write command's output",
+  "severity": "LOW",
+  "file": "F:/MyProg/3dgit/filegraph3d/packages/core/bin/codesynapt.cjs (write handler success message)",
+  "evidence": "'wrote undefinedB to util.lua' — reproduced twice, both documented variants: file-path source ('cs write util.lua /f/tmp/.../w2.txt') and stdin source ('echo \"y = 3\" | cs write util.lua -'). The write itself succeeds (cs read confirms content).",
+  "repro": "Start serve with CS_AUTH_TOKEN=tok; CS_PORT=P CS_AUTH_TOKEN=tok node .../codesynapt.cjs write <id> <file> → 'wrote undefinedB to <id>'.",
+  "v1": "Finding CONFIRMED on current code (main a937e97, fresh node processes, own server on port 17431, cleaned up after). Reproduced both documented variants: file-path source and stdin source each printed 'wrote undefinedB to util.lua' while the write itself succeeded. Root cause is a field-name mismatch",
+  "v2": ""
+ },
+ {
+  "item": "docs",
+  "title": "README 'recommended setup (2 commands)' runs 'cs init' without stating the desktop/daemon must already be running — literal cold execution errors out",
+  "severity": "LOW",
+  "file": "F:/MyProg/3dgit/filegraph3d/README.md:149-154",
+  "evidence": "README: 'cd <your-project>; cs init ...; claude mcp add codesynapt codesynapt-mcp. That's it.' Cold run (no server): '⚠ codesynapt server not reachable. Start it first: ... npm start (desktop) OR cs serve ...' and no CLAUDE.md/slash commands are written. The precondition is documented only in the separate 'Connected' CLI section (README:111-117). With a daemon up, cs init works exactly as documented (CLAUDE.md + codesynapt.md + codesynapt-auto.md + mcp add hint). Failure is loud and actionable, not silent — hence LOW.",
+  "repro": "In a fresh dir with no server running: node F:/MyProg/3dgit/filegraph3d/packages/core/bin/codesynapt.cjs init → 'server not reachable' error, nothing written.",
+  "v1": "Finding CONFIRMED on current main (a937e97). (1) Code audit: F:/MyProg/3dgit/filegraph3d/packages/core/bin/codesynapt.cjs:1852-1858 gates `cs init` on GET /health and does `process.exit(1)` with the exact '⚠ codesynapt server not reachable' message before writing anything — the gate is intentional i",
+  "v2": ""
+ },
+ {
+  "item": "dogfood",
+  "title": "CLI `cs blast` silently drops the dynamic-import incompleteness caveat that the HTTP API returns",
+  "severity": "HIGH",
+  "file": "packages/core/bin/codesynapt.cjs:1079-1097",
+  "evidence": "GET /blast/packages%2Fcore%2Flib%2Fsymbol-views.cjs?depth=3 returns caveat: {\"incomplete\":true, \"reason\":\"dynamic/reflective/DI dependencies are not statically resolvable\", \"dynamicFiles\":[electron/main.cjs require(expr), surfaces.test.js require(expr), control-server.cjs import(expr), codesynapt.cjs require(expr)], \"note\":\"4 file(s) in this impact set use dynamic patterns — the true blast may be larger...\"}. But `cs blast packages/core/lib/symbol-views.cjs` prints seed/depth/impact/hops and NOTHING about the caveat (grep for caveat/dynamic/⚠ in CLI output = 0 matches, reproduced 3x). The blas",
+  "repro": "CS_PORT=17234 node packages/core/bin/codesynapt.cjs serve . --port 17234 &\nCS_PORT=17234 node packages/core/bin/codesynapt.cjs blast packages/core/lib/symbol-views.cjs   # no caveat\ncurl -s \"http://127.0.0.1:17234/blast/packages%2Fcore%2Flib%2Fsymbol-views.cjs?depth=3\" | grep incomplete   # caveat present",
+  "v1": "Reproduced independently on current code (main repo F:/MyProg/3dgit/filegraph3d) with a freshly started `cs serve` whose /health I verified pointed at the correct root (151 files) before testing — important because my first port attempt actually hit a STALE server from another inspector (root F:\\tmp",
+  "v2": "Finding holds and HIGH is the right severity for a release gate. (1) Real npm user impact: confirmed installed-usage path — root package.json of `codesynapt@0.0.4` maps bin `cs`/`codesynapt` directly to packages/core/bin/codesynapt.cjs, and README line 123 documents `cs blast src/x.ts 3` as quicksta"
+ },
+ {
+  "item": "dogfood",
+  "title": "BUILTIN_NAMES collision: exported user function registry.cjs remove() shows 'callers (none)' though statically called in 5+ places; the declined bucket label '(correct, not edges)' is provably wrong for these",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-graph.cjs:59-60 ('remove' in BUILTIN_NAMES), :351-352 builtin-method decline",
+  "evidence": "`cs symbol callers packages/core/lib/registry.cjs#remove@84` → 'callers (who calls this) ... (none)' (reproduced 3x on fresh servers). Grep truth: _deskRegistry.remove() at electron/main.cjs:2547 and :2573, registry.remove('viewer',...) at packages/core/lib/viewer-client.cjs:234, registry.remove('daemon', phash) at packages/core/bin/codesynapt.cjs:529, plus tests/viewer-client.test.js:83,187 — all real static calls to this exported function. Cause: 'remove' is in BUILTIN_NAMES so every obj.remove() member call is declined as builtin-method. The calls ARE counted globally (summary: '6050 declin",
+  "repro": "CS_PORT=17234 node packages/core/bin/codesynapt.cjs symbol callers \"packages/core/lib/registry.cjs#remove@84\"\ngrep -rn \"egistry\\.remove(\" --include=\"*.cjs\" --include=\"*.js\" . | grep -v node_modules | grep -v dist/",
+  "v1": "Reproduced independently on current code (HEAD a937e97, clean tracked tree) with my own fresh headless server (CS_PORT=17853, `cs serve`, started and torn down by me). The finding holds on every axis. (1) Repro: `cs symbol callers \"packages/core/lib/registry.cjs#remove@84\"` returns an unhedged 'call",
+  "v2": ""
+ },
+ {
+  "item": "dogfood",
+  "title": "Cross-language stdlib member calls spawn absurd candidate-caller edges, and the CLI footnote 'the real one is among these' is provably false for them",
+  "severity": "MED",
+  "file": "packages/core/bin/codesynapt.cjs (candidate footnote text); candidate leg in symbol-parser/graph",
+  "evidence": "`cs symbol callers packages/core/lib/symbol-flow.cjs#walk@92` (a JS local arrow function) lists candidate* callers: Sub.main (packages/core/lib/subengine-java/Sub.java:13) and <module> (packages/core/lib/subengine-python/sub.py:1), reproduced 2x. Ground truth: Sub.java calls Java NIO `Files.walk(root)`; sub.py calls Python stdlib `os.walk(root)`/`ast.walk(tree)` — neither can call a JS arrow function, and the REAL targets (JDK/CPython stdlib) are not in the candidate set. The candidate edges themselves are hedged ('possible dynamic-dispatch, not confirmed') = acceptable unknown-but-counted, bu",
+  "repro": "CS_PORT=17234 node packages/core/bin/codesynapt.cjs symbol callers \"packages/core/lib/symbol-flow.cjs#walk@92\"\ncat packages/core/lib/subengine-java/Sub.java | grep -n \"Files.walk\"; grep -n \"walk(\" packages/core/lib/subengine-python/sub.py",
+  "v1": "CONFIRMED. Reproduced independently on current main (a937e97) with a fresh headless server I started myself (`node packages/core/bin/codesynapt.cjs serve . --port 17933/17955`), /health verified root=F:\\MyProg\\3dgit\\filegraph3d and scanPhase=ready — no stale process/install, no wrong-project routing",
+  "v2": ""
+ },
+ {
+  "item": "dogfood",
+  "title": "Inline callback arrows passed as object-literal arguments are labeled `dead`, contradicting the product's own 'possible = value-reference (callback)' label",
+  "severity": "MED",
+  "file": "packages/core/lib/symbol-graph.cjs accounting partition; examples: server.js:172, electron/main.cjs:1491-1493, electron/preload.cjs:68+",
+  "evidence": "Accounting's own label text: possible = 'alive only via candidate dispatch or value-reference (callback) — could run'. Yet deadSymbols[0] = {name:'verifyClient', file:'server.js', line:172} — an arrow defined INLINE as a property of the options object passed to the WebSocket server (invoked on every WS handshake). Same for onBlast/onFocus/onOpen (electron/main.cjs:1491-1493 — properties of the object passed to _libCreateControlServer, invoked by project-internal control-server.cjs as opts.onBlast(...)) and the whole preload.cjs contextBridge API (pickFolder etc.). These are value-passed at the",
+  "repro": "CS_PORT=17234 node packages/core/bin/codesynapt.cjs symbol accounting | head -12   # verifyClient/onBlast/onFocus/onOpen top the dead list\nsed -n '1488,1496p' electron/main.cjs; sed -n '170,175p' server.js",
+  "v1": "Finding CONFIRMED on current main (a937e97) with an independent reproduction and a clean-room minimal fixture; the original method was sound. (1) Reproduction: started my own fresh `cs serve` on port 17719 (not the inspector's 17234), ran both `symbol accounting` CLI and GET /symbol/accounting JSON.",
+  "v2": ""
+ },
+ {
+  "item": "mcp",
+  "title": "Symbol callers + function-level blast are blind to CJS destructure-require call sites — cs_blast(action:function) reports 0 impact for a function with 6 real direct call sites in 6 files",
+  "severity": "HIGH",
+  "file": "packages/core/lib/symbol-parser-js.cjs (call resolution); surfaced via packages/core/lib/symbol-views.cjs:144-159 and codesynapt-mcp.cjs cs_blast action:function",
+  "evidence": "Grep truth: createControlServer is DIRECTLY called at tests/control-server.test.js:31,59,75,93; tests/headless-features.test.js:33,35,265; tests/viewer-client.test.js:36; scripts/benchmark.mjs:78; packages/core/bin/codesynapt-mcp.cjs:197; packages/core/bin/codesynapt.cjs:451; electron/main.cjs:1488 (aliased _libCreateControlServer). MCP answers (reproduced in 2 fresh server processes, 2 fresh scans): cs_symbol_search{action:callers,id:'packages/core/lib/control-server.cjs#createControlServer@163'} -> \"callers\": [], no candidateCallers; run2: {\"callers\":0,\"candidateCallers\":0,\"referencedBy\":7}.",
+  "repro": "cd F:/MyProg/3dgit/filegraph3d; node /f/tmp/mcp_audit_cs004/driver2.cjs   (spawns packages/core/bin/codesynapt-mcp.cjs with CS_REGISTRY=0 CS_PORT=17461 CS_ROOT=repo, isolated USERPROFILE; calls cs_symbol_search callers + cs_blast function). Minimal fixture: node with Scanner over F:/tmp/mcp_audit_cs004/fixture (a.cjs exports fooUnique; b.cjs destructure-require+call; c.cjs namespace-require+member",
+  "v1": "CONFIRMED on current code (main a937e97), reproduced fully independently in my own scratch dir (F:/tmp/skeptic_cs_destructure), own port 17733, fresh node processes — not the original inspector's environment or fixtures. (1) Mechanism isolated with a fresh minimal fixture run directly through Symbol",
+  "v2": "Finding HOLDS and HIGH is the right severity for a release gate. (1) Real-user impact: any 0.0.4 npm user scanning a CommonJS codebase hits this — `const {f} = require(...); f()` is the dominant CJS function-import style across the npm ecosystem (Express/Electron/CLI codebases), and my breadth test "
+ },
+ {
+  "item": "mcp",
+  "title": "MCP server process does not exit when stdin closes (self-host / in-process-backend mode) — zombie node process holding port + scanner watchers after the client disconnects",
+  "severity": "MED",
+  "file": "packages/core/bin/codesynapt-mcp.cjs:849-858 (stdio transport — no close handler; in-process control server + scanner keep event loop alive)",
+  "evidence": "Run1: 'EXIT_ON_STDIN_CLOSE: null' then 'SERVER DID NOT EXIT — killing' (waited 10 s after child.stdin.end()). Run2 identical: 'EXIT_ON_STDIN_CLOSE_2: null'. Both runs were the self-host path (stderr: '[codesynapt-mcp] auto-started backend on 127.0.0.1:17432 scanning F:\\MyProg\\3dgit\\filegraph3d'). Control test: when the MCP attaches to an EXTERNAL backend (pure-client path) it exits cleanly: 'ATTACH_MODE_EXIT_ON_STDIN_CLOSE: {\"code\":0}'. So the defect is confined to the fallback paths that self-host: CS_REGISTRY=0, or default-registry attach-or-spawn timeout ('self-hosting in-process', codesyna",
+  "repro": "node /f/tmp/mcp_audit_cs004/driver.cjs 17431   (full e2e; ends with stdin close + 10 s wait). node /f/tmp/mcp_audit_cs004/driver2.cjs (repro 2). node /f/tmp/mcp_audit_cs004/attach_test.cjs (control: external backend on 17481 → MCP exits 0).",
+  "v1": "Independently reproduced on current code (main a937e97) with my own driver, scratch project (F:/tmp/skeptic_mcp_close/proj), and my own ports. Self-host path (CS_REGISTRY=0, CS_PORT=17545): MCP served initialize + cs_summary, stderr printed '[codesynapt-mcp] auto-started backend on 127.0.0.1:17545',",
+  "v2": ""
+ },
+ {
+  "item": "mcp",
+  "title": "Tool argument errors returned as JSON-RPC protocol errors (-32000) instead of MCP tool results with isError:true",
+  "severity": "LOW",
+  "file": "packages/core/bin/codesynapt-mcp.cjs:779-781 (handle() catch → respondError -32000)",
+  "evidence": "tools/call cs_query {action:'users'} (missing id) -> {\"error\":{\"code\":-32000,\"message\":\"users requires id\"}} as a protocol-level error. MCP spec says tool *execution* errors should be reported inside result.content with isError:true so the model can see and self-correct; protocol errors are reserved for transport/method problems. Claude Code tolerates it, but stricter clients may surface it as a server failure rather than a correctable tool error. (Unknown tool -> -32601 is correct.)",
+  "repro": "Send {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"cs_query\",\"arguments\":{\"action\":\"users\"}}} over stdio to packages/core/bin/codesynapt-mcp.cjs",
+  "v1": "Reproduced on current main code with a fresh node process from the repo path over stdio: after a proper initialize handshake, tools/call cs_query {action:\"users\"} returns {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"users requires id\"}} — a protocol-level error, not a tool result with i",
+  "v2": ""
+ },
+ {
+  "item": "perf",
+  "title": "cs serve self-exits after ~35s idle, contradicting its 'standalone long-running HTTP daemon … Ctrl-C to stop' help text",
+  "severity": "LOW",
+  "file": "packages/core/bin/codesynapt.cjs:504-531 (reap loop), :559 ('Ctrl-C to stop'), USAGE line 'standalone HTTP daemon'",
+  "evidence": "Reproduced 4 independent times during this audit. serve2.log / serve3.log / serve512.log / serve4.log all end with: '[cs] no live sessions/viewers — daemon self-exit' (exit code 0). Trigger: no HTTP request for >30s after the 20s startup grace (csLastReqAt guard at codesynapt.cjs:527, _GRACE_MS=20000 + 3 empty 5s ticks at :504). Concrete impact hit me mid-audit: `cs symbol flow <id>` returned exit 1 'error: codesynapt server is not running at 127.0.0.1:18217' because the explicitly-started serve died while I spent ~40s between commands. Memory records idle-reap as by-design for registry-spawne",
+  "repro": "node packages/core/bin/codesynapt.cjs serve F:/tmp/anydir --port 18620   # then make NO requests; within ~35-55s stderr prints '[cs] no live sessions/viewers — daemon self-exit' and the process exits 0. Any `CS_PORT=18620 cs symbol ...` afterwards exits 1 with 'server is not running'.",
+  "v1": "Reproduced independently on current code (main a937e97): fresh `node packages/core/bin/codesynapt.cjs serve F:/tmp/skeptic_serve_test --port 17641` (my own scratch dir, my own 17xxx port, zero requests) printed '[cs] Ctrl-C to stop.' at startup and then '[cs] no live sessions/viewers — daemon self-e",
+  "v2": ""
+ },
+ {
+  "item": "win-quirks",
+  "title": "cs serve standalone daemon silently self-exits ~35-40s after start when no session/viewer lease exists (advertised as 'standalone HTTP daemon ... Ctrl-C to stop' for CLI/MCP/CI use)",
+  "severity": "LOW",
+  "file": "packages/core/bin/codesynapt.cjs:500-533",
+  "evidence": "Run1 (serve_lf.log): '[cs] HTTP API on http://127.0.0.1:18431' ... served /summary at t+5s ... '[cs] no live sessions/viewers — daemon self-exit' ~35s later. Run2 (serve_selfexit2.log): 'exited with 0' / '[cs] snapshot: 5 files, 2 edges' / '[cs] no live sessions/viewers — daemon self-exit'. Code: _GRACE_MS=20000, _EMPTY_LIMIT=3 x 5s ticks; activity guard only spares it if a request landed within the last 30s (csLastReqAt < 30000). Likely by-design registry refcounting (memory: idle-reap by-design for MCP), but for an explicitly user-started `cs serve` a CI poller slower than 30s loses the serv",
+  "repro": "CS_HOME=<fresh empty dir> node packages/core/bin/codesynapt.cjs serve <any project> --port 18433  # then make zero or one request and wait 60s -> process exits 0 with 'no live sessions/viewers — daemon self-exit'",
+  "v1": "Reproduced independently on current code and the method is sound. Fresh node process from the repo bin (F:/MyProg/3dgit/filegraph3d/packages/core/bin/codesynapt.cjs), isolated CS_HOME (verified registry.cjs:20 honors CS_HOME, so no interference from the user's live registry), own port 17431, scratch",
+  "v2": ""
+ },
+ {
+  "item": "win-quirks",
+  "title": "Port-lock path ignores CS_HOME: registry leases honor CS_HOME but the global discovery lock is hardcoded to os.homedir(), so a CS_HOME-isolated `cs serve` can still overwrite the real user's ~/.codesynapt/port",
+  "severity": "LOW",
+  "file": "packages/core/bin/codesynapt.cjs:52,474 vs packages/core/lib/registry.cjs:20",
+  "evidence": "registry.cjs:20 `const ROOT = process.env.CS_HOME || path.join(os.homedir(), '.codesynapt')` but codesynapt.cjs:474 `const lockPath = path.join(os.homedir(), '.codesynapt', 'port')` (same hardcode at :52 in resolvePort). Observed with CS_HOME=F:/tmp/inspwin/cshome: '[cs] registry: daemons/85c5e8161a3af744.json' went to the CS_HOME dir, yet '[cs] port lock: C:\\Users\\USER\\.codesynapt\\port'. My serves only spared the user's lock because the keep-if-live guard fired ('[cs] note: port lock kept at 17321 (a live backend holds it)'); if no live backend had held it, lines 552-554 would have written my",
+  "repro": "CS_HOME=F:/tmp/anything node packages/core/bin/codesynapt.cjs serve <proj> --port 18431  # stderr prints 'port lock: C:\\Users\\USER\\.codesynapt\\port' (homedir, not CS_HOME); grep -n 'os.homedir' packages/core/bin/codesynapt.cjs vs grep -n CS_HOME packages/core/lib/registry.cjs",
+  "v1": "Reproduced independently on current code with fresh node processes from F:/MyProg/3dgit/filegraph3d, and the divergence is exactly as reported. (1) Repro 1: CS_HOME=F:\\tmp\\skeprefute\\cshome + `cs serve --port 17877` put the registry entry in CS_HOME (cshome/daemons/ab283632921f6329.json) yet printed",
+  "v2": ""
+ }
+]

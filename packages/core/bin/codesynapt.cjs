@@ -227,7 +227,7 @@ const USAGE = `CodeSynapt CLI — usage:
                               #   n   = BFS depth (default 3)
                               #   dir = users|deps (default users)
 
-  ── Function / symbol level (Layer 2) — needs desktop app ────
+  ── Function / symbol level (Layer 2) — desktop app OR \`cs serve\` ────
   cs symbol summary [--json]
                               # function-level overview: symbol/edge counts,
                               #   top hubs (most-called functions), coverage.
@@ -237,7 +237,8 @@ const USAGE = `CodeSynapt CLI — usage:
                               #   possible / dead (static floor, with caveats).
   cs symbol flow <name|id>  # expression-layer E1: which params/locals flow
                               #   into which call args + return provenance
-                              #   (JS family; certain flows only, rest counted).
+                              #   (JS/TS, Python, Java, C#; certain flows only,
+                              #   everything else counted, never guessed).
   cs symbol find <query> [--json]
                               # functions/classes/… whose NAME contains <query>.
                               #   prints  id  kind  file:line.
@@ -518,7 +519,12 @@ async function runHeadlessServe(args) {
           const sess = registry.readLive('session', { ttlMs: _LEASE_TTL, filter: (s) => { try { return registry.projectHash(s.projectRoot) === phash } catch { return false } } })
           const view = registry.readLive('viewer', { ttlMs: _LEASE_TTL, filter: (v) => v.attachedProjectHash === phash })
           _emptyTicks = (sess.length + view.length === 0) ? _emptyTicks + 1 : 0
-          if (Date.now() - _bornAt > _GRACE_MS && _emptyTicks >= _EMPTY_LIMIT) {
+          // Only an AUTO-spawned daemon (via `cs ensure`, lifecycle-managed by
+          // its sessions) self-exits when idle. A daemon a user launched
+          // directly with `cs serve` advertises "Ctrl-C to stop" and must stay
+          // up until the user stops it (insp-004: it was self-exiting ~35s in,
+          // contradicting its own help text).
+          if (process.env.CS_DAEMON_AUTOEXIT === '1' && Date.now() - _bornAt > _GRACE_MS && _emptyTicks >= _EMPTY_LIMIT) {
             // In-flight guard: never exit while still serving a request (a big
             // repo's first /symbol/summary build can outlive the grace window).
             if (typeof csInFlight === 'function' && csInFlight() > 0) return
@@ -879,6 +885,14 @@ async function main() {
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     process.stdout.write(USAGE + '\n'); return
   }
+  if (cmd === '--version' || cmd === '-v' || cmd === 'version') {
+    let ver = 'unknown'
+    for (const p of ['../../../package.json', '../../package.json', '../package.json']) {
+      try { ver = require(p).version || ver; if (ver !== 'unknown') break } catch {}
+    }
+    process.stdout.write(ver + '\n')
+    return
+  }
   try {
     switch (cmd) {
       case 'scan': {
@@ -1093,6 +1107,17 @@ async function main() {
           process.stdout.write(`  hop ${d.depth} (${d.ids.length} files):\n`)
           for (const id of d.ids.slice(0, 50)) process.stdout.write(`    ${id}\n`)
           if (d.ids.length > 50) process.stdout.write(`    … +${d.ids.length - 50} more\n`)
+        }
+        // The HTTP API marks the blast incomplete when files in the impact set
+        // use dynamic/reflective/DI patterns — surface it on the CLI too, so a
+        // terminal user isn't misled that this count is the whole story
+        // (insp-004: the caveat was returned by /blast but dropped here).
+        if (j.caveat && j.caveat.incomplete) {
+          process.stdout.write(`\n  ⚠  ${j.caveat.note || j.caveat.reason}\n`)
+          const dyn = (j.caveat.dynamicFiles || []).map((f) => f.id)
+          if (dyn.length) {
+            process.stdout.write(`     dynamic-pattern files: ${dyn.slice(0, 8).join(', ')}${dyn.length > 8 ? ` … +${dyn.length - 8} more` : ''}\n`)
+          }
         }
         break
       }
@@ -1647,7 +1672,10 @@ async function main() {
           }
           const spawnDaemon = () => {
             const child = cp.spawn(process.execPath, [__filename, 'serve', abs], {
-              detached: true, stdio: 'ignore', env: { ...process.env },
+              // CS_DAEMON_AUTOEXIT: this is a lifecycle-managed daemon — it self-
+              // exits once no session/viewer references it. A direct `cs serve`
+              // does NOT set this and stays up until Ctrl-C (insp-004).
+              detached: true, stdio: 'ignore', env: { ...process.env, CS_DAEMON_AUTOEXIT: '1' },
             })
             child.unref()
           }
@@ -2446,7 +2474,7 @@ async function main() {
         }
         const r = await req('POST', '/write/' + encId(args[0]), null, { content })
         if (r.status !== 200) return die(r.json?.error || 'failed')
-        process.stdout.write(`wrote ${r.json.size}B to ${args[0]}\n`)
+        process.stdout.write(`wrote ${r.json.bytes ?? r.json.size ?? Buffer.byteLength(content, 'utf8')}B to ${args[0]}\n`)
         break
       }
       case 'edit': {

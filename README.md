@@ -7,7 +7,7 @@
 [![Version](https://img.shields.io/github/package-json/v/wing1008/codesynapt?label=version&color=informational)](./CHANGELOG.md)
 [![Node 20|22](https://img.shields.io/badge/Node-20%20%7C%2022-339933?logo=node.js&logoColor=white)](./package.json)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](./docs/installation.md)
-[![Tests](https://img.shields.io/badge/tests-174%20passing-brightgreen)](./tests/)
+[![Tests](https://img.shields.io/badge/tests-302%20passing-brightgreen)](./tests/)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/wing1008?label=Sponsor&logo=GitHub&style=social)](https://github.com/sponsors/wing1008)
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/wing1008)
 

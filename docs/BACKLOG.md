@@ -18,3 +18,26 @@
 - [x] ~~HIGH: 데스크톱 watcher 간헐 사망~~ → **오진. 진범=유령 데스크톱**: 전날 사용자가 띄운 인스턴스가 taskkill //IM에 침묵 면역(다른 세션/권한, stderr 숨김)인 채 7707 점유 — e2e가 구코드 쌍둥이에게 질의. PowerShell Stop-Process로 제거 후 깨끗한 인스턴스에서 ⑦ 전체 체인 라이브 증명(signature changed 이벤트). 남는 제품 교훈 2건 아래. (2026-06-11)
 - [ ] **같은 프로젝트 데스크톱 중복 기동 경고**: 두 데스크톱이 같은 프로젝트를 열면 레지스트리 heartbeat 끼리 thrash + 클라이언트가 구버전 인스턴스로 오라우팅(유령 사건의 본질). 기동 시 레지스트리에 동일 projectHash의 살아있는 desktop 엔트리가 있으면 사용자에게 경고/포커스 이전 제안.
 - [ ] **newly-dead 경보 과발화 의심**: 시그니처 프로브 1개 수정에 +102 newly-dead 동반 — enrichment(TS서브엔진/임베딩) 비동기 완료 시점이 accounting 스냅샷 사이에 끼면 도달성이 출렁이는 듯. diff를 enrichment 완료 후로 옮기거나 임계 둘 가치. (2026-06-11 관찰)
+
+## insp-004 (2026-06-12 풀점검) 후속 — Wave 2/3에서 처리
+- [ ] **aliased destructure-require 미해결**: `const { orig: local } = require('./mod'); local()` 는 caller 엣지 안 생김 — ESM `import { orig as local }`도 공유하는 기존 한계(rename→source 매핑 부재). Wave1에서 non-alias destructure(#52 핵심 6호출)는 수정됨. 처리경로: 파서가 import 별칭 binding을 {module, exportedName}로 매핑해 resolveCall에 원래 이름 전달.
+- [ ] **확정 57건 정본**: `docs/inspections/2026-06-12-insp-004/confirmed.json` (HIGH 21·MED 19·LOW 17). clean.md=재배포 제외 목록(burn-spots/blockers). critic.md=점검 사각 8.
+- [ ] **표현식 람다/comprehension 스코프 shadow (#20)**: `lambda x: g(x)` / `[a for a in items]` 에서 inner 바인딩이 outer param을 가리면 g(x)의 x를 param:x로 오판 가능. Wave2에서 다중쓰기/자기참조/증강/기본값/call-of-call은 정직강등 완료. nested-scope shadow는 별도(스코프 스택 필요). 처리경로: lambda/comprehension 진입 시 바인딩 이름을 shadow 집합에 넣어 그 스코프 안 식별자는 param/local 귀속 차단.
+
+## insp-004 Wave 3 잔여 (MED/LOW — 백로그, 비차단)
+처리됨(Wave3): cs --version, .codesynapt scan-ignore, write bytes, serve self-exit, README 174→302, help 정확도(symbol headless·flow 언어), TS flow params(default/ctor-prop/rest). 검증됨: TS/TSX flow 동작, 한글/유니코드 경로 pytracer.
+남은 MED/LOW:
+- [ ] **#53 MCP stdin close 좀비**: self-host/in-process-backend 모드에서 stdin 닫혀도 node 프로세스 안 죽음(포트+watcher 잔존). 처리: stdin 'end'에 graceful shutdown.
+- [ ] **#54 MCP tool 인자 에러**: JSON-RPC -32000 protocol error 대신 MCP tool result isError:true로.
+- [ ] **#7/#8/#9 E2 인자 blast**: depth 절단 silent(truncated:false, frontier 미보고)·CLI --depth 없음 / target file에 caller line 페어링(존재X 위치) / default-param '(pattern)' 표기.
+- [ ] **#24/#25 parity**: POST /symbol/scan desktop-only(헤드리스 404) / 헤드리스 404 힌트에 flow·accounting 누락.
+- [ ] **#49 BUILTIN_NAMES 충돌**: 사용자 함수 remove() 등이 builtin 이름과 겹쳐 callers '(none)' 표기·declined 버킷 라벨 오해.
+- [ ] **#50 크로스언어 stdlib member 후보 폭주**: 언어 간 동명 stdlib 멤버가 candidate-caller 폭증 + "real one among these" footnote가 거짓.
+- [ ] **#51 콜백 dead 라벨**: object-literal 인자로 넘긴 인라인 화살표가 dead 표기(possible=value-ref 라벨과 모순).
+- [ ] **#39 한국어 혼입**: `cs safety` 출력·일부 help 항목 미번역(영문 CLI 표면).
+- [ ] **#41 dynamic-site point-view 불가시**: 동적 호출만 있는 함수가 per-symbol callees "(none)" — 전역 카운트엔 있으나 지점 표시 0.
+- [ ] **#42 summary 과장**: "runtime tracing fills them" — JS 동적디스패치 run이 0 NEW(샘플링 프로파일러가 짧은 호출 놓침).
+- [ ] **#10 100-hit cap overshoot**: dequeue 시점만 검사라 한 노드 fan-out이 120까지 밀어냄(truncated:true라 정직하나).
+- [ ] **#34 의존성 취약점**: @xenova/transformers→onnxruntime-web→onnx-proto→protobufjs 경로 5건(4 high·1 critical, "No fix available").
+- [ ] **#47 README quickstart**: `cs init` 전 데몬/데스크톱 기동 전제 미명시(콜드 실행 시 에러).
+- [ ] **비평자 사각(GUI/파이프라인)**: 데스크톱 토스트 라이브(Wave2b sig 오발화 수정 후 스팸 사라졌는지 GUI 미검)·py observe 분류/병합/mtime만료/watch 후반·sig 다언어(py/java/cs) false pos/neg·Lua bare-call 수정 회귀검·perf/docs 카나리아 재설계·blockers 체크리스트 0.0.4 diff 재도출.

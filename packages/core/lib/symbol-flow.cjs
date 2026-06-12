@@ -65,22 +65,68 @@ function extractFlow(source, fileId, sym) {
   const fn = findFunction(ast.program || ast, sym)
   if (!fn) return out
 
-  for (const p of fn.params || []) {
-    if (p.type === 'Identifier') out.params.push(p.name)
-    else out.params.push('(pattern)')   // destructured — out of E1 scope, visible
+  // Resolve a parameter's binding name through the common wrappers so a default
+  // value (`b = 5`), a TS parameter property (`constructor(private x)`), a typed
+  // param, or a rest element still yields the name — only true destructuring
+  // stays '(pattern)', which is out of E1 scope and kept visible (insp-004: TS
+  // defaults / ctor props were all collapsing to '(pattern)').
+  const paramName = (p) => {
+    if (!p) return '(pattern)'
+    if (p.type === 'Identifier') return p.name
+    if (p.type === 'AssignmentPattern' && p.left && p.left.type === 'Identifier') return p.left.name
+    if (p.type === 'TSParameterProperty' && p.parameter) return paramName(p.parameter)
+    if (p.type === 'RestElement' && p.argument && p.argument.type === 'Identifier') return p.argument.name
+    return '(pattern)'   // object/array destructuring — out of E1 scope, visible
   }
-  const paramSet = new Set(out.params)
+  for (const p of fn.params || []) out.params.push(paramName(p))
+  const paramSet = new Set(out.params.filter((n) => n !== '(pattern)'))
+
+  // Pre-pass: find every binding whose value is NOT a single certain source —
+  // reassigned (`c = …`), augmented (`c += …` / `c++`), declared more than once,
+  // or a parameter that is later reassigned. Such a name is flow-insensitive
+  // here, so attributing it to its first/last write would be a WRONG claim
+  // (insp-004: `let c = a; c = 5; use(c)` reported use(param:a); `+=` accumulators
+  // reported the seed). These resolve to `unknown` and are COUNTED — never
+  // guessed. Only single-assignment bindings keep a precise provenance.
+  const assignCount = new Map()
+  const augmented = new Set()
+  const precount = (node, isRoot) => {
+    if (!node || typeof node.type !== 'string') return
+    if (!isRoot && FN_TYPES.has(node.type)) return
+    if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
+      assignCount.set(node.id.name, (assignCount.get(node.id.name) || 0) + 1)
+    }
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier') {
+      assignCount.set(node.left.name, (assignCount.get(node.left.name) || 0) + 1)
+      if (node.operator !== '=') augmented.add(node.left.name)
+    }
+    if (node.type === 'UpdateExpression' && node.argument?.type === 'Identifier') augmented.add(node.argument.name)
+    for (const k of Object.keys(node)) {
+      if (k === 'loc' || k === 'range') continue
+      const v = node[k]
+      if (Array.isArray(v)) { for (const c of v) precount(c, false) }
+      else if (v && typeof v.type === 'string') precount(v, false)
+    }
+  }
+  precount(fn.body, true)
+  const uncertain = new Set(augmented)
+  for (const [n, c] of assignCount) if (c > 1) uncertain.add(n)
+  for (const n of assignCount.keys()) if (paramSet.has(n)) uncertain.add(n)  // a reassigned parameter
 
   // Local binding provenance: name → 'param:x' | 'call:name' | 'literal' | 'unknown'
   const locals = new Map()
   const sourceOf = (node) => {
     if (!node) return 'unknown'
     if (node.type === 'Identifier') {
+      if (uncertain.has(node.name)) return 'unknown'   // multiply-written: not a single certain source
       if (paramSet.has(node.name)) return 'param:' + node.name
       if (locals.has(node.name)) return locals.get(node.name)
       return 'unknown'
     }
-    if (/Literal$/.test(node.type) || node.type === 'TemplateLiteral') return 'literal'
+    // A template literal with interpolations is NOT a literal — its value
+    // depends on the embedded expressions (insp-004: `\`${a}\`` claimed literal).
+    if (node.type === 'TemplateLiteral') return (node.expressions && node.expressions.length) ? 'unknown' : 'literal'
+    if (/Literal$/.test(node.type)) return 'literal'
     if (node.type === 'CallExpression' || node.type === 'NewExpression') {
       const n = calleeNameOf(node.callee)
       return n ? 'call:' + n : 'unknown'
@@ -95,9 +141,16 @@ function extractFlow(source, fileId, sym) {
     if (!isRoot && FN_TYPES.has(node.type)) return
 
     if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') {
-      const src = sourceOf(node.init)
+      const src = uncertain.has(node.id.name) ? 'unknown' : sourceOf(node.init)
       locals.set(node.id.name, src)
       if (src === 'unknown' && node.init) out.unresolvedFlows++
+    }
+    // Reassignment / augmented assignment of a local. The variable was already
+    // marked uncertain in the pre-pass; record the unresolved flow so the
+    // mutation is counted rather than silently lost (insp-004: `+=` was invisible).
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier') {
+      locals.set(node.left.name, 'unknown')
+      out.unresolvedFlows++
     }
     if (node.type === 'CallExpression' || node.type === 'NewExpression') {
       const name = calleeNameOf(node.callee)

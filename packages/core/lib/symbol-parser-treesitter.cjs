@@ -30,7 +30,21 @@ async function getParser() {
   return _initPromise
 }
 
-const WASM_DIR = path.join(__dirname, '..', '..', '..', 'node_modules', 'tree-sitter-wasms', 'out')
+// Resolve the grammar wasm dir via Node's module resolution so it works from
+// ANY install layout — a hoisted npm install puts tree-sitter-wasms many levels
+// away from this file, and the old hard-coded '../../../node_modules' path only
+// existed in the dev repo. (insp-004: that path silently disabled Layer-2 for
+// every tree-sitter language — Python/Java/C#/… — in every npm install while
+// coverage still claimed 100%.) Fallback to the repo-relative path so a
+// non-node resolver (or a stripped install) degrades to the old behavior rather
+// than throwing at module load.
+const WASM_DIR = (() => {
+  try {
+    return path.join(path.dirname(require.resolve('tree-sitter-wasms/package.json')), 'out')
+  } catch {
+    return path.join(__dirname, '..', '..', '..', 'node_modules', 'tree-sitter-wasms', 'out')
+  }
+})()
 function wasmPath(name) { return path.join(WASM_DIR, `tree-sitter-${name}.wasm`) }
 
 // Per-language config. Keys are CodeSynapt file extensions; value is
@@ -1347,6 +1361,15 @@ function isMemberCallNode(callNode) {
     if (fn0 && fn0.type === "variable" && fn0.namedChildCount === 1
         && IDENT_TYPES.has(fn0.namedChild(0).type)) return false
   }
+  // Bash: a `command` is a bare invocation `funcname args` — the command_name
+  // is the callee, there is no receiver, so it is NOT a member call. (It used to
+  // be misclassified as a member call and only resolved because resolveCall then
+  // grabbed a same-named free function; the insp-004 member-call guard removed
+  // that crutch, so classify it correctly here.)
+  {
+    const fn0 = callNode.childForFieldName?.('function') || callNode.namedChild(0)
+    if (fn0 && fn0.type === 'command_name') return false
+  }
   const fn = callNode.childForFieldName?.('function') || callNode.childForFieldName?.('name')
   if (fn && NAV_TYPES.has(fn.type)) return true
   for (let i = 0; i < callNode.namedChildCount; i++) {
@@ -1452,4 +1475,17 @@ function availableExtensions() {
 
 // parserFor is exported for the expression-flow walker (symbol-flow.cjs):
 // it needs RAW trees, not the symbol/reference extraction pipeline.
-module.exports = { makeParser, availableExtensions, LANG_CONFIG, parserFor }
+// Extensions whose tree-sitter grammar failed to load/parse at runtime, so
+// Layer-2 is actually disabled for them THIS session — honest coverage must not
+// count these as covered (insp-004: a failed parser load otherwise still
+// reported coverage 100%). Empty in a healthy install.
+function degradedExts() {
+  if (!_parserWarned.size) return []
+  const out = []
+  for (const [ext, cfg] of Object.entries(LANG_CONFIG)) {
+    if (cfg && _parserWarned.has(cfg.grammar)) out.push(ext)
+  }
+  return out
+}
+
+module.exports = { makeParser, availableExtensions, LANG_CONFIG, parserFor, wasmPath, WASM_DIR, degradedExts }

@@ -131,11 +131,32 @@ function harvestClassProps(classNode, map) {
 }
 
 // Extract a one-line signature from a function/class declaration.
+// Bound it to the PARAMETER LIST, not the first '{': a destructured param
+// (`f({a, b})`) made the old "cut at first {" stop at `function f(`, dropping
+// the params entirely (so changes to them were silent), while an arrow body
+// `=> x * 2` or a comment before `{` leaked into the signature and produced a
+// false "signature changed" alert on body-only / comment-only edits (insp-004).
 function signatureOf(node, content) {
   if (!node?.loc) return ''
   const startIdx = node.start ?? 0
-  // Cut at first '{' or ';' (signature only), max 200 chars
-  let end = content.indexOf('{', startIdx)
+  // For `const f = (..) => ..` the params/body live on the init expression, not
+  // the VariableDeclarator — without this an arrow's signature ran past its body
+  // into the next statement (insp-004).
+  const fnNode = (node.init && (node.init.type === 'ArrowFunctionExpression' || node.init.type === 'FunctionExpression')) ? node.init : node
+  let end
+  const params = fnNode.params
+  if (params && params.length && typeof params[params.length - 1].end === 'number') {
+    // Through the closing paren after the last parameter.
+    const lastEnd = params[params.length - 1].end
+    const close = content.indexOf(')', lastEnd)
+    end = close >= 0 ? close + 1 : lastEnd
+  } else if (fnNode.body && typeof fnNode.body.start === 'number') {
+    // No params (or none parsed): everything before the body — covers
+    // `function f()`, `class C`, getters, etc.
+    end = fnNode.body.start
+  } else {
+    end = content.indexOf('{', startIdx)
+  }
   if (end < 0 || end - startIdx > 200) end = startIdx + 200
   return content.slice(startIdx, end).trim().replace(/\s+/g, ' ')
 }
@@ -778,6 +799,17 @@ function extractReferences(content, fileId, index) {
               // specifier; its parent is the ImportDeclaration carrying `source`.
               const decl = b.path.parent
               nsModule = resolveImportSource(decl?.source?.value)
+            } else if (b && b.path && b.path.isVariableDeclarator && b.path.isVariableDeclarator()) {
+              // CJS namespace import: `const ns = require('./mod'); ns.fn()`.
+              // Same as an ESM namespace import — `fn` is a free function in the
+              // required module, so resolve imported-only and pin to that module
+              // (insp-004: otherwise the member-call guard below would drop it).
+              const init = b.path.node.init
+              if (init && init.type === 'CallExpression' && init.callee && init.callee.type === 'Identifier'
+                  && init.callee.name === 'require' && init.arguments[0] && /Literal$/.test(init.arguments[0].type)) {
+                memberViaImport = true
+                nsModule = resolveImportSource(init.arguments[0].value)
+              }
             }
           }
         } else if (obj?.type === 'ThisExpression' && currentClass) {
@@ -847,11 +879,27 @@ function extractReferences(content, fileId, index) {
       if (!isMemberCall && callee.type === 'Identifier') {
         const b = path.scope.getBinding(name)
         if (b) {
+          // A binding initialized from require('./mod') — `const { f } = require()`
+          // or `const m = require().f` — is an IMPORT, not a local callback value.
+          // ESM imports already bypass this guard (their binding.kind is 'module'),
+          // but a CJS require-binding's kind is 'const', so without this check a
+          // destructure-require call was misfiled as a local-callback dynamic site
+          // and produced NO caller edge at all (insp-004). Let it fall through to
+          // normal cross-file resolution like an ESM named import would.
+          let requireImport = false
+          {
+            const vd = b.path && (b.path.isVariableDeclarator && b.path.isVariableDeclarator()
+              ? b.path
+              : (b.path.findParent ? b.path.findParent((pp) => pp.isVariableDeclarator && pp.isVariableDeclarator()) : null))
+            let init = vd && vd.node ? vd.node.init : null
+            while (init && init.type === 'MemberExpression') init = init.object
+            if (init && init.type === 'CallExpression' && init.callee && init.callee.type === 'Identifier' && init.callee.name === 'require') requireImport = true
+          }
           const initPath = b.path && b.path.get && b.path.get('init')
           const isFnLocal = (b.path && b.path.isFunctionDeclaration && b.path.isFunctionDeclaration())
             || (b.path && b.path.isClassDeclaration && b.path.isClassDeclaration())
             || (initPath && initPath.isFunction && initPath.isFunction())
-          if (!isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) {
+          if (!requireImport && !isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) {
             // `cb()` where cb is a parameter / non-function local: a runtime
             // value call. Not resolvable statically — record, don't drop silent.
             if (index.recordDynamicSite) index.recordDynamicSite(src, path.node.loc?.start.line || 0, 'local-callback')
