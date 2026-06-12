@@ -65,11 +65,21 @@ function extractFlow(source, fileId, sym) {
   const fn = findFunction(ast.program || ast, sym)
   if (!fn) return out
 
-  for (const p of fn.params || []) {
-    if (p.type === 'Identifier') out.params.push(p.name)
-    else out.params.push('(pattern)')   // destructured — out of E1 scope, visible
+  // Resolve a parameter's binding name through the common wrappers so a default
+  // value (`b = 5`), a TS parameter property (`constructor(private x)`), a typed
+  // param, or a rest element still yields the name — only true destructuring
+  // stays '(pattern)', which is out of E1 scope and kept visible (insp-004: TS
+  // defaults / ctor props were all collapsing to '(pattern)').
+  const paramName = (p) => {
+    if (!p) return '(pattern)'
+    if (p.type === 'Identifier') return p.name
+    if (p.type === 'AssignmentPattern' && p.left && p.left.type === 'Identifier') return p.left.name
+    if (p.type === 'TSParameterProperty' && p.parameter) return paramName(p.parameter)
+    if (p.type === 'RestElement' && p.argument && p.argument.type === 'Identifier') return p.argument.name
+    return '(pattern)'   // object/array destructuring — out of E1 scope, visible
   }
-  const paramSet = new Set(out.params)
+  for (const p of fn.params || []) out.params.push(paramName(p))
+  const paramSet = new Set(out.params.filter((n) => n !== '(pattern)'))
 
   // Pre-pass: find every binding whose value is NOT a single certain source —
   // reassigned (`c = …`), augmented (`c += …` / `c++`), declared more than once,

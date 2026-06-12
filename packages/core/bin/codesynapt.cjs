@@ -227,7 +227,7 @@ const USAGE = `CodeSynapt CLI — usage:
                               #   n   = BFS depth (default 3)
                               #   dir = users|deps (default users)
 
-  ── Function / symbol level (Layer 2) — needs desktop app ────
+  ── Function / symbol level (Layer 2) — desktop app OR \`cs serve\` ────
   cs symbol summary [--json]
                               # function-level overview: symbol/edge counts,
                               #   top hubs (most-called functions), coverage.
@@ -237,7 +237,8 @@ const USAGE = `CodeSynapt CLI — usage:
                               #   possible / dead (static floor, with caveats).
   cs symbol flow <name|id>  # expression-layer E1: which params/locals flow
                               #   into which call args + return provenance
-                              #   (JS family; certain flows only, rest counted).
+                              #   (JS/TS, Python, Java, C#; certain flows only,
+                              #   everything else counted, never guessed).
   cs symbol find <query> [--json]
                               # functions/classes/… whose NAME contains <query>.
                               #   prints  id  kind  file:line.

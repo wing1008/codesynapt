@@ -71,3 +71,20 @@ describe('expression flow honesty — tree-sitter walkers (py/java/cs)', () => {
     expect(arg0(f, 'helper')).toBe('param:a')
   })
 })
+
+describe('expression flow — TypeScript params (insp-004 blind-spot)', () => {
+  it('default value and TS parameter property keep their binding name', async () => {
+    const f = await F('function t(a: string, b: number = 5): void { g(a); h(b) }', 'f.ts', { name: 't', startLine: 1, endLine: 1 })
+    expect(f.params).toEqual(['a', 'b'])
+    expect(arg0(f, 'h')).toBe('param:b')
+  })
+  it('TS constructor parameter property is a named param', async () => {
+    const f = await F('class C { constructor(private x: number){ use(x) } }', 'C.ts', { name: 'constructor', startLine: 1, endLine: 1 })
+    expect(f.params).toEqual(['x'])
+    expect(arg0(f, 'use')).toBe('param:x')
+  })
+  it('true object destructuring stays (pattern) — out of E1 scope, visible', async () => {
+    const f = await F('function t({a, b}){ return g(a) }', 'f.js', { name: 't', startLine: 1, endLine: 1 })
+    expect(f.params).toEqual(['(pattern)'])
+  })
+})
