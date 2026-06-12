@@ -1662,6 +1662,13 @@ async function handleControlRequest(req, res) {
                     g.builtAt = cached.builtAt
                     g.scanMs = 0
                     try { g.computeReachability(isPublicEntry) } catch {}
+                    // Seed the ③ newly-dead and ⑦ signature baselines on a
+                    // cache-hit launch too — otherwise the FIRST edit after
+                    // starting from the disk cache has no baseline and its diff
+                    // is silently skipped (insp-004). Only when unset, so a
+                    // later genuine rebuild still diffs against the live graph.
+                    try { if (!_prevDeadSet) _prevDeadSet = new Set(g.accounting().dead) } catch {}
+                    try { if (!_prevSigMap) _prevSigMap = require('../packages/core/lib/symbol-flow.cjs').collectSignatures(g) } catch {}
                     symbolGraph = g
                     _symbolBuilding = null
                     return g

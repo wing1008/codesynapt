@@ -131,11 +131,32 @@ function harvestClassProps(classNode, map) {
 }
 
 // Extract a one-line signature from a function/class declaration.
+// Bound it to the PARAMETER LIST, not the first '{': a destructured param
+// (`f({a, b})`) made the old "cut at first {" stop at `function f(`, dropping
+// the params entirely (so changes to them were silent), while an arrow body
+// `=> x * 2` or a comment before `{` leaked into the signature and produced a
+// false "signature changed" alert on body-only / comment-only edits (insp-004).
 function signatureOf(node, content) {
   if (!node?.loc) return ''
   const startIdx = node.start ?? 0
-  // Cut at first '{' or ';' (signature only), max 200 chars
-  let end = content.indexOf('{', startIdx)
+  // For `const f = (..) => ..` the params/body live on the init expression, not
+  // the VariableDeclarator — without this an arrow's signature ran past its body
+  // into the next statement (insp-004).
+  const fnNode = (node.init && (node.init.type === 'ArrowFunctionExpression' || node.init.type === 'FunctionExpression')) ? node.init : node
+  let end
+  const params = fnNode.params
+  if (params && params.length && typeof params[params.length - 1].end === 'number') {
+    // Through the closing paren after the last parameter.
+    const lastEnd = params[params.length - 1].end
+    const close = content.indexOf(')', lastEnd)
+    end = close >= 0 ? close + 1 : lastEnd
+  } else if (fnNode.body && typeof fnNode.body.start === 'number') {
+    // No params (or none parsed): everything before the body — covers
+    // `function f()`, `class C`, getters, etc.
+    end = fnNode.body.start
+  } else {
+    end = content.indexOf('{', startIdx)
+  }
   if (end < 0 || end - startIdx > 200) end = startIdx + 200
   return content.slice(startIdx, end).trim().replace(/\s+/g, ' ')
 }

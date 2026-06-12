@@ -92,3 +92,46 @@ function real(a, b) { return a }
     expect(delta.some((d) => d.name === 'real')).toBe(true)
   })
 })
+
+// ── insp-004: signature noise — body/whitespace/comment edits must NOT alert,
+// destructured/default params MUST be tracked (param list bounded to the parens,
+// not cut at the first '{', nor leaking into an arrow body / the next line). ──
+describe('signature delta — noise rejection (insp-004)', () => {
+  const base =
+    'function foo(a, b) {}\n' +
+    'const bar = (x) => x * 2\n' +
+    'function f({a, b}) {}\n' +
+    'function h(a, {x, y}) {}\n' +
+    'class C { m(p, q) {} }\n'
+  const delta = async (after) => {
+    const g1 = await buildGraph([{ id: 'a.js', ext: 'js', content: base }])
+    const prev = flow.collectSignatures(g1)
+    const g2 = await buildGraph([{ id: 'a.js', ext: 'js', content: after }])
+    return flow.signatureDelta(prev, g2).map((d) => d.name)
+  }
+
+  it('body-only / whitespace / comment edits do NOT fire', async () => {
+    const names = await delta(
+      'function foo(a,  b) {}\n' +              // whitespace in params
+      'const bar = (x) => x * 99\n' +          // arrow body only
+      'function f({a, b}) {}\n' +
+      'function h(a, {x, y}) /* c */ {}\n' +   // comment before brace
+      'class C { m(p, q) { return 1 } }\n')    // method body only
+    expect(names).toEqual([])
+  })
+
+  it('adding a destructured param IS tracked (was silent)', async () => {
+    const names = await delta(
+      'function foo(a, b) {}\nconst bar = (x) => x * 2\n' +
+      'function f({a, b, c}) {}\n' +
+      'function h(a, {x, y}) {}\nclass C { m(p, q) {} }\n')
+    expect(names).toEqual(['f'])
+  })
+
+  it('renaming a param still fires', async () => {
+    const names = await delta(
+      'function foo(a, c) {}\nconst bar = (x) => x * 2\n' +
+      'function f({a, b}) {}\nfunction h(a, {x, y}) {}\nclass C { m(p, q) {} }\n')
+    expect(names).toEqual(['foo'])
+  })
+})
