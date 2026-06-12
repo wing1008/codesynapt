@@ -27,20 +27,33 @@ function symbolNodeView(g, n) {
 
 // Honest coverage — which files the symbol graph actually parses vs not, so an
 // under-populated graph isn't mistaken for "few dependencies".
-function symbolCoverage(files, supportedExts) {
+function symbolCoverage(files, supportedExts, degradedOverride) {
+  // A language whose tree-sitter grammar failed to load THIS session is NOT
+  // actually covered, even though its extension is in supportedExts — report it
+  // honestly rather than claiming 100% over a disabled parser (insp-004).
+  // degradedOverride is a test seam; production passes nothing and we read the
+  // live parser state.
+  let degraded = new Set()
+  if (degradedOverride) degraded = new Set(degradedOverride)
+  else { try { degraded = new Set(require('./symbol-parser-treesitter.cjs').degradedExts()) } catch {} }
+  const isCovered = (ext) => supportedExts.has(ext) && !degraded.has(ext)
   const byExt = {}; let covered = 0, total = 0
   for (const f of files.values()) {
     total++; byExt[f.ext] = (byExt[f.ext] || 0) + 1
-    if (supportedExts.has(f.ext)) covered++
+    if (isCovered(f.ext)) covered++
   }
-  const uncovered = Object.keys(byExt).filter((e) => !supportedExts.has(e)).sort((a, b) => byExt[b] - byExt[a])
+  const uncovered = Object.keys(byExt).filter((e) => !isCovered(e)).sort((a, b) => byExt[b] - byExt[a])
+  const degradedSeen = [...degraded].filter((e) => byExt[e])
   return {
     filesCovered: covered, filesTotal: total,
     coveragePct: total ? Math.round((100 * covered) / total) : 0,
     uncoveredLangs: uncovered.slice(0, 8),
-    note: covered < total
-      ? 'Symbol (function-level) graph covers JS/TS, Python, and the validated tree-sitter languages (Go, Rust, Java, Kotlin, Swift, C#, PHP, C/C++, Bash); other languages are tracked at file level (layer-1) only.'
-      : undefined,
+    degradedLangs: degradedSeen.length ? degradedSeen : undefined,
+    note: degradedSeen.length
+      ? `WARNING: the parser for ${degradedSeen.join(', ')} failed to load this session — Layer-2 is DISABLED for ${degradedSeen.length > 1 ? 'these languages' : 'this language'} and their files are reported as uncovered. Check the install (tree-sitter-wasms present?).`
+      : (covered < total
+        ? 'Symbol (function-level) graph covers JS/TS, Python, and the validated tree-sitter languages (Go, Rust, Java, Kotlin, Swift, C#, PHP, C/C++, Bash); other languages are tracked at file level (layer-1) only.'
+        : undefined),
   }
 }
 

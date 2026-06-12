@@ -18,3 +18,7 @@
 - [x] ~~HIGH: 데스크톱 watcher 간헐 사망~~ → **오진. 진범=유령 데스크톱**: 전날 사용자가 띄운 인스턴스가 taskkill //IM에 침묵 면역(다른 세션/권한, stderr 숨김)인 채 7707 점유 — e2e가 구코드 쌍둥이에게 질의. PowerShell Stop-Process로 제거 후 깨끗한 인스턴스에서 ⑦ 전체 체인 라이브 증명(signature changed 이벤트). 남는 제품 교훈 2건 아래. (2026-06-11)
 - [ ] **같은 프로젝트 데스크톱 중복 기동 경고**: 두 데스크톱이 같은 프로젝트를 열면 레지스트리 heartbeat 끼리 thrash + 클라이언트가 구버전 인스턴스로 오라우팅(유령 사건의 본질). 기동 시 레지스트리에 동일 projectHash의 살아있는 desktop 엔트리가 있으면 사용자에게 경고/포커스 이전 제안.
 - [ ] **newly-dead 경보 과발화 의심**: 시그니처 프로브 1개 수정에 +102 newly-dead 동반 — enrichment(TS서브엔진/임베딩) 비동기 완료 시점이 accounting 스냅샷 사이에 끼면 도달성이 출렁이는 듯. diff를 enrichment 완료 후로 옮기거나 임계 둘 가치. (2026-06-11 관찰)
+
+## insp-004 (2026-06-12 풀점검) 후속 — Wave 2/3에서 처리
+- [ ] **aliased destructure-require 미해결**: `const { orig: local } = require('./mod'); local()` 는 caller 엣지 안 생김 — ESM `import { orig as local }`도 공유하는 기존 한계(rename→source 매핑 부재). Wave1에서 non-alias destructure(#52 핵심 6호출)는 수정됨. 처리경로: 파서가 import 별칭 binding을 {module, exportedName}로 매핑해 resolveCall에 원래 이름 전달.
+- [ ] **확정 57건 정본**: `docs/inspections/2026-06-12-insp-004/confirmed.json` (HIGH 21·MED 19·LOW 17). clean.md=재배포 제외 목록(burn-spots/blockers). critic.md=점검 사각 8.

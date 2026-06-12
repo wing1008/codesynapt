@@ -847,11 +847,27 @@ function extractReferences(content, fileId, index) {
       if (!isMemberCall && callee.type === 'Identifier') {
         const b = path.scope.getBinding(name)
         if (b) {
+          // A binding initialized from require('./mod') — `const { f } = require()`
+          // or `const m = require().f` — is an IMPORT, not a local callback value.
+          // ESM imports already bypass this guard (their binding.kind is 'module'),
+          // but a CJS require-binding's kind is 'const', so without this check a
+          // destructure-require call was misfiled as a local-callback dynamic site
+          // and produced NO caller edge at all (insp-004). Let it fall through to
+          // normal cross-file resolution like an ESM named import would.
+          let requireImport = false
+          {
+            const vd = b.path && (b.path.isVariableDeclarator && b.path.isVariableDeclarator()
+              ? b.path
+              : (b.path.findParent ? b.path.findParent((pp) => pp.isVariableDeclarator && pp.isVariableDeclarator()) : null))
+            let init = vd && vd.node ? vd.node.init : null
+            while (init && init.type === 'MemberExpression') init = init.object
+            if (init && init.type === 'CallExpression' && init.callee && init.callee.type === 'Identifier' && init.callee.name === 'require') requireImport = true
+          }
           const initPath = b.path && b.path.get && b.path.get('init')
           const isFnLocal = (b.path && b.path.isFunctionDeclaration && b.path.isFunctionDeclaration())
             || (b.path && b.path.isClassDeclaration && b.path.isClassDeclaration())
             || (initPath && initPath.isFunction && initPath.isFunction())
-          if (!isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) {
+          if (!requireImport && !isFnLocal && (b.kind === 'param' || b.kind === 'const' || b.kind === 'let' || b.kind === 'var')) {
             // `cb()` where cb is a parameter / non-function local: a runtime
             // value call. Not resolvable statically — record, don't drop silent.
             if (index.recordDynamicSite) index.recordDynamicSite(src, path.node.loc?.start.line || 0, 'local-callback')

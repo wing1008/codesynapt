@@ -1094,6 +1094,17 @@ async function main() {
           for (const id of d.ids.slice(0, 50)) process.stdout.write(`    ${id}\n`)
           if (d.ids.length > 50) process.stdout.write(`    … +${d.ids.length - 50} more\n`)
         }
+        // The HTTP API marks the blast incomplete when files in the impact set
+        // use dynamic/reflective/DI patterns — surface it on the CLI too, so a
+        // terminal user isn't misled that this count is the whole story
+        // (insp-004: the caveat was returned by /blast but dropped here).
+        if (j.caveat && j.caveat.incomplete) {
+          process.stdout.write(`\n  ⚠  ${j.caveat.note || j.caveat.reason}\n`)
+          const dyn = (j.caveat.dynamicFiles || []).map((f) => f.id)
+          if (dyn.length) {
+            process.stdout.write(`     dynamic-pattern files: ${dyn.slice(0, 8).join(', ')}${dyn.length > 8 ? ` … +${dyn.length - 8} more` : ''}\n`)
+          }
+        }
         break
       }
       case 'symbol': {
