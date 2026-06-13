@@ -1305,6 +1305,11 @@ async function main() {
           process.stdout.write(`${label} of ${id}\n`)
           if (!list.length) { process.stdout.write(`  (none)\n`) }
           else for (const s of list) fmtSym(s)
+          // Dynamic call sites this symbol contains — so "(none)" callees isn't
+          // read as "calls nothing" when it actually dispatches dynamically (#41).
+          if (sub === 'callees' && j.dynamicSites) {
+            process.stdout.write(`  + ${j.dynamicSites} dynamic call site(s) (obj[k](), reflection, callbacks) — statically unnameable; cs trace run to witness\n`)
+          }
           const cand = sub === 'callers' ? j.candidateCallers : j.candidateCallees
           if (cand && cand.length) {
             process.stdout.write(`\ncandidate* (possible dynamic-dispatch, not confirmed):\n`)

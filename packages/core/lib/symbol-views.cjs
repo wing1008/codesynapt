@@ -175,10 +175,16 @@ function handleSymbolView(g, sub, params = {}, ctx = {}) {
       const id = params.id || ''
       if (!g.nodes.has(id)) return { status: 404, body: { error: 'symbol not found', id } }
       const cand = g.candidateCalleesOf(id).map((c) => symbolNodeView(g, c))
+      // Zero-silence: this symbol may have call sites whose callee is statically
+      // unnameable (obj[k](), reflection, inline callbacks). Surface the count so
+      // a "(none)" callee list isn't misread as "this calls nothing" (insp-004 #41).
+      const dynN = g.dynamicSites?.get(id)?.length || 0
       return { status: 200, body: {
         id, callees: g.calleesOf(id).map((c) => symbolNodeView(g, c)),
         candidateCallees: cand.length ? cand : undefined,
         candidateNote: cand.length ? 'candidate* = possible dynamic-dispatch targets (the call could not be statically pinned to one); the real one is among these.' : undefined,
+        dynamicSites: dynN || undefined,
+        dynamicNote: dynN ? `${dynN} dynamic call site(s) here (obj[k](), reflection, callbacks) — statically unnameable; cs trace run can witness them.` : undefined,
       } }
     }
     case 'blast': {

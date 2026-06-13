@@ -47,6 +47,20 @@ function isAuxPath(fileId) {
   return parts.some((p) => AUX_PATH_SEGMENTS.has(p))
 }
 
+// Coarse language group of a file, by extension. A static call never crosses
+// languages, so a candidate (dynamic-dispatch) caller/callee in another language
+// is always spurious (insp-004 #50: a JS arrow's candidate callers included a
+// Java method and a Python module of the same name).
+const _LANG_GROUPS = {
+  js: 'js', jsx: 'js', ts: 'js', tsx: 'js', mjs: 'js', cjs: 'js',
+  py: 'py', pyw: 'py', pyi: 'py',
+  cc: 'cpp', cpp: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp', h: 'cpp', c: 'cpp',
+}
+function langGroupOf(fileId) {
+  const ext = (String(fileId).split('.').pop() || '').toLowerCase()
+  return _LANG_GROUPS[ext] || ext
+}
+
 // Common builtin / inherited / stdlib method names. When a call's receiver
 // type is unknown, a bare `.add()` / `.resolve()` / `.save()` is almost
 // never a call to a user-defined *module-level* function that merely shares
@@ -349,7 +363,11 @@ class SymbolGraph {
     // before the allowAny builtin filter and would otherwise grab a same-file
     // `add` for `visited.add()` — B-2 / the JS-recall measurement). Bare
     // calls `foo()` are unaffected (memberCall=false).
-    if (memberCall && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
+    // EXCEPTION: a namespace/default-import member call (`ns.fn()`, pinned via
+    // importedOnly+inModule) targets a KNOWN module, so a builtin-looking name
+    // there is still that module's real export — `registry.remove()` is the
+    // user's exported remove(), not Set.remove (insp-004 #49).
+    if (memberCall && !(importedOnly && inModule) && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
       return this._decline('builtin-method', name, fromFileId)
     }
     // Type-aware lookup: `User.method` matches a symbol whose
@@ -519,6 +537,7 @@ class SymbolGraph {
     if (memberCall && BUILTIN_NAMES.has(bare.toLowerCase())) return { candidates: [], capped: false }
     const set = this.byName.get(bare.toLowerCase())
     if (!set) return { candidates: [], capped: false }
+    const fromGroup = langGroupOf(fromFileId)
     const out = []
     let capped = false
     for (const id of set) {
@@ -526,6 +545,7 @@ class SymbolGraph {
       if (!n || n.name !== bare) continue                 // exact-case, real callable
       if (n.kind !== 'function' && n.kind !== 'method') continue
       if (isAuxPath(n.file)) continue                     // production only
+      if (langGroupOf(n.file) !== fromGroup) continue     // a call never crosses languages (#50)
       out.push(n)
       if (out.length >= cap) { capped = true; break }
     }
