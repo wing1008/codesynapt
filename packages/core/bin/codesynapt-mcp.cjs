@@ -767,10 +767,21 @@ async function handle(msg) {
     if (method === 'tools/call') {
       const tool = TOOLS.find((t) => t.name === params?.name)
       if (!tool) return respondError(id, -32601, `unknown tool: ${params?.name}`)
-      const result = await tool.handler(params.arguments || {})
-      return respond(id, {
-        content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
-      })
+      // A tool's own failure (bad args, nonexistent id, …) is a TOOL result with
+      // isError:true — NOT a JSON-RPC protocol error. Protocol errors are for
+      // malformed requests; surfacing tool errors as -32000 made clients treat a
+      // recoverable "no such symbol" as a transport fault (insp-004 #54).
+      try {
+        const result = await tool.handler(params.arguments || {})
+        return respond(id, {
+          content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
+        })
+      } catch (err) {
+        return respond(id, {
+          content: [{ type: 'text', text: `error: ${err && err.message ? err.message : String(err)}` }],
+          isError: true,
+        })
+      }
     }
     if (method === 'ping') {
       return respond(id, {})
@@ -855,4 +866,9 @@ if (isHttp) {
     try { msg = JSON.parse(line) } catch { return }
     handle(msg)
   })
+  // The client closed stdin (Claude Code / Cursor disconnected) — exit instead
+  // of lingering as a zombie that holds the in-process backend port and scanner
+  // watchers open (insp-004 #53).
+  rl.on('close', () => process.exit(0))
+  process.stdin.on('end', () => process.exit(0))
 }

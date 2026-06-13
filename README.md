@@ -150,9 +150,15 @@ list including history, restore, refresh, tour, timeline, trace.
 
 ```sh
 cd <your-project>
+cs serve .                           # start the backend FIRST (cs init snapshots it)
 cs init                              # generates CLAUDE.md + installs /codesynapt slash commands
 claude mcp add codesynapt codesynapt-mcp   # registers 11 cs_* tools (one-time, per OS user)
 ```
+
+> `cs init` snapshots the running project into `CLAUDE.md`, so a backend
+> (`cs serve .` or the desktop `npm start`) must be up first — otherwise it
+> stops with a "server not reachable" hint. To install **only** the
+> `/codesynapt` slash commands without a server, run `cs init --slash-only`.
 
 That's it. Inside any Claude Code session in that project:
 
