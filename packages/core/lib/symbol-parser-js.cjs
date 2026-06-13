@@ -368,6 +368,9 @@ function extractSymbols(content, fileId) {
         id: mkId(fileId, name, n.loc.start.line), name, qualifiedName: name,
         kind: 'method', file: fileId, startLine: n.loc.start.line, endLine: n.loc.end.line,
         signature: signatureOf(n, content), doc: docOf(n), exported: false,
+        // Defined as a value inside an object literal — passed somewhere and
+        // invoked as a callback (opts.onX(...)), not called by name. Not dead.
+        valueCallback: true,
       })
     },
     ObjectProperty(path) {
@@ -381,6 +384,10 @@ function extractSymbols(content, fileId) {
         id: mkId(fileId, name, n.loc.start.line), name, qualifiedName: name,
         kind: 'function', file: fileId, startLine: n.loc.start.line, endLine: n.loc.end.line,
         signature: signatureOf(n, content), doc: docOf(n), exported: false,
+        // Inline callback defined as an object-literal property value — passed
+        // as a value and invoked via dispatch (e.g. opts.verifyClient(info)),
+        // never called by name. A "dead" verdict here is wrong (insp-004 #51).
+        valueCallback: true,
       })
     },
     // Re-export aliases: `export { _slugify as slugify } from './api'` (or a

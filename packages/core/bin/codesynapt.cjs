@@ -1389,7 +1389,10 @@ async function main() {
         const id = args[0]
         const deep = args.includes('--deep') ? '1' : null
         const asJson = args.includes('--json')
-        let locale = null
+        // Default to English on the CLI surface for a consistent English tool
+        // output; a Korean user opts in with --locale ko (insp-004 #39: the CLI
+        // otherwise inherited a non-English server default and mixed languages).
+        let locale = 'en'
         for (let i = 0; i < args.length; i++) if (args[i] === '--locale' && args[i+1]) locale = args[++i]
         const r = await req('GET', '/safety/' + encId(id), { deep, locale })
         if (r.status !== 200) return die(r.json?.error || 'failed')
@@ -2237,9 +2240,9 @@ async function main() {
       case 'preflight': {
         const asJson = args.includes('--json')
         const strict = args.includes('--strict')
-        let locale = null
+        let locale = 'en'   // English CLI surface by default; --locale ko to opt in (#39)
         for (let i = 0; i < args.length; i++) if (args[i] === '--locale' && args[i+1]) locale = args[++i]
-        const r = await req('GET', '/preflight', locale ? { locale } : null)
+        const r = await req('GET', '/preflight', { locale })
         if (r.status !== 200) return die(r.json?.error || 'failed')
         const j = r.json
         if (asJson) { printJson(j); break }
@@ -2295,7 +2298,7 @@ async function main() {
       }
       case 'suggest': {
         const asJson = args.includes('--json')
-        let top = '10', locale = null
+        let top = '10', locale = 'en'   // English CLI surface by default (#39)
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--top' && args[i+1]) top = args[++i]
           else if (args[i] === '--locale' && args[i+1]) locale = args[++i]

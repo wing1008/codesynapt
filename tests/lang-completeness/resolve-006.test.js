@@ -53,3 +53,18 @@ describe('#41 dynamic call sites visible in the callees view', () => {
     expect(r.body.dynamicNote).toMatch(/dynamic call site/i)
   })
 })
+
+// insp-004 #51 — inline callbacks defined as values are not dead.
+describe('#51 inline value callbacks are possible, not dead', () => {
+  it('object-property/method callbacks (and what they call) are not in the dead set', async () => {
+    const g = await buildGraph([js('server.js',
+      'export function start(){ makeServer({ verifyClient: (info) => ok(info), onOpen: function(){ log() } }) }\n' +
+      'function ok(i){ return true }\nfunction log(){}\nfunction reallyDead(){ return 1 }\n')])
+    const dead = g.accounting().dead.map((id) => g.nodes.get(id)?.name)
+    expect(dead).not.toContain('verifyClient')   // inline arrow callback
+    expect(dead).not.toContain('onOpen')         // inline function-expression callback
+    expect(dead).not.toContain('ok')             // called BY a callback — propagates
+    expect(dead).not.toContain('log')
+    expect(dead).toContain('reallyDead')         // genuinely unused free function stays dead
+  })
+})

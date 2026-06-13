@@ -1152,6 +1152,12 @@ class SymbolGraph {
     const possible = new Set()
     const seen = new Set(reachable)
     const q2 = [...reachable]
+    // Inline callbacks defined as values (object-literal property/method) are
+    // passed somewhere and invoked via dispatch — seed them as 'possible' so
+    // they AND what they call propagate as could-run (insp-004 #51).
+    for (const n of this.nodes.values()) {
+      if (n.valueCallback && !seen.has(n.id)) { seen.add(n.id); possible.add(n.id); q2.push(n.id) }
+    }
     while (q2.length) {
       const cur = q2.pop()
       for (const m of [this.callOut.get(cur), this.candOut.get(cur), refOut.get(cur)]) {
