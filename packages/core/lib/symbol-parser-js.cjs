@@ -914,10 +914,39 @@ function extractReferences(content, fileId, index) {
           }
         }
       }
+      // Alias resolution for a bare call: `import { orig as local }` or
+      // `const { orig: local } = require('./m')` — resolve to the ORIGINAL
+      // exported name so `local()` links to the real symbol. ESM and CJS share
+      // this gap (insp-004 0.0.8). Member calls keep their property name.
+      let resolveName = name
+      if (!isMemberCall && callee.type === 'Identifier') {
+        const ab = path.scope.getBinding(name)
+        if (ab && ab.path) {
+          if (ab.path.isImportSpecifier && ab.path.isImportSpecifier() && ab.path.node.imported && ab.path.node.imported.name) {
+            resolveName = ab.path.node.imported.name
+          } else if (ab.path.isVariableDeclarator && ab.path.isVariableDeclarator()
+                     && ab.path.node.id && ab.path.node.id.type === 'ObjectPattern') {
+            // `const { orig: local } = require('./m')` — the binding's path is the
+            // whole VariableDeclarator; find the pattern property bound to `name`
+            // and take its key (the original export name).
+            let init = ab.path.node.init
+            while (init && init.type === 'MemberExpression') init = init.object
+            if (init && init.type === 'CallExpression' && init.callee && init.callee.type === 'Identifier' && init.callee.name === 'require') {
+              for (const prop of ab.path.node.id.properties) {
+                if (prop.type === 'ObjectProperty' && !prop.computed
+                    && prop.value && prop.value.type === 'Identifier' && prop.value.name === name
+                    && prop.key && prop.key.name && prop.key.name !== name) {
+                  resolveName = prop.key.name; break
+                }
+              }
+            }
+          }
+        }
+      }
       if (!target && index.resolveCall) {
         target = memberViaImport
           ? index.resolveCall(fileId, name, { importedOnly: true, memberCall: true, inModule: nsModule })
-          : index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
+          : index.resolveCall(fileId, resolveName, { allowAny: !isMemberCall, memberCall: isMemberCall })
       }
       const callLine = path.node.loc?.start.line || 0
       if (target) {
@@ -933,7 +962,7 @@ function extractReferences(content, fileId, index) {
       // when it's genuinely a SET (≥2) — a clear dynamic-dispatch / ambiguous
       // signal, not a lone same-file guess resolveCall already declined.
       if (index.candidatesFor) {
-        const { candidates, capped } = index.candidatesFor(fileId, name, { memberCall: isMemberCall })
+        const { candidates, capped } = index.candidatesFor(fileId, resolveName, { memberCall: isMemberCall })
         // ≥1: even a single candidate is worth surfacing — resolveCall declined
         // to ASSERT it (precision), but as an honest "could be this" it carries
         // the real target the confident graph left blank.

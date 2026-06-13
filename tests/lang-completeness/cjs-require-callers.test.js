@@ -52,3 +52,21 @@ describe('CJS require — destructure call sites are real callers', () => {
     expect(hasCall(g, 'useJoin', 'join')).toBe(false)
   })
 })
+
+// insp-004 0.0.8 — aliased import/require call sites resolve to the real export.
+describe('aliased import resolves to the original export', () => {
+  it('CJS `const { orig: local } = require(); local()` links to orig', async () => {
+    const g = await buildGraph([
+      cjs('x.cjs', 'function createControlServer(o){}\nmodule.exports={createControlServer}\n'),
+      cjs('d.cjs', "const { createControlServer: mk } = require('./x.cjs')\nfunction startD(){ return mk({}) }\n"),
+    ], { 'd.cjs': ['x.cjs'] })
+    expect(hasCall(g, 'startD', 'createControlServer')).toBe(true)
+  })
+  it('a same-named LOCAL value (not an import) does not over-resolve', async () => {
+    const g = await buildGraph([
+      cjs('x.cjs', 'function createControlServer(o){}\nmodule.exports={createControlServer}\n'),
+      cjs('c.cjs', 'function f(){ const mk = 5; return mk }\n'),
+    ])
+    expect(hasCall(g, 'f', 'createControlServer')).toBe(false)
+  })
+})

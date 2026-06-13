@@ -88,3 +88,16 @@ describe('expression flow — TypeScript params (insp-004 blind-spot)', () => {
     expect(f.params).toEqual(['(pattern)'])
   })
 })
+
+describe('expression flow — nested scopes shadow correctly (insp-004 #20)', () => {
+  it('a lambda param shadowing an outer param is not attributed to the outer', async () => {
+    // lambda body is its own flow; the OUTER use(x) keeps param:x.
+    const f = await F('def t(x):\n    fn = lambda x: g(x)\n    return use(x)', 't.py', { name: 't', startLine: 1, endLine: 3 })
+    expect(f.calls.find((c) => c.name === 'g')).toBeUndefined()   // lambda body skipped
+    expect(arg0(f, 'use')).toBe('param:x')                        // outer unaffected
+  })
+  it('a comprehension does not leak a false param attribution', async () => {
+    const f = await F('def t(items):\n    return [a for a in items]', 't.py', { name: 't', startLine: 1, endLine: 2 })
+    expect(f.calls.map((c) => c.name)).toEqual([])
+  })
+})
