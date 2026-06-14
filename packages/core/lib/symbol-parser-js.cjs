@@ -943,6 +943,22 @@ function extractReferences(content, fileId, index) {
           }
         }
       }
+      // #M1 scope-exact: a bare call whose binding is a same-file function
+      // definition resolves to THAT exact definition, so a nested same-named
+      // function isn't shadowed by an outer/first-match one (insp-004 measure:
+      // extractFlowTS→walk@63 should be walk@189).
+      if (!target && !isMemberCall && callee.type === 'Identifier' && index.resolveScopeLocal) {
+        const sb = path.scope.getBinding(name)
+        if (sb && sb.path && sb.path.node && sb.path.node.loc) {
+          const isFnDef = (sb.path.isFunctionDeclaration && sb.path.isFunctionDeclaration())
+            || (sb.path.isFunctionExpression && sb.path.isFunctionExpression())
+            || (sb.path.isVariableDeclarator && sb.path.isVariableDeclarator() && sb.path.node.init && /Function/.test(sb.path.node.init.type || ''))
+          if (isFnDef) {
+            const hit = index.resolveScopeLocal(fileId, name, sb.path.node.loc.start.line)
+            if (hit) target = hit
+          }
+        }
+      }
       if (!target && index.resolveCall) {
         target = memberViaImport
           ? index.resolveCall(fileId, name, { importedOnly: true, memberCall: true, inModule: nsModule })

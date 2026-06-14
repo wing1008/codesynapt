@@ -47,3 +47,16 @@ describe('reachability — a constructed class keeps its constructor alive', () 
     expect(dead.some((d) => /Shape\.area/.test(d))).toBe(true)
   })
 })
+
+// insp-004 measure #M1 — a call resolves to the NESTED same-named function
+// (scope-exact), not a module-level shadowed one.
+describe('#M1 nested-scope shadow resolves to the right function', () => {
+  it('call inside outer goes to the nested definition, module-level one stays dead', async () => {
+    const g = await buildGraph([js('a.js',
+      'export function makeWalker(){\n  function walk(){ return 1 }\n  return walk()\n}\n' +
+      'function walk(){ return 2 }\n')])
+    const dead = g.accounting().dead.map((id) => { const n = g.nodes.get(id); return n ? n.name + '@' + n.startLine : id })
+    expect(dead).toContain('walk@5')        // module-level shadowed, never called
+    expect(dead).not.toContain('walk@2')    // nested, called by makeWalker (scope-exact)
+  })
+})

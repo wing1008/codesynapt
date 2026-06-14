@@ -522,6 +522,21 @@ class SymbolGraph {
     return this._decline(prodCount === 0 ? 'no-match' : 'ambiguous-prod', name, fromFileId)
   }
 
+  // Scope-exact resolution (#M1): a bare call whose binding is a same-file
+  // function definition resolves to the node defined at EXACTLY (file, name,
+  // line) — babel's getBinding gives that exact line, so a nested same-named
+  // function (which shadows an outer/other one) links to the right one instead
+  // of the first byName match. Returns the node or null.
+  resolveScopeLocal(fromFileId, name, defLine) {
+    const set = this.byName.get((name || '').toLowerCase())
+    if (!set) return null
+    for (const id of set) {
+      const n = this.nodes.get(id)
+      if (n && n.file === fromFileId && n.name === name && n.startLine === defLine) return n
+    }
+    return null
+  }
+
   // The DYNAMIC candidate leg. When a call can't be pinned to ONE static target
   // (polymorphic dispatch, unknown receiver type, ambiguous name) we do NOT drop
   // it — we expose the maximal HONEST candidate set: every production callable
