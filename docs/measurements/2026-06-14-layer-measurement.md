@@ -197,3 +197,21 @@ resolveCall에 scope-exact(JS babel) + 위치기반 srcId(tree-sitter) 추가 �
 - babel oracle(JS) 0.2% 잔여 = babel scope도 fix와 같은 scope라 자기참조지만, babel scope=언어 ground truth라 "거의 0" 신뢰.
 - **결론**: fix 안전·올바름. 진짜 precision = JS 0.2% + tree-sitter 위치근사(py 1.3%). 잔여는 정확한 tree-sitter scope oracle 필요(ROI 낮음, 백로그).
 - **방법론 교훈**: oracle과 fix가 같은 로직이면 자기참조 → 진짜 검증은 *다른 축*(런타임 과교정 + 언어 명세)으로 해야. 측정 의심을 fix 검증에도 적용.
+
+## cross-module recall fix (2번, 2026-06-14)
+recall oracle이 결정가능분 miss = cross-module import 함수 호출로 확정(측정 착시 아닌 진짜 갭). tree-sitter 언어에서 두 패턴 fix:
+- **namespace member call** `import re; re.compile()` (commit 0bf2e7d) — receiver가 import 모듈이면 importedOnly resolve (JS Wave2c 패턴 이식).
+- **from-import 함수 alias** `from m import orig as a; a()` (commit 0cd76e0) — alias→orig 매핑.
+
+**효과 (recall oracle, 실행 stdlib)**: 결정가능분 recall **59% → 67%(namespace) → 70%(alias) → 76%(정밀 import맵)**. 324 테스트, 회귀 0. 동적 member call 커버 72%.
+
+**측정 정밀화(②) — (b) 또 적중**: naive fileImports(모든파일 서로 import)가 over-import로 imported-ambiguous decline을 유발 → recall을 *과소*(70%)시킴. 정밀 import맵(실행 관측 cf→ef)이면 진짜 **76%**. naive는 상한이 아니라 하한이었음. unmatched 140은 심볼없는 callee(lambda/C확장)라 recall 무관, 데코레이터 def-line은 정확 일치.
+
+## ★ 남은 수정 (누적 — 계속 추가, 잊지 말 것)
+측정으로 확정/추정된 수정 대상. 처리 시 [x], 우선순위·ROI 표기.
+- [ ] **2번 잔여: 복합 import** — `from pkg import sub; sub.join()`(submodule namespace), 다단계 import. recall 남은 miss 26의 일부. **ROI 점감**(59→67→70, 다음 fix는 더 작음).
+- [ ] **측정 정밀화(②)** — `_recall_stdlib`이 naive fileImports라 recall 70%가 하한일 수 있음 + unmatched 140(심볼 매칭 갭, 데코레이터 def-line 등). 실제 import 파싱/제품 cs scan 경로로 진짜 recall 확인. **측정 의심 원칙상 가치**.
+- [ ] **3번: member call 타입 정밀도** — 동적 member call 72% 커버. `obj.method()` 후보군 확대/타입 추론. recall 동적 영역. **큰 작업**.
+- [ ] **#M1 잔여** — py 1.3%·kotlin 0.8%·cs 0.4% (caller 범위 밖 nested, 위치기반 한계). 정확한 tree-sitter scope oracle 필요. **ROI 낮음**.
+- [ ] **wasm 0.0.9** — bash·swift 파싱 크래시 + 다언어 대규모 안정. ABI 벽. **발행 전 필수, 큰 공사**.
+- [ ] **precision cross-file** — scope oracle이 same-file만. cross-file(alias/namespace) precision 미측정.

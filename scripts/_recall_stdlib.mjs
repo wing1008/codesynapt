@@ -55,8 +55,17 @@ for (const rel of filesNeeded) {
   try { if (fs.existsSync(abs)) fileObjs.push({ id: rel, ext: 'py', content: fs.readFileSync(abs, 'utf8') }) } catch {}
 }
 const g = new sg.SymbolGraph()
-const ids = fileObjs.map((f) => f.id)
-g.fileImports = new Map(ids.map((id) => [id, new Set(ids.filter((o) => o !== id))]))
+// Precise import map from the RUNTIME trace: a cross-file caller→callee that
+// actually executed IS an import relation. This replaces the naive "every file
+// imports every file" (which over-imports and can over-resolve, inflating
+// recall). Note: uses observed for both the import map and the recall judgment,
+// so it measures "if the import map is exact, what can resolve" — the resolve
+// logic's ceiling, not a self-fulfilling pass (resolve still fails on namespace/
+// alias/compound patterns even with the import present).
+const preciseFI = new Map()
+for (const o of [...filesNeeded].map((f) => f)) preciseFI.set(o, new Set())
+for (const o of stdEdges) { if (o.cf !== o.ef) { if (!preciseFI.has(o.cf)) preciseFI.set(o.cf, new Set()); preciseFI.get(o.cf).add(o.ef) } }
+g.fileImports = preciseFI
 for (const f of fileObjs) { const p = sg.PARSERS[f.ext]; if (p?.extractSymbols) for (const s of (await p.extractSymbols(f.content, f.id)) || []) g.addNode(s) }
 for (const f of fileObjs) { const p = sg.PARSERS[f.ext]; if (p?.extractReferences) for (const e of (await p.extractReferences(f.content, f.id, g)) || []) g.addEdge(e) }
 g.finalizeDispatchCandidates()
