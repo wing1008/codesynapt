@@ -65,7 +65,10 @@ function _registerSession(root, port) {
 function _spawnDaemon(root) {
   const cp = require('child_process')
   const serveBin = path.join(__dirname, 'codesynapt.cjs')
-  const child = cp.spawn(process.execPath, [serveBin, 'serve', root], { detached: true, stdio: 'ignore', env: { ...process.env } })
+  // CS_DAEMON_AUTOEXIT: this daemon is lifecycle-managed (idle-reap when no
+  // session/viewer lease references it) — same as codesynapt.cjs's _spawnDaemon.
+  // Without it an MCP-spawned daemon never self-exits (leak; audit 2026-06 MED).
+  const child = cp.spawn(process.execPath, [serveBin, 'serve', root], { detached: true, stdio: 'ignore', env: { ...process.env, CS_DAEMON_AUTOEXIT: '1' } })
   child.unref()
 }
 // Discover-or-spawn the per-project daemon, then register our session lease.
