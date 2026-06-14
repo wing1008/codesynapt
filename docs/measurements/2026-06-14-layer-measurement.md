@@ -214,4 +214,6 @@ recall oracle이 결정가능분 miss = cross-module import 함수 호출로 확
 - [ ] **3번: member call 타입 정밀도** — 동적 member call 72% 커버. `obj.method()` 후보군 확대/타입 추론. recall 동적 영역. **큰 작업**.
 - [ ] **#M1 잔여** — py 1.3%·kotlin 0.8%·cs 0.4% (caller 범위 밖 nested, 위치기반 한계). 정확한 tree-sitter scope oracle 필요. **ROI 낮음**.
 - [ ] **wasm 0.0.9** — bash·swift 파싱 크래시 + 다언어 대규모 안정. ABI 벽. **발행 전 필수, 큰 공사**.
-- [ ] **precision cross-file** — scope oracle이 same-file만. cross-file(alias/namespace) precision 미측정.
+- [x] ~~precision cross-file~~ → recall oracle에 observed-line 교차 추가(_recall_stdlib falseEdge). **적대 재검증: recall fix(namespace/alias)의 진짜 false edge ≈0**. 발견된 false edge 3은 메서드 오버라이드 다형성(static 베이스=정당, 실행 동적 서브)을 오판한 측정 한계.
+- [ ] **false-edge 측정 다형성 보정** — observed-line 교차가 메서드 오버라이드(베이스 vs 서브)를 false edge로 오판. 다형성 케이스 제외 필요(측정 정밀화).
+- [ ] **namespace compile 의심** — false edge 중 compile류 1~2개, re.compile vs 다른 compile 가능성. 확인 필요(ROI 낮음).

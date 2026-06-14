@@ -71,7 +71,12 @@ for (const f of fileObjs) { const p = sg.PARSERS[f.ext]; if (p?.extractReference
 g.finalizeDispatchCandidates()
 
 const confident = new Set(), candidate = new Set()
-for (const [s, set] of g.callOut) { const sn = g.nodes.get(s); for (const t of set) { const tn = g.nodes.get(t); if (sn && tn) confident.add(`${sn.file}:${sn.name}->${tn.file}:${tn.name}`) } }
+// confLine: for each caller->calleeName edge, the SET of callee def-lines the
+// static graph confidently resolved to. Lets us cross-check against the runtime
+// observed callee line — if static went confident to a DIFFERENT line than the
+// one that actually executed, that's a false edge (adversarial precision check).
+const confLine = new Map()
+for (const [s, set] of g.callOut) { const sn = g.nodes.get(s); for (const t of set) { const tn = g.nodes.get(t); if (sn && tn) { confident.add(`${sn.file}:${sn.name}->${tn.file}:${tn.name}`); const k = `${sn.file}:${sn.name}->${tn.file}:${tn.name}`; if (!confLine.has(k)) confLine.set(k, new Set()); confLine.get(k).add(tn.startLine) } } }
 for (const [s, set] of (g.candOut || new Map())) { const sn = g.nodes.get(s); for (const t of set) { const tn = g.nodes.get(t); if (sn && tn) candidate.add(`${sn.file}:${sn.name}->${tn.file}:${tn.name}`) } }
 const calleeAt = (file, line) => { for (const n of g.nodes.values()) if (n.file === file && n.startLine === line && n.kind !== 'module') return n; return null }
 const callerAt = (file, line) => { let b = null; for (const n of g.nodes.values()) if (n.file === file && n.kind !== 'module' && n.startLine <= line && (n.endLine || n.startLine) >= line) { if (!b || n.startLine > b.startLine) b = n } return b }
@@ -80,8 +85,8 @@ const isDunder = (n) => /^__.+__$/.test(n)
 // free = bare-callable free function (결정가능분, 정적 100% 목표).
 // member = method (obj.method() → 타입불명 = 동적, 후보로 커버해야).
 const grp = { free: { c: 0, cand: 0, m: 0 }, member: { c: 0, cand: 0, m: 0 } }
-let dunderSkip = 0, unmatched = 0
-const freeMiss = [], memberMiss = []
+let dunderSkip = 0, unmatched = 0, falseEdge = 0
+const freeMiss = [], memberMiss = [], falseEx = []
 for (const o of stdEdges) {
   const callee = calleeAt(o.ef, o.el); const caller = callerAt(o.cf, o.cl)
   if (!callee || !caller) { unmatched++; continue }
@@ -90,7 +95,12 @@ for (const o of stdEdges) {
   const isMember = callee.kind === 'method' || (callee.qualifiedName && callee.qualifiedName.includes('.') && callee.qualifiedName !== callee.name)
   const G = isMember ? grp.member : grp.free
   const key = `${caller.file}:${caller.name}->${callee.file}:${callee.name}`
-  if (confident.has(key)) G.c++
+  if (confident.has(key)) {
+    G.c++
+    // adversarial: did static go confident to the SAME line that executed?
+    const lines = confLine.get(key)
+    if (lines && !lines.has(o.el)) { falseEdge++; if (falseEx.length < 8) falseEx.push(`${caller.name}→${callee.name} ran@${o.el} but static@${[...lines].join(',')} (${o.ef.split('/').pop()})`) }
+  }
   else if (candidate.has(key)) G.cand++
   else { G.m++; (isMember ? memberMiss : freeMiss).push(`${caller.name}→${callee.name} (${o.cf.split('/').pop()}:${o.cl})`) }
 }
@@ -104,4 +114,7 @@ console.log(`\n[결정가능분 = free function 호출 → 이상향 "정적 100
 console.log(`  confident: ${grp.free.c}  miss: ${grp.free.m}  → RECALL: ${fd ? (100 * grp.free.c / fd).toFixed(0) : 0}% (${grp.free.c}/${fd})`)
 console.log(`\n[동적 = member call obj.method() → 타입불명 → "후보 최대치" 영역]`)
 console.log(`  confident: ${grp.member.c}  candidate(후보커버): ${grp.member.cand}  miss(후보도못함): ${grp.member.m}  → 커버: ${md ? (100 * (grp.member.c + grp.member.cand) / md).toFixed(0) : 0}%`)
+console.log(`\n[적대: cross-file FALSE EDGE = static이 실행과 다른 line의 동명 정의로 confident]`)
+console.log(`  false edge: ${falseEdge} (recall fix가 틀린 모듈/함수로 이었으면 >0)`)
+falseEx.forEach((m) => console.log('  ✗ ' + m))
 if (freeMiss.length) { console.log(`\n결정가능분 miss (진짜 정적 놓침 — 버그 후보):`); freeMiss.slice(0, 10).forEach((m) => console.log('  ✗ ' + m)) }
