@@ -752,8 +752,8 @@ ipcMain.handle('revoke-plugin', (_e, id) => {
 // ─── Auto-updater control (renderer-driven) ────────────────────
 // The updater is wired in app.whenReady() below; these handlers let the
 // renderer toast drive download/install. `_autoUpdater` is null when the
-// updater is disabled (CS_DISABLE_UPDATER=1) or electron-updater isn't
-// installed (CLI/MCP-only builds) — handlers degrade gracefully then.
+// updater is not opted in (default — set CS_ENABLE_UPDATER=1 to enable) or
+// electron-updater isn't installed (CLI/MCP-only builds) — handlers degrade then.
 let _autoUpdater = null
 let _updateAvailableInfo = null    // last 'update-available' info, if any
 let _updateDownloaded = false      // true once 'update-downloaded' fired
