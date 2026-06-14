@@ -11,12 +11,14 @@
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/wing1008?label=Sponsor&logo=GitHub&style=social)](https://github.com/sponsors/wing1008)
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/wing1008)
 
-> **MCP-native code graph for AI agents — see blast radius live.**
-> The dependency map Claude Code / Cursor / any MCP agent should be
-> reading before it edits your code. Live-updating (~0.4 s after a
-> save), no re-indexing, no cloud. Same scanner ships as MCP server
-> (11 `cs_*` tools: 8 file-level + 3 symbol-level), CLI (`cs`), and a 3D desktop window that
-> pulses every node the AI touches.
+> **The MCP dependency map that shows AI agents what breaks before they edit —
+> no wrong edges, and unseen code flagged as candidates.**
+> One call surfaces just what's affected — *without* reading the whole project
+> into context — so the AI is less likely to break code it wasn't looking at,
+> using far fewer tokens. Fully offline — no cloud, no re-indexing, live-updating
+> (~0.4 s after a save). Ships first as an MCP server (11 `cs_*` tools: 8
+> file-level + 3 symbol-level) + CLI (`cs`); an optional 3D desktop window pulses
+> every node the AI touches.
 
 ## Why this exists
 
@@ -37,6 +39,8 @@ All three share the same scanner: imports across JS/TS, Python, Go, Rust, Java/K
 
 ## What it does well
 
+- **No false completeness** — dynamic / DI / reflection calls are surfaced as `candidate*` + floor caveats, and blast verdicts drop to `confidence:'limited'` when the static graph can't see everything. The agent never edits on a false sense of completeness.
+- **Measured, not asserted** — Layer-2 call edges: **0% wrong-edge** on an independent position oracle in-repo, **0–1.3%** across a 13-language corpus (reproduce: `node scripts/_precision_pos.mjs`; [details](./docs/measurements/2026-06-14-layer-measurement.md)). Token cost vs reading files: **~98–99.9% fewer**, 1 MCP call instead of N file reads ([benchmarks](./docs/benchmarks.md)). The blast radius you act on is measured.
 - **11 `cs_*` MCP tools** (not 37 narrow ones) — 8 file-level: `cs_summary`, `cs_query`, `cs_blast`, `cs_intent`, `cs_health`, `cs_change`, `cs_trace`, `cs_ui` (each takes an `action` enum); plus 3 symbol-level: `cs_symbol_summary`, `cs_symbol_search`, `cs_symbol_explore` for the Layer-2 function-call graph. Designed so the agent picks the right one with a glance, not by scanning a wall of tool names.
 - **AI-aware response envelope** — every response includes `meta: { scannedAt, tokenEstimate, totalAvailable, truncated }`. The agent budgets tokens before drilling deeper.
 - **Blast radius before edit** — `cs_blast({action:'safety', id})` returns 🟢/🟡/🔴 verdict + reasons in one call; `action:'bundle'` packs the closest neighbours into a token budget so the agent reads the right context first.

@@ -1,7 +1,7 @@
 {
   "name": "codesynapt",
   "version": "0.0.4",
-  "description": "MCP-native code graph for AI agents — see blast radius live. 3D visualizer + CLI + MCP server, one package.",
+  "description": "The MCP dependency map that shows AI agents what breaks before they edit — no wrong edges, unseen code flagged as candidates. Offline, far fewer tokens. MCP server + CLI (Claude Code/Cursor), optional 3D view.",
   "license": "AGPL-3.0-or-later",
   "author": {
     "name": "wing1008",
@@ -49,6 +49,7 @@
     "electron/",
     "public/",
     "scripts/",
+    "claude-commands/",
     "plugin-api/",
     "server.js",
     "LICENSE",
@@ -60,7 +61,7 @@
     "!**/*.test.cjs"
   ],
   "scripts": {
-    "postinstall": "node scripts/copy-vendor.js",
+    "postinstall": "node scripts/copy-vendor.js && node scripts/install-claude-commands.cjs",
     "start": "electron .",
     "electron": "electron .",
     "server": "node server.js",

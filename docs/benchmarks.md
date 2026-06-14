@@ -17,9 +17,9 @@ not the exact milliseconds.
 
 | Repo | Files | Edges | What |
 |---|---|---|---|
-| `packages/core` | 33 | 28 | CodeSynapt's own engine source (JS/CJS) |
-| [`colinhacks/zod`](https://github.com/colinhacks/zod) | 491 | 724 | popular TS validation library |
-| [`vuejs/core`](https://github.com/vuejs/core) | 637 | 1,817 | Vue 3 monorepo (TS) |
+| `packages/core` | 36 | 35 | CodeSynapt's own engine source (JS/CJS) |
+| [`colinhacks/zod`](https://github.com/colinhacks/zod) | 492 | 724 | popular TS validation library |
+| [`vuejs/core`](https://github.com/vuejs/core) | 637 | 1,819 | Vue 3 monorepo (TS) |
 
 ## Speed
 
@@ -47,11 +47,11 @@ estimate, not a per-model number.)
 
 ### Project map — `cs_summary` vs reading the whole project
 
-| Repo | `cs_summary` | Read all sources | Ratio |
-|---|---|---|---|
-| `packages/core` | 200 tok | 190,615 tok | **953×** smaller |
-| zod | 332 tok | 921,163 tok | **2,775×** smaller |
-| vue/core | 336 tok | 1,377,673 tok | **4,100×** smaller |
+| Repo | `cs_summary` | Read all sources | Ratio | % fewer tokens | Tool calls |
+|---|---|---|---|---|---|
+| `packages/core` | 231 tok | 224,160 tok | **970×** | **99.90%** | 1 MCP call vs 36 reads |
+| zod | 324 tok | 921,226 tok | **2,843×** | **99.96%** | 1 vs 492 reads |
+| vue/core | 328 tok | 1,380,420 tok | **4,209×** | **99.98%** | 1 vs 637 reads |
 
 *("Read all sources" is the upper bound — what it would cost to read every file
 to map the project. The summary gives the structure + top hubs in a few hundred
@@ -64,29 +64,40 @@ The honest baseline is reading the **whole transitive blast radius** (reverse
 dependents, 3 hops) — what an agent does to judge full impact. Hub = the
 most-imported internal file.
 
-| Repo | Hub | Direct importers | Blast radius (3-hop) | `cs_blast` | Read blast radius | Ratio |
-|---|---|---|---|---|---|---|
-| `packages/core` | `lib/registry.cjs` | 4 | 4 files | 254 tok | 45,202 tok | **178×** |
-| zod | `src/v4/index.ts` | 90 | 90 files | 3,369 tok | 166,829 tok | **49×** |
-| vue/core | `packages/shared/src/index.ts` | 163 | 440 files | 10,706 tok | 1,052,871 tok | **98×** |
+| Repo | Hub | Direct importers | Blast radius (3-hop) | `cs_blast` | Read blast radius | Ratio | % fewer |
+|---|---|---|---|---|---|---|---|
+| `packages/core` | `lib/registry.cjs` | 4 | 4 files | 254 tok | 55,104 tok | **217×** | **99.54%** |
+| zod | `packages/zod/src/v4/index.ts` | 90 | 90 files | 3,369 tok | 166,829 tok | **49.5×** | **97.98%** |
+| vue/core | `packages/shared/src/index.ts` | 163 | 440 files | 10,706 tok | 1,056,078 tok | **98.6×** | **98.99%** |
 
 Changing a central file in vue/core touches **440 files**; `cs_blast` summarizes
 that impact in ~10.7k tokens vs ~1.05M tokens to read it all — ~98× less.
 
-## Accuracy (import resolution)
+**In tool-call terms:** `cs_blast` answers in **1 MCP call** where reading the
+full blast radius is N file reads (4 / 90 / 440 above); the token cut is
+**~98–99.9% fewer** across summary/blast. **Caveat (read this):** our baseline is
+the *naive* "read every file in the set", an **upper bound**; a careful agent
+reads fewer, so treat these as the *shape* of the gap, not a guaranteed per-task
+multiple.
 
-Import resolution is checked against an independent oracle: the **TypeScript
-compiler's own module resolver** (`ts.resolveModuleName`) over the same source.
-On zod (286 `.ts` files):
+## Accuracy (call-graph precision)
 
-- **Precision 100%** — every dependency edge the scanner reports is a real,
-  compiler-resolved import. No fabricated edges.
-- **Recall ~73%** of every `import`/`export … from` statement the compiler
-  resolves to an internal file. The graph is *precision-first*: it would rather
-  omit an edge than guess one, so recall trades off against the perfect precision.
+The Layer-2 function-call graph is checked against an **independent position
+oracle** — it resolves each ambiguous-name call by source position, not by the
+scanner's own logic, so it cannot rubber-stamp the scanner. Reproduce:
 
-This is Layer-1 import accuracy, measured on one library — reproduce with the
-oracle method on your own repo before relying on it.
+```sh
+node scripts/_precision_pos.mjs
+```
+
+- **Wrong-edge rate 0.0%** on the in-repo corpus (1,751 same-file edges with an
+  ambiguous name — the case most likely to mis-resolve — 0 wrong).
+- **0–1.3%** across a 13-language external corpus (full method + per-language
+  tables in [`docs/measurements/2026-06-14-layer-measurement.md`](./measurements/2026-06-14-layer-measurement.md)).
+
+The graph is *precision-first*: an ambiguous edge is declined and surfaced as a
+*candidate* rather than guessed, so wrong edges stay near zero (recall trades off
+against that). Re-run the oracle on your own repo before relying on it.
 
 ## Honest caveats
 

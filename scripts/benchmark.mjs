@@ -107,7 +107,7 @@ for (const f of baseSnap.files) {
   try { totalSrcTokens += tok(fs.readFileSync(path.join(root, f.id.split('/').join(path.sep)), 'utf8')) } catch {}
 }
 const summaryTokens = (sum.json && sum.json.meta && sum.json.meta.tokenEstimate) || tok(sum.raw)
-out.tokens = { projectMap: { csSummary: summaryTokens, readAllSources: totalSrcTokens, ratio: +(totalSrcTokens / summaryTokens).toFixed(1) } }
+out.tokens = { projectMap: { csSummary: summaryTokens, readAllSources: totalSrcTokens, ratio: +(totalSrcTokens / summaryTokens).toFixed(1), pctFewer: +(100 * (1 - summaryTokens / totalSrcTokens)).toFixed(2), toolCalls: { cs: 1, readFiles: baseSnap.files.length } } }
 
 // (b) Impact analysis: "what breaks if I change <hub>?". Pick the most-imported
 // internal file (max DIRECT importers from the graph), then compare cs_blast's
@@ -140,6 +140,8 @@ if (hub) {
     csBlast: blastTokens,
     readBlastRadius: readTokens,
     ratio: readTokens && blastTokens ? +(readTokens / blastTokens).toFixed(1) : null,
+    pctFewer: readTokens && blastTokens ? +(100 * (1 - blastTokens / readTokens)).toFixed(2) : null,
+    toolCalls: { cs: 1, readFiles: seen.size },
   }
 }
 
@@ -157,10 +159,10 @@ console.log(`  incremental remove ${r.incrementalMs.removeMedian} ms median`)
 console.log(`  endpoint            p50 / p95 ms`)
 for (const [ep, v] of Object.entries(r.endpoints)) console.log(`    ${ep.padEnd(22)} ${String(v.p50).padStart(4)} / ${v.p95}`)
 console.log(`\nTOKENS  (cs answer vs reading files for the same question)`)
-console.log(`  project map   cs_summary ${r.tokens.projectMap.csSummary} tok  vs  read all sources ${r.tokens.projectMap.readAllSources} tok   →  ${r.tokens.projectMap.ratio}× smaller`)
+console.log(`  project map   cs_summary ${r.tokens.projectMap.csSummary} tok  vs  read all sources ${r.tokens.projectMap.readAllSources} tok   →  ${r.tokens.projectMap.ratio}× smaller (${r.tokens.projectMap.pctFewer}% fewer tokens) · ${r.tokens.projectMap.toolCalls.cs} MCP call vs ${r.tokens.projectMap.toolCalls.readFiles} file reads`)
 if (r.tokens.impact) {
   const t = r.tokens.impact
   console.log(`  impact "${t.hub}"  (${t.directImporters} direct importers, ${t.blastRadiusFiles} files in 3-hop blast radius)`)
-  console.log(`    cs_blast ${t.csBlast} tok  vs  read whole blast radius ${t.readBlastRadius} tok   →  ${t.ratio}× smaller`)
+  console.log(`    cs_blast ${t.csBlast} tok  vs  read whole blast radius ${t.readBlastRadius} tok   →  ${t.ratio}× smaller (${t.pctFewer}% fewer tokens) · ${t.toolCalls.cs} MCP call vs ${t.toolCalls.readFiles} file reads`)
 }
 console.log()
