@@ -515,6 +515,16 @@ function walk(node, ctx) {
         // guess is a phantom), so member calls resolve same-file/imported only
         // + reject builtin method names. Matches the babel parser, precision-
         // first. Typed members were already resolved above (Python qualified).
+        // Namespace member call `mod.func()` where `mod` is an imported module
+        // (Python `import re; re.compile()`, etc.) — func lives in the imported
+        // module, so resolve imported-only. JS already does this (Wave2c); this
+        // is the tree-sitter equivalent and the main cross-module recall gap.
+        if (!target && !superUnresolved && !typedMiss && isMemberCallNode(node) && ctx.importedNames) {
+          const recv = receiverIdentOf(node)
+          if (recv && ctx.importedNames.has(recv)) {
+            target = ctx.resolve(calleeName, { memberCall: true, importedOnly: true, srcId: src })
+          }
+        }
         if (!target && !superUnresolved) {
           const member = isMemberCallNode(node)
           // Typed-receiver MISS must not degrade a MEMBER call to the bare-name
@@ -1338,11 +1348,25 @@ function makeResolver(fileId, index) {
   // a file the caller actually imports — so local variables that
   // happen to share a name with some unrelated function elsewhere
   // don't produce a noise edge.
-  return function resolve(name, { forCall = false, memberCall = false, srcId = null } = {}) {
+  return function resolve(name, { forCall = false, memberCall = false, srcId = null, importedOnly = false } = {}) {
     return index.resolveCall
-      ? index.resolveCall(fileId, name, { allowAny: forCall, memberCall, srcId })
+      ? index.resolveCall(fileId, name, { allowAny: forCall, memberCall, srcId, importedOnly })
       : null
   }
+}
+
+// Receiver identifier of a member call `recv.method()` — the object the method
+// is called on. Used to detect a namespace member call `mod.func()` where mod
+// is an imported module (Python `re.compile()` etc.).
+function receiverIdentOf(callNode) {
+  const fn = callNode.childForFieldName?.('function') || callNode.namedChild(0)
+  if (!fn) return null
+  // python attribute: object.attribute ; many grammars expose an `object` field
+  const obj = fn.childForFieldName?.('object')
+  if (obj && IDENT_TYPES.has(obj.type)) return obj.text
+  // fallback: first identifier child of the callee navigation node
+  if (fn.namedChildCount) { const c = fn.namedChild(0); if (IDENT_TYPES.has(c.type)) return c.text }
+  return null
 }
 
 // Is this call a member/navigation call (`obj.method()`) rather than a bare

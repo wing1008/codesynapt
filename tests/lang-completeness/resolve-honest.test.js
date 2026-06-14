@@ -70,3 +70,21 @@ describe('#M1 nested-scope shadow — tree-sitter (py)', () => {
     expect(tgt).toBe(2)   // nested walk@2, not module walk@5
   })
 })
+
+// insp-004 measure cross-module recall — py namespace member call mod.func().
+describe('namespace member call resolution (tree-sitter)', () => {
+  it('py `import mod; mod.func()` resolves to the imported function', async () => {
+    const g = await buildGraph([
+      { id: 'mre.py', ext: 'py', content: 'def compile(p):\n    return p\n' },
+      { id: 'app.py', ext: 'py', content: 'import mre\ndef use():\n    return mre.compile(1)\n' },
+    ], { 'app.py': ['mre.py'] })
+    expect(hasCall(g, 'use', 'compile')).toBe(true)
+  })
+  it('an unknown-receiver obj.method() is NOT resolved (no false edge)', async () => {
+    const g = await buildGraph([
+      { id: 'mre.py', ext: 'py', content: 'def compile(p):\n    return p\n' },
+      { id: 'b.py', ext: 'py', content: 'def use(obj):\n    return obj.compile(1)\n' },
+    ], { 'b.py': ['mre.py'] })
+    expect(hasCall(g, 'use', 'compile')).toBe(false)
+  })
+})
