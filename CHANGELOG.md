@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.5 — beta (unreleased)
+## 0.0.5 — beta (2026-06-14)
 
 > Beta / pre-release — APIs and formats may still change.
 
