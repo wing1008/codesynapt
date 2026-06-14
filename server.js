@@ -3,8 +3,13 @@ import http from 'http'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { WebSocketServer } from 'ws'
 import { Scanner } from './packages/core/scanner.js'
+
+// `ws` is an optionalDependency — degrade with a clear message instead of a raw
+// "Cannot find module 'ws'" crash when it isn't installed (audit 2026-06 LOW).
+let WebSocketServer
+try { ({ WebSocketServer } = await import('ws')) }
+catch { console.error('[codesynapt-server] needs the optional "ws" package — install it: npm i ws'); process.exit(1) }
 
 // ─── CLI ──────────────────────────────────────────────────────
 const args = process.argv.slice(2)

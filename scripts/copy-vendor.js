@@ -15,7 +15,13 @@ if (!fs.existsSync(src)) {
   process.exit(0)
 }
 
-fs.mkdirSync(path.dirname(dst), { recursive: true })
-fs.copyFileSync(src, dst)
-const size = (fs.statSync(dst).size / 1024).toFixed(0)
-console.log(`[copy-vendor] three.module.js → public/vendor/ (${size} KB)`)
+try {
+  fs.mkdirSync(path.dirname(dst), { recursive: true })
+  fs.copyFileSync(src, dst)
+  const size = (fs.statSync(dst).size / 1024).toFixed(0)
+  console.log(`[copy-vendor] three.module.js → public/vendor/ (${size} KB)`)
+} catch (e) {
+  // non-fatal — must never break `npm install` (postinstall chain continues to
+  // install-claude-commands; audit 2026-06 LOW)
+  console.warn('[copy-vendor] copy failed (non-fatal):', e && e.message)
+}

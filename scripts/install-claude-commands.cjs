@@ -38,7 +38,9 @@ function main() {
         const dstContent = fs.readFileSync(dst, 'utf8')
         const norm = (s) => s.replace(/\r\n/g, '\n')
         if (norm(dstContent) === norm(srcContent)) continue // already up to date (ignore CRLF)
-        try { fs.copyFileSync(dst, dst + '.bak') } catch {} // preserve user/older copy
+        // back up only the FIRST time — never clobber an existing .bak (that would
+        // lose the user's original on a second upgrade; audit 2026-06 LOW)
+        if (!fs.existsSync(dst + '.bak')) { try { fs.copyFileSync(dst, dst + '.bak') } catch {} }
       }
       fs.writeFileSync(dst, srcContent)
       copied++
