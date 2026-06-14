@@ -379,11 +379,13 @@ class SymbolGraph {
     // before the allowAny builtin filter and would otherwise grab a same-file
     // `add` for `visited.add()` — B-2 / the JS-recall measurement). Bare
     // calls `foo()` are unaffected (memberCall=false).
-    // EXCEPTION: a namespace/default-import member call (`ns.fn()`, pinned via
-    // importedOnly+inModule) targets a KNOWN module, so a builtin-looking name
-    // there is still that module's real export — `registry.remove()` is the
-    // user's exported remove(), not Set.remove (insp-004 #49).
-    if (memberCall && !(importedOnly && inModule) && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
+    // EXCEPTION: a namespace/import member call (`ns.fn()`, importedOnly) targets
+    // a KNOWN module, so a builtin-looking name there is still that module's real
+    // export — `registry.remove()`/`sub.join()` is the user's exported function,
+    // not Set.remove/str.join (insp-004 #49 + cross-module recall). importedOnly
+    // alone is enough (inModule pin not required) so a tree-sitter namespace call
+    // with a builtin-named target still resolves.
+    if (memberCall && !importedOnly && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
       return this._decline('builtin-method', name, fromFileId)
     }
     // Type-aware lookup: `User.method` matches a symbol whose

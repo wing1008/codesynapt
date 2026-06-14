@@ -99,3 +99,21 @@ describe('from-import function alias (tree-sitter)', () => {
     expect(hasCall(g, 'use', 'gettext')).toBe(true)
   })
 })
+
+// insp-004 measure recall — namespace member call with a BUILTIN-named target.
+describe('namespace member call with builtin-named function (tree-sitter)', () => {
+  it('py `sub.join()` where sub is imported resolves (not declined as str.join)', async () => {
+    const g = await buildGraph([
+      { id: 'sub.py', ext: 'py', content: 'def join(a):\n    return a\n' },
+      { id: 'a.py', ext: 'py', content: 'import sub\ndef use():\n    return sub.join(1)\n' },
+    ], { 'a.py': ['sub.py'] })
+    expect(hasCall(g, 'use', 'join')).toBe(true)
+  })
+  it('an unknown receiver s.join() is still declined (builtin guard kept)', async () => {
+    const g = await buildGraph([
+      { id: 'sub.py', ext: 'py', content: 'def join(a):\n    return a\n' },
+      { id: 'c.py', ext: 'py', content: 'def use(s):\n    return s.join([1, 2])\n' },
+    ], { 'c.py': ['sub.py'] })
+    expect(hasCall(g, 'use', 'join')).toBe(false)
+  })
+})
