@@ -10,6 +10,7 @@ const readline = require('readline')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const pkg = (() => { try { return require('../../../package.json') } catch { return { version: '0.0.0' } } })()
 
 // Resolve which port the running server is on.
 // Priority: explicit env var > lock file (written by server) > default 7707.
@@ -744,7 +745,7 @@ async function handle(msg) {
       return respond(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'codesynapt', version: '0.2.0' },
+        serverInfo: { name: 'codesynapt', version: pkg.version },
         // Clients (e.g. Claude Code) surface this in context every session, so the
         // usage contract does not depend on a slash command read once and forgotten.
         instructions:
@@ -824,8 +825,8 @@ if (isHttp) {
       return res.end(JSON.stringify({
         name: 'codesynapt-mcp',
         transport: 'streamable-http',
-        version: '0.1.0',
-        endpoints: ['POST /mcp', 'GET /mcp/events (SSE)'],
+        version: pkg.version,
+        endpoints: ['POST /mcp'],
         toolCount: TOOLS.length,
       }))
     }
