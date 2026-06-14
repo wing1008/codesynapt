@@ -88,3 +88,14 @@ describe('namespace member call resolution (tree-sitter)', () => {
     expect(hasCall(g, 'use', 'compile')).toBe(false)
   })
 })
+
+// insp-004 measure recall — from-import function alias.
+describe('from-import function alias (tree-sitter)', () => {
+  it('py `from m import orig as a; a()` resolves to orig', async () => {
+    const g = await buildGraph([
+      { id: 'm.py', ext: 'py', content: 'def gettext(s):\n    return s\n' },
+      { id: 'app.py', ext: 'py', content: "from m import gettext as _\ndef use():\n    return _('x')\n" },
+    ], { 'app.py': ['m.py'] })
+    expect(hasCall(g, 'use', 'gettext')).toBe(true)
+  })
+})
