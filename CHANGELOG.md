@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.0.5 — beta (unreleased)
+
+> Beta / pre-release — APIs and formats may still change.
+
+### Added
+- **`/codesynapt` + `/codesynapt-auto` install automatically on `npm install`** —
+  the Claude Code slash commands now ship in the package and a postinstall step
+  copies them into `~/.claude/commands`. Skips silently when Claude Code isn't
+  set up, in CI, or with `CS_NO_CLAUDE_COMMANDS=1`; backs up an existing copy to
+  `.bak`; never fails the install. (Previously required manual file copying.)
+- **Reproducible measurement corpus** — `scripts/corpus-manifest.json` (12 OSS
+  repos pinned by URL + SHA) + `scripts/fetch-corpus.mjs`, so the Layer-2
+  call-graph precision numbers reproduce from a clean checkout.
+
+### Fixed / hardened
+- **Multi-session daemons no longer leak** — the registry's stale-entry sweep now
+  also covers `daemon` entries (was session/viewer only), with a self-exclude
+  guard so a live daemon never reaps its own entry.
+- **MCP HTTP transport (`--http`) is now concurrency-safe** — replaced a global
+  `process.stdout` monkeypatch with a per-request `AsyncLocalStorage` sink, so
+  concurrent requests no longer return empty or cross-contaminated responses.
+- **Symbol-graph in-flight rebuild race** — a file change landing mid-build no
+  longer marks a pre-change graph as fresh; an epoch guard keeps it stale and
+  rebuilds once so the next reader gets current data.
+- MCP `serverInfo.version` (and the HTTP self-describe) now read `package.json`
+  instead of a hard-coded string; removed an advertised SSE endpoint that 404'd.
+
+### Changed
+- Headline / package description repositioned around **blast radius, offline, and
+  measured precision** (reproducible wrong-edge rate); the 3D view is framed as
+  optional.
+- Benchmarks now report **% fewer tokens + tool-calls (1 vs N)** and re-measured
+  zod / vue; call-graph accuracy cites a reproducible position oracle (0–1.3%
+  wrong-edge) instead of a non-reproducible import-resolution number.
+
 ## 0.0.4 — beta (2026-06-12)
 
 > Beta / pre-release — APIs and formats may still change.

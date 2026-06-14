@@ -164,6 +164,11 @@ claude mcp add codesynapt codesynapt-mcp   # registers 11 cs_* tools (one-time, 
 > stops with a "server not reachable" hint. To install **only** the
 > `/codesynapt` slash commands without a server, run `cs init --slash-only`.
 
+> **Installed via npm?** `/codesynapt` and `/codesynapt-auto` are already copied
+> into `~/.claude/commands` automatically on install — so `cs init` then just
+> generates `CLAUDE.md` and the MCP-registration hint. Disable the auto-copy with
+> `CS_NO_CLAUDE_COMMANDS=1`.
+
 That's it. Inside any Claude Code session in that project:
 
 ```
