@@ -572,6 +572,10 @@ async function runHeadlessServe(args) {
     process.stderr.write(`\n[cs] ${signal} → shutting down\n`)
     // Only remove the lock if it still points at us (avoid clobbering a newer instance).
     try { if (lockWritten && fs.readFileSync(lockPath, 'utf8').trim() === String(boundPort)) fs.unlinkSync(lockPath) } catch {}
+    // Clean Ctrl-C must also drop our daemon registry entry — otherwise it orphans
+    // (only the idle-reap path at ~L535 removed it). remove() is a no-op if absent;
+    // projectHash(abs) is the same key registered at L498. (audit 2026-06 MED)
+    try { const r = require('../lib/registry.cjs'); r.remove('daemon', r.projectHash(abs)) } catch {}
     try { await scanner.stop() } catch {}
     try { await stopControlServer() } catch {}
     process.exit(0)
