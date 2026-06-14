@@ -355,8 +355,24 @@ class SymbolGraph {
     return null
   }
 
-  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false, inModule = null } = {}) {
+  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false, inModule = null, srcId = null } = {}) {
     if (!name) return null
+    // #M1 scope shadow (language-agnostic, position-based): a bare call inside
+    // `src` whose same-named definition is nested INSIDE src's line span resolves
+    // to that nested one — it shadows any outer/other same-named definition. Used
+    // by the tree-sitter languages (no babel scope); JS resolves via babel scope
+    // before this. Only a bare call (memberCall=false) shadows this way.
+    if (srcId && !memberCall) {
+      const src = this.nodes.get(srcId)
+      if (src && src.endLine) {
+        const s0 = this.byName.get(name.toLowerCase())
+        if (s0) for (const id of s0) {
+          const n = this.nodes.get(id)
+          if (n && n.file === fromFileId && n.name === name && id !== srcId
+              && n.startLine > src.startLine && n.startLine <= src.endLine) return n
+        }
+      }
+    }
     // Untyped member call `obj.foo()` where foo is a builtin / common method
     // name (.add/.get/.map/.then…): never a call to a user free function of
     // that name. Reject before the same-file/imported lookup (those run

@@ -533,7 +533,7 @@ function walk(node, ctx) {
           // resolve (member=false).
           if (typedMiss && member) { /* no bare degrade for typed misses (see comment above) */ }
           else if (ctx.lang === 'rust' && member) { /* no bare-fallback for untyped Rust member calls */ }
-          else target = ctx.resolve(calleeName, { forCall: !member, memberCall: member })
+          else target = ctx.resolve(calleeName, { forCall: !member, memberCall: member, srcId: src })
         }
         if (target && target.id !== src) {
           const key = src + '|' + target.id + '|call'
@@ -1338,9 +1338,9 @@ function makeResolver(fileId, index) {
   // a file the caller actually imports — so local variables that
   // happen to share a name with some unrelated function elsewhere
   // don't produce a noise edge.
-  return function resolve(name, { forCall = false, memberCall = false } = {}) {
+  return function resolve(name, { forCall = false, memberCall = false, srcId = null } = {}) {
     return index.resolveCall
-      ? index.resolveCall(fileId, name, { allowAny: forCall, memberCall })
+      ? index.resolveCall(fileId, name, { allowAny: forCall, memberCall, srcId })
       : null
   }
 }

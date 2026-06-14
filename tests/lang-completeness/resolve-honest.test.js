@@ -60,3 +60,13 @@ describe('#M1 nested-scope shadow resolves to the right function', () => {
     expect(dead).not.toContain('walk@2')    // nested, called by makeWalker (scope-exact)
   })
 })
+
+// insp-004 measure #M1 — tree-sitter languages (position-based scope shadow).
+describe('#M1 nested-scope shadow — tree-sitter (py)', () => {
+  it('py call inside outer goes to the nested def, not the module-level one', async () => {
+    const g = await buildGraph([{ id: 'a.py', ext: 'py', content: 'def make():\n    def walk():\n        return 1\n    return walk()\ndef walk():\n    return 2\n' }])
+    let tgt = null
+    for (const [s, set] of g.callOut) { const sn = g.nodes.get(s); if (sn && sn.name === 'make') for (const t of set) { const tn = g.nodes.get(t); if (tn && tn.name === 'walk') tgt = tn.startLine } }
+    expect(tgt).toBe(2)   // nested walk@2, not module walk@5
+  })
+})
