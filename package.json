@@ -1,6 +1,6 @@
 {
   "name": "codesynapt",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "The MCP dependency map that shows AI agents what breaks before they edit — no wrong edges, unseen code flagged as candidates. Offline, far fewer tokens. MCP server + CLI (Claude Code/Cursor), optional 3D view.",
   "license": "AGPL-3.0-or-later",
   "author": {
