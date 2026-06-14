@@ -102,7 +102,7 @@ function readLive(type, { ttlMs = Infinity, filter = null } = {}) {
 }
 
 // Delete TTL-expired files of a type (housekeeping; called by daemon tick / any client).
-function cleanStale(type, ttlMs) {
+function cleanStale(type, ttlMs, excludeId) {
   const d = dirFor(type)
   const now = Date.now()
   let names
@@ -121,6 +121,7 @@ function cleanStale(type, ttlMs) {
     if (!n.endsWith('.json')) continue
     try {
       const e = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (excludeId && e.id === excludeId) continue   // never reap the caller's own entry (e.g. a daemon sweeping its own type)
       if (now - (e.lastSeen || 0) >= ttlMs) { fs.unlinkSync(file); removed++ }
     } catch { /* unreadable/torn — leave for a later pass */ }
   }

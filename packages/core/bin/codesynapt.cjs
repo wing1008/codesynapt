@@ -514,7 +514,7 @@ async function runHeadlessServe(args) {
         // port range, and discovery routed to stale-code instances. Touch
         // failures must never starve the reap.
         try { registry.touch('daemon', phash, { port: actualPort, epoch }) } catch {}
-        try { registry.cleanStale('session', _LEASE_TTL); registry.cleanStale('viewer', _LEASE_TTL) } catch {}
+        try { registry.cleanStale('session', _LEASE_TTL); registry.cleanStale('viewer', _LEASE_TTL); registry.cleanStale('daemon', _LEASE_TTL, phash) } catch {}
         try {
           const sess = registry.readLive('session', { ttlMs: _LEASE_TTL, filter: (s) => { try { return registry.projectHash(s.projectRoot) === phash } catch { return false } } })
           const view = registry.readLive('viewer', { ttlMs: _LEASE_TTL, filter: (v) => v.attachedProjectHash === phash })

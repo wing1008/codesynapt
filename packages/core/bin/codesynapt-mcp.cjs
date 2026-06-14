@@ -11,6 +11,8 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const pkg = (() => { try { return require('../../../package.json') } catch { return { version: '0.0.0' } } })()
+const { AsyncLocalStorage } = require('async_hooks')
+const _sendCtx = new AsyncLocalStorage()   // per-request response sink for HTTP transport (async-safe)
 
 // Resolve which port the running server is on.
 // Priority: explicit env var > lock file (written by server) > default 7707.
@@ -728,7 +730,10 @@ const TOOLS = [
 
 // ─── JSON-RPC over stdio ───────────────────────────────────────
 function send(msg) {
-  process.stdout.write(JSON.stringify(msg) + '\n')
+  const line = JSON.stringify(msg) + '\n'
+  const sink = _sendCtx.getStore()
+  if (sink) sink.lines.push(line)   // HTTP transport: capture per-request (async-safe), not via global stdout
+  else process.stdout.write(line)
 }
 
 function respond(id, result) {
@@ -837,14 +842,12 @@ if (isHttp) {
         let msg
         try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')) }
         catch { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":"invalid json"}') }
-        // Capture the response from handle() instead of writing to stdout
+        // Capture handle()'s response per-request via AsyncLocalStorage — no
+        // global stdout monkeypatch, so concurrent requests never cross-contaminate.
         const captured = await new Promise((resolve) => {
-          const original = process.stdout.write
-          let buf = ''
-          process.stdout.write = (s) => { buf += s; return true }
-          handle(msg).finally(() => {
-            process.stdout.write = original
-            resolve(buf.trim())
+          const sink = { lines: [] }
+          _sendCtx.run(sink, () => {
+            handle(msg).finally(() => resolve(sink.lines.join('').trim()))
           })
         })
         res.writeHead(200, { 'Content-Type': 'application/json' })
