@@ -57,9 +57,21 @@ All three share the same scanner: imports across JS/TS, Python, Go, Rust, Java/K
 
 ## Quick start
 
-Three install paths, pick the one that matches you.
+**Simplest — npm (MCP + CLI):**
 
-### Path 1 — Windows `.exe` (easiest, no Node required up-front)
+```sh
+npm i -g codesynapt                        # cs / codesynapt-mcp on your PATH + /codesynapt auto-installs
+claude mcp add codesynapt codesynapt-mcp   # register the 11 cs_* tools in Claude Code
+```
+
+That's all you need for the MCP server + CLI. The `/codesynapt` and
+`/codesynapt-auto` slash commands install automatically on any `npm i codesynapt`
+(via postinstall); `-g` additionally puts the `cs` command on your PATH. The
+**desktop 3D app** needs a full install (a path below).
+
+Or pick a full install path:
+
+### Path 1 — Windows `.exe` (desktop app, no Node required up-front)
 
 Download `CodeSynapt-Setup-<version>.exe` from the [Releases](https://github.com/wing1008/codesynapt/releases) page. Run the installer:
 
