@@ -10,6 +10,9 @@ const readline = require('readline')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const pkg = (() => { try { return require('../../../package.json') } catch { return { version: '0.0.0' } } })()
+const { AsyncLocalStorage } = require('async_hooks')
+const _sendCtx = new AsyncLocalStorage()   // per-request response sink for HTTP transport (async-safe)
 
 // Resolve which port the running server is on.
 // Priority: explicit env var > lock file (written by server) > default 7707.
@@ -727,7 +730,10 @@ const TOOLS = [
 
 // ─── JSON-RPC over stdio ───────────────────────────────────────
 function send(msg) {
-  process.stdout.write(JSON.stringify(msg) + '\n')
+  const line = JSON.stringify(msg) + '\n'
+  const sink = _sendCtx.getStore()
+  if (sink) sink.lines.push(line)   // HTTP transport: capture per-request (async-safe), not via global stdout
+  else process.stdout.write(line)
 }
 
 function respond(id, result) {
@@ -744,7 +750,7 @@ async function handle(msg) {
       return respond(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'codesynapt', version: '0.2.0' },
+        serverInfo: { name: 'codesynapt', version: pkg.version },
         // Clients (e.g. Claude Code) surface this in context every session, so the
         // usage contract does not depend on a slash command read once and forgotten.
         instructions:
@@ -767,10 +773,21 @@ async function handle(msg) {
     if (method === 'tools/call') {
       const tool = TOOLS.find((t) => t.name === params?.name)
       if (!tool) return respondError(id, -32601, `unknown tool: ${params?.name}`)
-      const result = await tool.handler(params.arguments || {})
-      return respond(id, {
-        content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
-      })
+      // A tool's own failure (bad args, nonexistent id, …) is a TOOL result with
+      // isError:true — NOT a JSON-RPC protocol error. Protocol errors are for
+      // malformed requests; surfacing tool errors as -32000 made clients treat a
+      // recoverable "no such symbol" as a transport fault (insp-004 #54).
+      try {
+        const result = await tool.handler(params.arguments || {})
+        return respond(id, {
+          content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }],
+        })
+      } catch (err) {
+        return respond(id, {
+          content: [{ type: 'text', text: `error: ${err && err.message ? err.message : String(err)}` }],
+          isError: true,
+        })
+      }
     }
     if (method === 'ping') {
       return respond(id, {})
@@ -813,8 +830,8 @@ if (isHttp) {
       return res.end(JSON.stringify({
         name: 'codesynapt-mcp',
         transport: 'streamable-http',
-        version: '0.1.0',
-        endpoints: ['POST /mcp', 'GET /mcp/events (SSE)'],
+        version: pkg.version,
+        endpoints: ['POST /mcp'],
         toolCount: TOOLS.length,
       }))
     }
@@ -825,14 +842,12 @@ if (isHttp) {
         let msg
         try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')) }
         catch { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":"invalid json"}') }
-        // Capture the response from handle() instead of writing to stdout
+        // Capture handle()'s response per-request via AsyncLocalStorage — no
+        // global stdout monkeypatch, so concurrent requests never cross-contaminate.
         const captured = await new Promise((resolve) => {
-          const original = process.stdout.write
-          let buf = ''
-          process.stdout.write = (s) => { buf += s; return true }
-          handle(msg).finally(() => {
-            process.stdout.write = original
-            resolve(buf.trim())
+          const sink = { lines: [] }
+          _sendCtx.run(sink, () => {
+            handle(msg).finally(() => resolve(sink.lines.join('').trim()))
           })
         })
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -855,4 +870,9 @@ if (isHttp) {
     try { msg = JSON.parse(line) } catch { return }
     handle(msg)
   })
+  // The client closed stdin (Claude Code / Cursor disconnected) — exit instead
+  // of lingering as a zombie that holds the in-process backend port and scanner
+  // watchers open (insp-004 #53).
+  rl.on('close', () => process.exit(0))
+  process.stdin.on('end', () => process.exit(0))
 }

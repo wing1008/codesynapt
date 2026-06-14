@@ -199,6 +199,7 @@ export class Scanner extends EventEmitter {
     this.symbolGraph = null
     this._symbolGraphStale = true
     this._symbolGraphBuilding = null
+    this._sgEpoch = 0   // bumped on each invalidation; buildSymbolGraph compares to catch mid-build changes
     this.watcher = null
     this._pendingSnapshot = null
     // True once the chokidar 'ready' has fired and the initial walk is done.
@@ -695,6 +696,7 @@ export class Scanner extends EventEmitter {
     // File graph changed → the symbol graph (which folds in these import
     // edges for call resolution) is now stale; rebuild lazily on next request.
     this._symbolGraphStale = true
+    this._sgEpoch++   // a build in flight is now producing pre-change (stale) sources
   }
 
   // ── Layer-2: symbol / function-call graph ────────────────────────
@@ -704,6 +706,7 @@ export class Scanner extends EventEmitter {
   // parsers init a WASM grammar on first use. See docs/SYMBOL-MODE-PLAN.md.
   async buildSymbolGraph() {
     registerSymbolParsers()
+    const builtAtEpoch = this._sgEpoch   // invalidations after this point → this build is born stale
     const entries = []
     for (const f of this.files.values()) {
       entries.push({ id: f.id, absPath: f.absPath, ext: f.ext })
@@ -734,7 +737,10 @@ export class Scanner extends EventEmitter {
       }
     } catch (e) { if (process.env.CS_DBG) console.error('[cs] observed reapply:', e && e.message) }
     this.symbolGraph = g
-    this._symbolGraphStale = false
+    // Only mark fresh if NO invalidation landed during the build; otherwise this
+    // graph is from pre-change sources — keep it stale so the next getSymbolGraph
+    // rebuilds (mid-build file-change race, audit 2026-06).
+    if (this._sgEpoch === builtAtEpoch) this._symbolGraphStale = false
     // Sub-engine enrichment (type-checker post-pass), TIERED by engine cost:
     //   - DEFAULT-ON: the in-process TS block (bundled `typescript`, ~1.5-2s) —
     //     the core value for JS/TS users, so it runs unless disabled.
@@ -785,6 +791,13 @@ export class Scanner extends EventEmitter {
         .finally(() => { this._symbolGraphBuilding = null })
     }
     await this._symbolGraphBuilding
+    // A change mid-build leaves the graph stale — rebuild ONCE more so this caller
+    // gets fresh data. Bounded (at most one extra build), never a spin loop.
+    if (this._symbolGraphStale && !this._symbolGraphBuilding) {
+      this._symbolGraphBuilding = this.buildSymbolGraph()
+        .finally(() => { this._symbolGraphBuilding = null })
+    }
+    if (this._symbolGraphStale) await this._symbolGraphBuilding
     return this.symbolGraph
   }
 

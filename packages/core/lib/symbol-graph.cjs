@@ -47,6 +47,20 @@ function isAuxPath(fileId) {
   return parts.some((p) => AUX_PATH_SEGMENTS.has(p))
 }
 
+// Coarse language group of a file, by extension. A static call never crosses
+// languages, so a candidate (dynamic-dispatch) caller/callee in another language
+// is always spurious (insp-004 #50: a JS arrow's candidate callers included a
+// Java method and a Python module of the same name).
+const _LANG_GROUPS = {
+  js: 'js', jsx: 'js', ts: 'js', tsx: 'js', mjs: 'js', cjs: 'js',
+  py: 'py', pyw: 'py', pyi: 'py',
+  cc: 'cpp', cpp: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp', h: 'cpp', c: 'cpp',
+}
+function langGroupOf(fileId) {
+  const ext = (String(fileId).split('.').pop() || '').toLowerCase()
+  return _LANG_GROUPS[ext] || ext
+}
+
 // Common builtin / inherited / stdlib method names. When a call's receiver
 // type is unknown, a bare `.add()` / `.resolve()` / `.save()` is almost
 // never a call to a user-defined *module-level* function that merely shares
@@ -341,15 +355,37 @@ class SymbolGraph {
     return null
   }
 
-  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false, inModule = null } = {}) {
+  resolveCall(fromFileId, name, { allowAny = false, qualifiedOnly = false, memberCall = false, importedOnly = false, inModule = null, srcId = null } = {}) {
     if (!name) return null
+    // #M1 scope shadow (language-agnostic, position-based): a bare call inside
+    // `src` whose same-named definition is nested INSIDE src's line span resolves
+    // to that nested one — it shadows any outer/other same-named definition. Used
+    // by the tree-sitter languages (no babel scope); JS resolves via babel scope
+    // before this. Only a bare call (memberCall=false) shadows this way.
+    if (srcId && !memberCall) {
+      const src = this.nodes.get(srcId)
+      if (src && src.endLine) {
+        const s0 = this.byName.get(name.toLowerCase())
+        if (s0) for (const id of s0) {
+          const n = this.nodes.get(id)
+          if (n && n.file === fromFileId && n.name === name && id !== srcId
+              && n.startLine > src.startLine && n.startLine <= src.endLine) return n
+        }
+      }
+    }
     // Untyped member call `obj.foo()` where foo is a builtin / common method
     // name (.add/.get/.map/.then…): never a call to a user free function of
     // that name. Reject before the same-file/imported lookup (those run
     // before the allowAny builtin filter and would otherwise grab a same-file
     // `add` for `visited.add()` — B-2 / the JS-recall measurement). Bare
     // calls `foo()` are unaffected (memberCall=false).
-    if (memberCall && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
+    // EXCEPTION: a namespace/import member call (`ns.fn()`, importedOnly) targets
+    // a KNOWN module, so a builtin-looking name there is still that module's real
+    // export — `registry.remove()`/`sub.join()` is the user's exported function,
+    // not Set.remove/str.join (insp-004 #49 + cross-module recall). importedOnly
+    // alone is enough (inModule pin not required) so a tree-sitter namespace call
+    // with a builtin-named target still resolves.
+    if (memberCall && !importedOnly && BUILTIN_NAMES.has((name.split('.').pop() || name).toLowerCase())) {
       return this._decline('builtin-method', name, fromFileId)
     }
     // Type-aware lookup: `User.method` matches a symbol whose
@@ -504,6 +540,21 @@ class SymbolGraph {
     return this._decline(prodCount === 0 ? 'no-match' : 'ambiguous-prod', name, fromFileId)
   }
 
+  // Scope-exact resolution (#M1): a bare call whose binding is a same-file
+  // function definition resolves to the node defined at EXACTLY (file, name,
+  // line) — babel's getBinding gives that exact line, so a nested same-named
+  // function (which shadows an outer/other one) links to the right one instead
+  // of the first byName match. Returns the node or null.
+  resolveScopeLocal(fromFileId, name, defLine) {
+    const set = this.byName.get((name || '').toLowerCase())
+    if (!set) return null
+    for (const id of set) {
+      const n = this.nodes.get(id)
+      if (n && n.file === fromFileId && n.name === name && n.startLine === defLine) return n
+    }
+    return null
+  }
+
   // The DYNAMIC candidate leg. When a call can't be pinned to ONE static target
   // (polymorphic dispatch, unknown receiver type, ambiguous name) we do NOT drop
   // it — we expose the maximal HONEST candidate set: every production callable
@@ -519,6 +570,7 @@ class SymbolGraph {
     if (memberCall && BUILTIN_NAMES.has(bare.toLowerCase())) return { candidates: [], capped: false }
     const set = this.byName.get(bare.toLowerCase())
     if (!set) return { candidates: [], capped: false }
+    const fromGroup = langGroupOf(fromFileId)
     const out = []
     let capped = false
     for (const id of set) {
@@ -526,6 +578,7 @@ class SymbolGraph {
       if (!n || n.name !== bare) continue                 // exact-case, real callable
       if (n.kind !== 'function' && n.kind !== 'method') continue
       if (isAuxPath(n.file)) continue                     // production only
+      if (langGroupOf(n.file) !== fromGroup) continue     // a call never crosses languages (#50)
       out.push(n)
       if (out.length >= cap) { capped = true; break }
     }
@@ -1132,6 +1185,12 @@ class SymbolGraph {
     const possible = new Set()
     const seen = new Set(reachable)
     const q2 = [...reachable]
+    // Inline callbacks defined as values (object-literal property/method) are
+    // passed somewhere and invoked via dispatch — seed them as 'possible' so
+    // they AND what they call propagate as could-run (insp-004 #51).
+    for (const n of this.nodes.values()) {
+      if (n.valueCallback && !seen.has(n.id)) { seen.add(n.id); possible.add(n.id); q2.push(n.id) }
+    }
     while (q2.length) {
       const cur = q2.pop()
       for (const m of [this.callOut.get(cur), this.candOut.get(cur), refOut.get(cur)]) {

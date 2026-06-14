@@ -438,10 +438,24 @@ function walk(node, ctx) {
   // grammar: import_from_statement / import_statement with optional aliases.
   if (ctx.passTwo && ctx.importedNames
       && (t === 'import_from_statement' || t === 'import_statement')) {
+    const isFrom = t === 'import_from_statement'
     const collect = (n) => {
       if (!n) return
       if (n.type === 'dotted_name') { const last = n.namedChild(n.namedChildCount - 1); if (last) ctx.importedNames.add(last.text) }
-      else if (n.type === 'aliased_import') { const a = n.childForFieldName?.('alias'); if (a) ctx.importedNames.add(a.text); else collect(n.namedChild(0)) }
+      else if (n.type === 'aliased_import') {
+        const a = n.childForFieldName?.('alias')
+        if (a) {
+          ctx.importedNames.add(a.text)
+          // `from m import orig as alias` — a bare `alias()` call means the
+          // original function `orig` in module m (insp recall: gettext as _).
+          // (`import m as r` is a module alias, handled by the namespace path.)
+          if (isFrom && ctx.importedAlias) {
+            const nm = n.childForFieldName?.('name')
+            const orig = nm ? (IDENT_TYPES.has(nm.type) ? nm.text : (nm.namedChildCount ? nm.namedChild(nm.namedChildCount - 1).text : null)) : null
+            if (orig && orig !== a.text) ctx.importedAlias.set(a.text, orig)
+          }
+        } else collect(n.namedChild(0))
+      }
       else if (IDENT_TYPES.has(n.type)) ctx.importedNames.add(n.text)
     }
     for (let i = 0; i < node.namedChildCount; i++) collect(node.namedChild(i))
@@ -515,6 +529,16 @@ function walk(node, ctx) {
         // guess is a phantom), so member calls resolve same-file/imported only
         // + reject builtin method names. Matches the babel parser, precision-
         // first. Typed members were already resolved above (Python qualified).
+        // Namespace member call `mod.func()` where `mod` is an imported module
+        // (Python `import re; re.compile()`, etc.) — func lives in the imported
+        // module, so resolve imported-only. JS already does this (Wave2c); this
+        // is the tree-sitter equivalent and the main cross-module recall gap.
+        if (!target && !superUnresolved && !typedMiss && isMemberCallNode(node) && ctx.importedNames) {
+          const recv = receiverIdentOf(node)
+          if (recv && ctx.importedNames.has(recv)) {
+            target = ctx.resolve(calleeName, { memberCall: true, importedOnly: true, srcId: src })
+          }
+        }
         if (!target && !superUnresolved) {
           const member = isMemberCallNode(node)
           // Typed-receiver MISS must not degrade a MEMBER call to the bare-name
@@ -531,9 +555,12 @@ function walk(node, ctx) {
           // `RawValue.to_owned`). Refuse — typed receivers already resolved
           // above via the qualified path. Bare FUNCTION calls `foo()` still
           // resolve (member=false).
+          // from-import alias: `_()` where `_` is `from m import orig as _`
+          // resolves to orig (insp recall — gettext as _ pattern). Bare calls only.
+          const resolveNm = (!member && ctx.importedAlias && ctx.importedAlias.has(calleeName)) ? ctx.importedAlias.get(calleeName) : calleeName
           if (typedMiss && member) { /* no bare degrade for typed misses (see comment above) */ }
           else if (ctx.lang === 'rust' && member) { /* no bare-fallback for untyped Rust member calls */ }
-          else target = ctx.resolve(calleeName, { forCall: !member, memberCall: member })
+          else target = ctx.resolve(resolveNm, { forCall: !member, memberCall: member, srcId: src })
         }
         if (target && target.id !== src) {
           const key = src + '|' + target.id + '|call'
@@ -1338,11 +1365,25 @@ function makeResolver(fileId, index) {
   // a file the caller actually imports — so local variables that
   // happen to share a name with some unrelated function elsewhere
   // don't produce a noise edge.
-  return function resolve(name, { forCall = false, memberCall = false } = {}) {
+  return function resolve(name, { forCall = false, memberCall = false, srcId = null, importedOnly = false } = {}) {
     return index.resolveCall
-      ? index.resolveCall(fileId, name, { allowAny: forCall, memberCall })
+      ? index.resolveCall(fileId, name, { allowAny: forCall, memberCall, srcId, importedOnly })
       : null
   }
+}
+
+// Receiver identifier of a member call `recv.method()` — the object the method
+// is called on. Used to detect a namespace member call `mod.func()` where mod
+// is an imported module (Python `re.compile()` etc.).
+function receiverIdentOf(callNode) {
+  const fn = callNode.childForFieldName?.('function') || callNode.namedChild(0)
+  if (!fn) return null
+  // python attribute: object.attribute ; many grammars expose an `object` field
+  const obj = fn.childForFieldName?.('object')
+  if (obj && IDENT_TYPES.has(obj.type)) return obj.text
+  // fallback: first identifier child of the callee navigation node
+  if (fn.namedChildCount) { const c = fn.namedChild(0); if (IDENT_TYPES.has(c.type)) return c.text }
+  return null
 }
 
 // Is this call a member/navigation call (`obj.method()`) rather than a bare
@@ -1425,6 +1466,7 @@ function makeParser(ext) {
           symbols: [], classStack: [], fnStack: [], varTypeStack: [],
           edges: [], seen: new Set(),
           importedNames: new Set(),   // names brought in by imports (external-call filter)
+          importedAlias: new Map(),    // from-import function alias: localName -> originalName
           kwSet,
           resolve: makeResolver(fileId, index),
           // Dynamic candidate set (parity with babel) — maximal honest set of

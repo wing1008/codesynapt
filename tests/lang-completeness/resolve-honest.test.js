@@ -47,3 +47,73 @@ describe('reachability — a constructed class keeps its constructor alive', () 
     expect(dead.some((d) => /Shape\.area/.test(d))).toBe(true)
   })
 })
+
+// insp-004 measure #M1 — a call resolves to the NESTED same-named function
+// (scope-exact), not a module-level shadowed one.
+describe('#M1 nested-scope shadow resolves to the right function', () => {
+  it('call inside outer goes to the nested definition, module-level one stays dead', async () => {
+    const g = await buildGraph([js('a.js',
+      'export function makeWalker(){\n  function walk(){ return 1 }\n  return walk()\n}\n' +
+      'function walk(){ return 2 }\n')])
+    const dead = g.accounting().dead.map((id) => { const n = g.nodes.get(id); return n ? n.name + '@' + n.startLine : id })
+    expect(dead).toContain('walk@5')        // module-level shadowed, never called
+    expect(dead).not.toContain('walk@2')    // nested, called by makeWalker (scope-exact)
+  })
+})
+
+// insp-004 measure #M1 — tree-sitter languages (position-based scope shadow).
+describe('#M1 nested-scope shadow — tree-sitter (py)', () => {
+  it('py call inside outer goes to the nested def, not the module-level one', async () => {
+    const g = await buildGraph([{ id: 'a.py', ext: 'py', content: 'def make():\n    def walk():\n        return 1\n    return walk()\ndef walk():\n    return 2\n' }])
+    let tgt = null
+    for (const [s, set] of g.callOut) { const sn = g.nodes.get(s); if (sn && sn.name === 'make') for (const t of set) { const tn = g.nodes.get(t); if (tn && tn.name === 'walk') tgt = tn.startLine } }
+    expect(tgt).toBe(2)   // nested walk@2, not module walk@5
+  })
+})
+
+// insp-004 measure cross-module recall — py namespace member call mod.func().
+describe('namespace member call resolution (tree-sitter)', () => {
+  it('py `import mod; mod.func()` resolves to the imported function', async () => {
+    const g = await buildGraph([
+      { id: 'mre.py', ext: 'py', content: 'def compile(p):\n    return p\n' },
+      { id: 'app.py', ext: 'py', content: 'import mre\ndef use():\n    return mre.compile(1)\n' },
+    ], { 'app.py': ['mre.py'] })
+    expect(hasCall(g, 'use', 'compile')).toBe(true)
+  })
+  it('an unknown-receiver obj.method() is NOT resolved (no false edge)', async () => {
+    const g = await buildGraph([
+      { id: 'mre.py', ext: 'py', content: 'def compile(p):\n    return p\n' },
+      { id: 'b.py', ext: 'py', content: 'def use(obj):\n    return obj.compile(1)\n' },
+    ], { 'b.py': ['mre.py'] })
+    expect(hasCall(g, 'use', 'compile')).toBe(false)
+  })
+})
+
+// insp-004 measure recall — from-import function alias.
+describe('from-import function alias (tree-sitter)', () => {
+  it('py `from m import orig as a; a()` resolves to orig', async () => {
+    const g = await buildGraph([
+      { id: 'm.py', ext: 'py', content: 'def gettext(s):\n    return s\n' },
+      { id: 'app.py', ext: 'py', content: "from m import gettext as _\ndef use():\n    return _('x')\n" },
+    ], { 'app.py': ['m.py'] })
+    expect(hasCall(g, 'use', 'gettext')).toBe(true)
+  })
+})
+
+// insp-004 measure recall — namespace member call with a BUILTIN-named target.
+describe('namespace member call with builtin-named function (tree-sitter)', () => {
+  it('py `sub.join()` where sub is imported resolves (not declined as str.join)', async () => {
+    const g = await buildGraph([
+      { id: 'sub.py', ext: 'py', content: 'def join(a):\n    return a\n' },
+      { id: 'a.py', ext: 'py', content: 'import sub\ndef use():\n    return sub.join(1)\n' },
+    ], { 'a.py': ['sub.py'] })
+    expect(hasCall(g, 'use', 'join')).toBe(true)
+  })
+  it('an unknown receiver s.join() is still declined (builtin guard kept)', async () => {
+    const g = await buildGraph([
+      { id: 'sub.py', ext: 'py', content: 'def join(a):\n    return a\n' },
+      { id: 'c.py', ext: 'py', content: 'def use(s):\n    return s.join([1, 2])\n' },
+    ], { 'c.py': ['sub.py'] })
+    expect(hasCall(g, 'use', 'join')).toBe(false)
+  })
+})

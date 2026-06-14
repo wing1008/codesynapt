@@ -368,6 +368,9 @@ function extractSymbols(content, fileId) {
         id: mkId(fileId, name, n.loc.start.line), name, qualifiedName: name,
         kind: 'method', file: fileId, startLine: n.loc.start.line, endLine: n.loc.end.line,
         signature: signatureOf(n, content), doc: docOf(n), exported: false,
+        // Defined as a value inside an object literal — passed somewhere and
+        // invoked as a callback (opts.onX(...)), not called by name. Not dead.
+        valueCallback: true,
       })
     },
     ObjectProperty(path) {
@@ -381,6 +384,10 @@ function extractSymbols(content, fileId) {
         id: mkId(fileId, name, n.loc.start.line), name, qualifiedName: name,
         kind: 'function', file: fileId, startLine: n.loc.start.line, endLine: n.loc.end.line,
         signature: signatureOf(n, content), doc: docOf(n), exported: false,
+        // Inline callback defined as an object-literal property value — passed
+        // as a value and invoked via dispatch (e.g. opts.verifyClient(info)),
+        // never called by name. A "dead" verdict here is wrong (insp-004 #51).
+        valueCallback: true,
       })
     },
     // Re-export aliases: `export { _slugify as slugify } from './api'` (or a
@@ -907,10 +914,55 @@ function extractReferences(content, fileId, index) {
           }
         }
       }
+      // Alias resolution for a bare call: `import { orig as local }` or
+      // `const { orig: local } = require('./m')` — resolve to the ORIGINAL
+      // exported name so `local()` links to the real symbol. ESM and CJS share
+      // this gap (insp-004 0.0.8). Member calls keep their property name.
+      let resolveName = name
+      if (!isMemberCall && callee.type === 'Identifier') {
+        const ab = path.scope.getBinding(name)
+        if (ab && ab.path) {
+          if (ab.path.isImportSpecifier && ab.path.isImportSpecifier() && ab.path.node.imported && ab.path.node.imported.name) {
+            resolveName = ab.path.node.imported.name
+          } else if (ab.path.isVariableDeclarator && ab.path.isVariableDeclarator()
+                     && ab.path.node.id && ab.path.node.id.type === 'ObjectPattern') {
+            // `const { orig: local } = require('./m')` — the binding's path is the
+            // whole VariableDeclarator; find the pattern property bound to `name`
+            // and take its key (the original export name).
+            let init = ab.path.node.init
+            while (init && init.type === 'MemberExpression') init = init.object
+            if (init && init.type === 'CallExpression' && init.callee && init.callee.type === 'Identifier' && init.callee.name === 'require') {
+              for (const prop of ab.path.node.id.properties) {
+                if (prop.type === 'ObjectProperty' && !prop.computed
+                    && prop.value && prop.value.type === 'Identifier' && prop.value.name === name
+                    && prop.key && prop.key.name && prop.key.name !== name) {
+                  resolveName = prop.key.name; break
+                }
+              }
+            }
+          }
+        }
+      }
+      // #M1 scope-exact: a bare call whose binding is a same-file function
+      // definition resolves to THAT exact definition, so a nested same-named
+      // function isn't shadowed by an outer/first-match one (insp-004 measure:
+      // extractFlowTS→walk@63 should be walk@189).
+      if (!target && !isMemberCall && callee.type === 'Identifier' && index.resolveScopeLocal) {
+        const sb = path.scope.getBinding(name)
+        if (sb && sb.path && sb.path.node && sb.path.node.loc) {
+          const isFnDef = (sb.path.isFunctionDeclaration && sb.path.isFunctionDeclaration())
+            || (sb.path.isFunctionExpression && sb.path.isFunctionExpression())
+            || (sb.path.isVariableDeclarator && sb.path.isVariableDeclarator() && sb.path.node.init && /Function/.test(sb.path.node.init.type || ''))
+          if (isFnDef) {
+            const hit = index.resolveScopeLocal(fileId, name, sb.path.node.loc.start.line)
+            if (hit) target = hit
+          }
+        }
+      }
       if (!target && index.resolveCall) {
         target = memberViaImport
           ? index.resolveCall(fileId, name, { importedOnly: true, memberCall: true, inModule: nsModule })
-          : index.resolveCall(fileId, name, { allowAny: !isMemberCall, memberCall: isMemberCall })
+          : index.resolveCall(fileId, resolveName, { allowAny: !isMemberCall, memberCall: isMemberCall })
       }
       const callLine = path.node.loc?.start.line || 0
       if (target) {
@@ -926,7 +978,7 @@ function extractReferences(content, fileId, index) {
       // when it's genuinely a SET (≥2) — a clear dynamic-dispatch / ambiguous
       // signal, not a lone same-file guess resolveCall already declined.
       if (index.candidatesFor) {
-        const { candidates, capped } = index.candidatesFor(fileId, name, { memberCall: isMemberCall })
+        const { candidates, capped } = index.candidatesFor(fileId, resolveName, { memberCall: isMemberCall })
         // ≥1: even a single candidate is worth surfacing — resolveCall declined
         // to ASSERT it (precision), but as an honest "could be this" it carries
         // the real target the confident graph left blank.

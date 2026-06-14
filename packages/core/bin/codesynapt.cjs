@@ -514,7 +514,7 @@ async function runHeadlessServe(args) {
         // port range, and discovery routed to stale-code instances. Touch
         // failures must never starve the reap.
         try { registry.touch('daemon', phash, { port: actualPort, epoch }) } catch {}
-        try { registry.cleanStale('session', _LEASE_TTL); registry.cleanStale('viewer', _LEASE_TTL) } catch {}
+        try { registry.cleanStale('session', _LEASE_TTL); registry.cleanStale('viewer', _LEASE_TTL); registry.cleanStale('daemon', _LEASE_TTL, phash) } catch {}
         try {
           const sess = registry.readLive('session', { ttlMs: _LEASE_TTL, filter: (s) => { try { return registry.projectHash(s.projectRoot) === phash } catch { return false } } })
           const view = registry.readLive('viewer', { ttlMs: _LEASE_TTL, filter: (v) => v.attachedProjectHash === phash })
@@ -1305,6 +1305,11 @@ async function main() {
           process.stdout.write(`${label} of ${id}\n`)
           if (!list.length) { process.stdout.write(`  (none)\n`) }
           else for (const s of list) fmtSym(s)
+          // Dynamic call sites this symbol contains — so "(none)" callees isn't
+          // read as "calls nothing" when it actually dispatches dynamically (#41).
+          if (sub === 'callees' && j.dynamicSites) {
+            process.stdout.write(`  + ${j.dynamicSites} dynamic call site(s) (obj[k](), reflection, callbacks) — statically unnameable; cs trace run to witness\n`)
+          }
           const cand = sub === 'callers' ? j.candidateCallers : j.candidateCallees
           if (cand && cand.length) {
             process.stdout.write(`\ncandidate* (possible dynamic-dispatch, not confirmed):\n`)
@@ -1384,7 +1389,10 @@ async function main() {
         const id = args[0]
         const deep = args.includes('--deep') ? '1' : null
         const asJson = args.includes('--json')
-        let locale = null
+        // Default to English on the CLI surface for a consistent English tool
+        // output; a Korean user opts in with --locale ko (insp-004 #39: the CLI
+        // otherwise inherited a non-English server default and mixed languages).
+        let locale = 'en'
         for (let i = 0; i < args.length; i++) if (args[i] === '--locale' && args[i+1]) locale = args[++i]
         const r = await req('GET', '/safety/' + encId(id), { deep, locale })
         if (r.status !== 200) return die(r.json?.error || 'failed')
@@ -1866,41 +1874,50 @@ async function main() {
         let target = null
         let outputName = 'CLAUDE.md'
         let installSlash = true   // default: install Claude Code slash command
+        let slashOnly = false     // --slash-only: install slash commands, skip server + CLAUDE.md
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--agents') outputName = 'AGENTS.md'
           else if (args[i] === '--output' && args[i+1]) outputName = args[++i]
           else if (args[i] === '--no-slash-command') installSlash = false
+          else if (args[i] === '--slash-only') slashOnly = true
           else if (!args[i].startsWith('--') && !target) target = args[i]
         }
         target = target || process.cwd()
         const abs = path.resolve(target)
         if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) die(`not a directory: ${abs}`)
 
-        // Generate context with rules (call /summary first to ensure server reachable)
-        const health = await req('GET', '/health').catch(() => null)
-        if (!health || health.status !== 200) {
-          process.stderr.write(`⚠ codesynapt server not reachable. Start it first:\n`)
-          process.stderr.write(`    cd ${process.cwd()} && npm start         (desktop)\n`)
-          process.stderr.write(`    OR\n`)
-          process.stderr.write(`    cs serve ${abs}                          (headless daemon)\n`)
-          process.exit(1)
-        }
-        // Re-invoke ourselves to generate CLAUDE.md
         const { spawnSync } = require('child_process')
         const outFile = path.join(abs, outputName)
-        // Don't silently destroy an existing CLAUDE.md/AGENTS.md — it may hold
-        // hand-written agent instructions. Back it up before regenerating.
-        if (fs.existsSync(outFile)) {
-          const bak = outFile + '.bak'
-          try {
-            fs.copyFileSync(outFile, bak)
-            process.stderr.write(`ℹ existing ${outputName} backed up to ${path.basename(bak)}\n`)
-          } catch (e) {
-            die(`refusing to overwrite ${outputName}: could not back it up — ${e.message}`)
+        // --slash-only installs just the Claude Code slash commands; it needs no
+        // running server and writes no CLAUDE.md (insp-004 #47: the project
+        // snapshot needs the server, but installing the slash commands does not).
+        if (!slashOnly) {
+          installSlash = installSlash  // unchanged
+          // Generate context with rules (call /health first to ensure server reachable)
+          const health = await req('GET', '/health').catch(() => null)
+          if (!health || health.status !== 200) {
+            process.stderr.write(`⚠ codesynapt server not reachable (needed to snapshot the project into ${outputName}).\n`)
+            process.stderr.write(`    Start it first:\n`)
+            process.stderr.write(`      cd ${process.cwd()} && npm start         (desktop)\n`)
+            process.stderr.write(`      cs serve ${abs}                          (headless daemon)\n`)
+            process.stderr.write(`    Or install ONLY the /codesynapt slash commands (no server):\n`)
+            process.stderr.write(`      cs init --slash-only\n`)
+            process.exit(1)
           }
+          // Don't silently destroy an existing CLAUDE.md/AGENTS.md — it may hold
+          // hand-written agent instructions. Back it up before regenerating.
+          if (fs.existsSync(outFile)) {
+            const bak = outFile + '.bak'
+            try {
+              fs.copyFileSync(outFile, bak)
+              process.stderr.write(`ℹ existing ${outputName} backed up to ${path.basename(bak)}\n`)
+            } catch (e) {
+              die(`refusing to overwrite ${outputName}: could not back it up — ${e.message}`)
+            }
+          }
+          const r = spawnSync(process.execPath, [__filename, 'context', '--output', outFile], { stdio: 'inherit' })
+          if (r.status !== 0) die('context generation failed')
         }
-        const r = spawnSync(process.execPath, [__filename, 'context', '--output', outFile], { stdio: 'inherit' })
-        if (r.status !== 0) die('context generation failed')
 
         // Install Claude Code slash commands (user-level: ~/.claude/commands/)
         //   - codesynapt.md       → force mode (cs_* preferred for any non-trivial)
@@ -2022,8 +2039,10 @@ async function main() {
         // Print setup checklist
         const selfMcp = path.resolve(__dirname, 'codesynapt-mcp.cjs')
         process.stdout.write(`\n✅ CodeSynapt setup (opt-in mode — OFF by default)\n\n`)
-        process.stdout.write(`  1. ${outputName} written to ${outFile}\n`)
-        process.stdout.write(`     → project snapshot only. No always-on rules.\n\n`)
+        if (!slashOnly) {
+          process.stdout.write(`  1. ${outputName} written to ${outFile}\n`)
+          process.stdout.write(`     → project snapshot only. No always-on rules.\n\n`)
+        }
         if (slashForceFile && fs.existsSync(slashForceFile) && slashAutoFile && fs.existsSync(slashAutoFile)) {
           // Report the truth: created (new), refreshed (drifted contract rewritten),
           // or up to date (unchanged) — not a blanket "installed" on every re-run.
@@ -2221,9 +2240,9 @@ async function main() {
       case 'preflight': {
         const asJson = args.includes('--json')
         const strict = args.includes('--strict')
-        let locale = null
+        let locale = 'en'   // English CLI surface by default; --locale ko to opt in (#39)
         for (let i = 0; i < args.length; i++) if (args[i] === '--locale' && args[i+1]) locale = args[++i]
-        const r = await req('GET', '/preflight', locale ? { locale } : null)
+        const r = await req('GET', '/preflight', { locale })
         if (r.status !== 200) return die(r.json?.error || 'failed')
         const j = r.json
         if (asJson) { printJson(j); break }
@@ -2279,7 +2298,7 @@ async function main() {
       }
       case 'suggest': {
         const asJson = args.includes('--json')
-        let top = '10', locale = null
+        let top = '10', locale = 'en'   // English CLI surface by default (#39)
         for (let i = 0; i < args.length; i++) {
           if (args[i] === '--top' && args[i+1]) top = args[++i]
           else if (args[i] === '--locale' && args[i+1]) locale = args[++i]

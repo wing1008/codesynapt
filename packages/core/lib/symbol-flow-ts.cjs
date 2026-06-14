@@ -18,6 +18,11 @@ const TS_FLOW_CFG = {
     identTypes: new Set(['identifier']),
     literalTypes: new Set(['integer', 'float', 'string', 'true', 'false', 'none']),
     selfNames: new Set(['self', 'cls']),
+    // Nested binding scopes (their params/targets shadow the outer function), so
+    // their bodies are their OWN flows — skip them like the JS walker skips
+    // arrows (insp-004 #20: `lambda x: g(x)` was attributing g's arg to the
+    // outer param x).
+    nestedScopeTypes: new Set(['lambda', 'list_comprehension', 'set_comprehension', 'dictionary_comprehension', 'generator_expression']),
   },
   java: {
     grammar: 'java',
@@ -29,6 +34,7 @@ const TS_FLOW_CFG = {
     identTypes: new Set(['identifier']),
     literalTypes: new Set(['decimal_integer_literal', 'hex_integer_literal', 'decimal_floating_point_literal', 'string_literal', 'character_literal', 'true', 'false', 'null_literal']),
     selfNames: new Set(['this']),
+    nestedScopeTypes: new Set(['lambda_expression']),
   },
   c_sharp: {
     grammar: 'c_sharp',
@@ -40,6 +46,7 @@ const TS_FLOW_CFG = {
     identTypes: new Set(['identifier']),
     literalTypes: new Set(['integer_literal', 'real_literal', 'string_literal', 'character_literal', 'boolean_literal', 'null_literal']),
     selfNames: new Set(['this']),
+    nestedScopeTypes: new Set(['lambda_expression']),
   },
 }
 const TS_FLOW_EXT = { py: 'python', pyw: 'python', pyi: 'python', java: 'java', cs: 'c_sharp' }
@@ -143,7 +150,7 @@ async function extractFlowTS(source, lang, sym) {
   }
   const pre = (node, isRoot) => {
     if (!node) return
-    if (!isRoot && cfg.fnTypes.has(node.type)) return
+    if (!isRoot && (cfg.fnTypes.has(node.type) || (cfg.nestedScopeTypes && cfg.nestedScopeTypes.has(node.type)))) return
     if (cfg.assignTypes.has(node.type) || node.type === 'augmented_assignment') {
       const { left, right } = leftRightOf(node)
       if (left && cfg.identTypes.has(left.type)) {
@@ -181,7 +188,7 @@ async function extractFlowTS(source, lang, sym) {
   const body = fn.childForFieldName?.('body') || fn
   const walk = (node, isRoot) => {
     if (!node || out.capped) return
-    if (!isRoot && cfg.fnTypes.has(node.type)) return   // nested fns own their flows
+    if (!isRoot && (cfg.fnTypes.has(node.type) || (cfg.nestedScopeTypes && cfg.nestedScopeTypes.has(node.type)))) return   // nested fns own their flows
 
     if (cfg.assignTypes.has(node.type)) {
       const left = node.childForFieldName?.('left') || node.childForFieldName?.('name')
