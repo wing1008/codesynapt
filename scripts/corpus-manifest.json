@@ -1,0 +1,18 @@
+{
+  "description": "Multi-language measurement corpus for the Layer-2 call-graph precision/recall oracles (docs/measurements/2026-06-14-layer-measurement.md). Real popular OSS repos, pinned to the SHA measured. Fetch with: node scripts/fetch-corpus.mjs [targetDir]. Then run e.g. node scripts/_precision_pos.mjs <targetDir>/cpp-json --lang=cpp",
+  "measuredAt": "2026-06-14",
+  "repos": [
+    { "name": "cpp-fmt",        "lang": "cpp",    "url": "https://github.com/fmtlib/fmt",                 "sha": "11ddbcb" },
+    { "name": "cpp-json",       "lang": "cpp",    "url": "https://github.com/nlohmann/json",             "sha": "d8ebaf6" },
+    { "name": "cs-newtonsoft",  "lang": "cs",     "url": "https://github.com/JamesNK/Newtonsoft.Json",   "sha": "4f73e74" },
+    { "name": "go-mux",         "lang": "go",     "url": "https://github.com/gorilla/mux",               "sha": "db9d1d0" },
+    { "name": "java-gson",      "lang": "java",   "url": "https://github.com/google/gson",               "sha": "004e7a4" },
+    { "name": "kotlin-okhttp",  "lang": "kotlin", "url": "https://github.com/square/okhttp",             "sha": "eef9858" },
+    { "name": "kotlin-pure",    "lang": "kotlin", "url": "https://github.com/JetBrains/kotlin-wrappers", "sha": "bd49625" },
+    { "name": "lua-middleclass","lang": "lua",    "url": "https://github.com/kikito/middleclass",        "sha": "359f0e2" },
+    { "name": "php-guzzle",     "lang": "php",    "url": "https://github.com/guzzle/guzzle",             "sha": "bf5f35a" },
+    { "name": "rust-serdejson", "lang": "rust",   "url": "https://github.com/serde-rs/json",             "sha": "a1ae73a" },
+    { "name": "scala-upickle",  "lang": "scala",  "url": "https://github.com/com-lihaoyi/upickle",       "sha": "87e0b24" },
+    { "name": "swift-alamofire","lang": "swift",  "url": "https://github.com/Alamofire/Alamofire",       "sha": "7595cbc" }
+  ]
+}

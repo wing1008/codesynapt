@@ -170,8 +170,11 @@ cross-grammar 오염·OOM은 "단일 프로세스에 grammar 누적"이 원인. 
 | `scripts/_precision_pos.mjs` | **축2 precision 다언어** — 그래프+위치 기반(전 언어, babel과 0.7↔0.8% 일치 검증) |
 | `scripts/_recall_oracle.mjs` | **축2 recall** — 앱 실행 pytracer observed vs 정적 |
 | `scripts/_recall_stdlib.mjs` | **축2 recall 실코드** — stdlib 모듈 실행, 결정가능분/동적 정제 |
+| `scripts/corpus-manifest.json` | **코퍼스 정의** — 12개 OSS repo의 URL+측정 SHA(고정). 재현 기준 |
+| `scripts/fetch-corpus.mjs` | 코퍼스 가져오기 — manifest대로 clone+SHA checkout |
 
-코퍼스: `git clone --depth 1` — gorilla/mux(go), google/gson(java), serde-rs/json(rust), JamesNK/Newtonsoft.Json(cs), square/okhttp(kotlin), Alamofire(swift), guzzle(php), kikito/middleclass(lua), com-lihaoyi/upickle(scala), fmtlib/fmt(cpp). + Python stdlib + 우리 리포.
+코퍼스(12 OSS repo, URL+SHA 고정 — `scripts/corpus-manifest.json`): gorilla/mux(go)·google/gson(java)·serde-rs/json(rust)·JamesNK/Newtonsoft.Json(cs)·square/okhttp+JetBrains/kotlin-wrappers(kotlin)·Alamofire(swift)·guzzle(php)·kikito/middleclass(lua)·com-lihaoyi/upickle(scala)·fmtlib/fmt+nlohmann/json(cpp). + Python stdlib(`_recall_stdlib.mjs`) + 우리 리포.
+**한 줄 재현**: `node scripts/fetch-corpus.mjs <dir>` → `node scripts/_precision_pos.mjs <dir>/<name> --lang=<lang>`. (외부 repo는 동봉 X — URL+SHA만 기록, 온디맨드 clone.)
 
 ## 측정 자체의 한계 (정직)
 1. **측정 스크립트 ≠ 제품 경로** — content 전부 메모리 보유로 대규모 OOM(swift/cpp), naive fileImports. 제품 cs scan(스트리밍·정확 import)으로 재측정하면 다를 수 있음.
