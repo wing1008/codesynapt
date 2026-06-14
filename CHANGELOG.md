@@ -35,6 +35,13 @@
   zod / vue; call-graph accuracy cites a reproducible position oracle (0–1.3%
   wrong-edge) instead of a non-reproducible import-resolution number.
 
+### Security note
+- The optional `@xenova/transformers` dependency (semantic embeddings) carries a
+  known `protobufjs` advisory chain. It is **not installed by default**
+  (`optionalDependencies`) **and** the code only imports it on an explicit opt-in
+  (`CS_EMBED_DOWNLOAD=1`) — so a default install/use never pulls or runs it. To be
+  resolved (remove/replace) before the 0.1.0 stable.
+
 ## 0.0.4 — beta (2026-06-12)
 
 > Beta / pre-release — APIs and formats may still change.
