@@ -179,3 +179,21 @@ cross-grammar 오염·OOM은 "단일 프로세스에 grammar 누적"이 원인. 
 3. **precision scope oracle은 same-file만** — cross-file(alias/namespace) precision 미측정.
 4. **bash·swift는 측정 자체가 wasm 크래시** — 0.0.9 전엔 측정 불가.
 → 즉 이 측정도 "완벽한 정답이 아니라 oracle 기반 하한/근사". 단 dead/이름기반보다 압도적으로 신뢰 가능, "측정 결과를 의심하라"가 매 단계 착시를 제거함.
+
+## #M1 fix + 적대 재검증 (2026-06-14)
+resolveCall에 scope-exact(JS babel) + 위치기반 srcId(tree-sitter) 추가 → bare call이 nested same-named 정의로 정확히 resolve (commit e1d0e56, 3c454c0).
+
+| 언어 | fix 전 | fix 후 |
+|---|---|---|
+| JS | 0.8%(pos)/0.7%(babel) | **0.0%(pos)/0.2%(babel)** |
+| C++ | 1.6% | **0.0%** |
+| Python | 2.6% | **1.3%** (절반) |
+| Java | 0.0% | 0.0% |
+| Kotlin/C# | 0.8%/0.4% | 0.8%/0.4% (caller 범위 밖, 위치기반 한계) |
+
+**적대 재검증** (fix를 의심):
+- ⚠️ **자기참조 발견**: precision oracle(`_precision_pos`)이 "src 범위 안 nested 우선"으로 #M1 판정 = fix와 **동일 로직** → fix하면 oracle 0이 당연. **측정값 0%는 과신 금지.**
+- **진짜 독립 검증 2가지**: ① **과교정(런타임 recall 재측정)**: fix 후 결정가능분 recall **59% 그대로 유지**(62/105) = **fix가 올바른 엣지를 안 깸**(과교정 0). ② **언어 scope 규칙**: nested shadow는 JS/Py 명세 → fix 방향 의미상 올바름.
+- babel oracle(JS) 0.2% 잔여 = babel scope도 fix와 같은 scope라 자기참조지만, babel scope=언어 ground truth라 "거의 0" 신뢰.
+- **결론**: fix 안전·올바름. 진짜 precision = JS 0.2% + tree-sitter 위치근사(py 1.3%). 잔여는 정확한 tree-sitter scope oracle 필요(ROI 낮음, 백로그).
+- **방법론 교훈**: oracle과 fix가 같은 로직이면 자기참조 → 진짜 검증은 *다른 축*(런타임 과교정 + 언어 명세)으로 해야. 측정 의심을 fix 검증에도 적용.
