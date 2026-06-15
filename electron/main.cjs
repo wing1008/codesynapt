@@ -348,6 +348,7 @@ function createWindow() {
     show: false,   // shown on 'ready-to-show' so the renderer paints first (no white flash)
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     title: 'CodeSynapt',
+    icon: path.join(__dirname, '..', 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,

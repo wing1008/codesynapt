@@ -103,6 +103,7 @@
   "build": {
     "appId": "io.codesynapt.desktop",
     "productName": "CodeSynapt",
+    "icon": "build/icon.png",
     "artifactName": "${productName}-Setup-${version}.${ext}",
     "afterPack": "scripts/fuses-after-pack.cjs",
     "asar": false,
