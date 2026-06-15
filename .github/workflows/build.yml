@@ -12,6 +12,8 @@ jobs:
       contents: write   # electron-builder creates a GitHub Release + uploads the installers
     strategy:
       fail-fast: false
+      max-parallel: 1   # build OS sequentially so the 3 jobs don't RACE to create the
+                        # same GitHub Release (Win/Mac asset upload failed, only Linux landed)
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
 
