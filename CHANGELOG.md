@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.0.6 — beta (2026-06-15)
+
+> Beta / pre-release — APIs and formats may still change.
+
+### Added
+- **npm install path at the top of the README** (`npm i -g codesynapt`) + a logo
+  on the README / npm page.
+
+### Fixed / hardened
+- **Multi-session isolation**: MCP-spawned daemon now self-exits when idle
+  (`CS_DAEMON_AUTOEXIT`); `cs serve` Ctrl-C no longer orphans its daemon entry;
+  CLI refuses to print another project's data when routed to a foreign daemon;
+  **port-lock is now per-project** (`ports/{projectHash}.port`) so two projects
+  no longer share one global lock and misroute to each other.
+- **Desktop builds restored** — author email + workflow `contents:write`
+  permission fixed the release-publish 403; `max-parallel:1` stopped the 3-OS
+  Release race → **Windows `.exe` download is back** (+ Linux assets).
+- Robustness: copy-vendor try/catch (postinstall can't break install), `.bak`
+  first-copy preservation, `server.js` ws optional-dep degrades with a clear error.
+- MCP `serverInfo.version` reads `package.json` (was hard-coded); removed an
+  advertised SSE endpoint that 404'd.
+
+### Changed
+- **App icon** (cyan synapse).
+- **Honesty**: README/benchmarks now scope the precision number — `0–1.3%` is the
+  position-oracle (same-file ambiguous) result; the higher nested-scope **#M1**
+  name-based bound (JS ~51%) is a separately-tracked limit. Token `% fewer` is
+  marked as a naive-baseline upper bound inline. Large polyglot repos: Bash/Swift/PHP
+  WASM instability is flagged (0.0.9).
+
 ## 0.0.5 — beta (2026-06-14)
 
 > Beta / pre-release — APIs and formats may still change.
