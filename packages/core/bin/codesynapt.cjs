@@ -40,6 +40,17 @@ const PROJECT_ROOT = (() => {
 // global ~/.codesynapt/port lock is what stops a `cs` command in project A from
 // silently hitting project B's daemon that happens to own that lock (the lock is
 // last-writer-wins across ALL projects). Registry miss → legacy lock fallback.
+// Per-project port lock so two projects (e.g. DocsPro + this repo) don't share a
+// single global ~/.codesynapt/port and misroute to each other (audit B2). Falls
+// back to the legacy global path when the registry isn't available.
+function lockPathFor(root) {
+  try {
+    const phash = require('../lib/registry.cjs').projectHash(root)
+    return path.join(os.homedir(), '.codesynapt', 'ports', phash + '.port')
+  } catch {
+    return path.join(os.homedir(), '.codesynapt', 'port')
+  }
+}
 function resolvePort() {
   const envPort = process.env.CS_PORT || process.env.FG3D_PORT
   if (envPort) return parseInt(envPort, 10)
@@ -49,7 +60,7 @@ function resolvePort() {
     if (d && d.port > 0 && d.port < 65536) return d.port
   } catch { /* registry optional during migration → fall through */ }
   try {
-    const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
+    const lockPath = lockPathFor(PROJECT_ROOT)
     if (fs.existsSync(lockPath)) {
       const p = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10)
       if (p > 0 && p < 65536) return p
@@ -473,7 +484,7 @@ async function runHeadlessServe(args) {
     process.stderr.write(`[cs] unhandledRejection: ${e && e.stack || e}\n`)
   })
 
-  const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
+  const lockPath = lockPathFor(abs)
   let lockWritten = false
   let boundPort = port
   try {
@@ -1625,7 +1636,7 @@ async function main() {
         // desktop may bind a different port).
         const readPortLock = () => {
           try {
-            const lockPath = path.join(os.homedir(), '.codesynapt', 'port')
+            const lockPath = lockPathFor(PROJECT_ROOT)
             if (fs.existsSync(lockPath)) {
               const p = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10)
               if (p > 0 && p < 65536) return p
