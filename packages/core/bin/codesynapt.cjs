@@ -81,10 +81,11 @@ function guardProjectMatch() {
             const same = process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
             if (!same) {
               process.stderr.write(
-                `\n⚠️  codesynapt: daemon on :${PORT} is serving a DIFFERENT project — results are NOT for your cwd.\n` +
+                `\n❌  codesynapt: daemon on :${PORT} is serving a DIFFERENT project — refusing to print the wrong project's data.\n` +
                 `      daemon root: ${h.root}\n` +
                 `      your project: ${PROJECT_ROOT}\n` +
                 `   Fix: run \`cs ensure\` here to start this project's daemon, or set CS_PORT to its port.\n\n`)
+              process.exit(2)   // never emit another project's results to stdout (audit 2026-06; opt out with CS_PORT)
             }
           }
         } catch { /* health unparriseable — skip the guard */ }
