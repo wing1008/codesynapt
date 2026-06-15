@@ -95,6 +95,16 @@ node scripts/_precision_pos.mjs
 - **0–1.3%** across a 13-language external corpus (full method + per-language
   tables in [`docs/measurements/2026-06-14-layer-measurement.md`](./measurements/2026-06-14-layer-measurement.md)).
 
+> **What this number is — and isn't.** The 0–1.3% is the **position oracle on
+> same-file ambiguous-name calls** (the case most likely to mis-resolve). A
+> *separate, known* limitation — **nested-scope #M1** (a same-named function
+> shadowed inside another function's body) — shows a higher **name-based upper
+> bound** in the linked doc (JS ~51%, C# ~50%). That figure counts *coincidental
+> same-names*, so the real rate is lower — it's an honest upper bound, not the
+> oracle precision, and it's tracked for the #M1 fix / 0.0.9. We publish both
+> rather than hide the harder case: if you follow the link and see "51%", that's
+> the name-based ceiling, not the 0–1.3% oracle result.
+
 The graph is *precision-first*: an ambiguous edge is declined and surfaced as a
 *candidate* rather than guessed, so wrong edges stay near zero (recall trades off
 against that). Re-run the oracle on your own repo before relying on it.
