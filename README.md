@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/wing1008/codesynapt/main/docs/logo.png" width="128" alt="CodeSynapt logo">
+</p>
+
 # CodeSynapt
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wing1008/codesynapt/ci.yml?branch=main&label=ci)](https://github.com/wing1008/codesynapt/actions/workflows/ci.yml)
