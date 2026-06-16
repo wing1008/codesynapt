@@ -77,7 +77,7 @@ const I18N = {
   'preflight.hub_tests.detail':    { en: ()  => `Regression risk after deploy.`,                          ko: ()  => `mass≥10 파일인데 테스트 없음. 배포 후 회귀 위험.` },
   'preflight.orphans.ok':          { en: (p) => `Orphan ratio ${p}% — normal range`,                      ko: (p) => `고립 파일 ${p}% — 정상 범위` },
   'preflight.orphans.warn':        { en: (p, n, tot) => `Orphan ratio ${p}% (${n}/${tot})`,               ko: (p, n, tot) => `고립 파일 비율 ${p}% (${n}/${tot})` },
-  'preflight.orphans.detail':      { en: ()  => `>30%. Likely dead code — run \`cs legacy\` to clean.`,   ko: ()  => `30% 초과. 죽은 코드 가능성 — \`cs legacy\` 로 정리.` },
+  'preflight.orphans.detail':      { en: ()  => `>30% imported by nothing. NOT necessarily dead — dynamic/entry/plugin/type use is invisible to static analysis. Verify before removing.`,   ko: ()  => `30% 초과 — import 0. 죽은 코드 단정 아님: 동적·entry·플러그인·타입은 정적분석에 안 보임. 삭제 전 검증.` },
   'preflight.dynamic.info':        { en: (p) => `Dynamic import ratio ${p}%`,                             ko: (p) => `동적 import 비중 ${p}%` },
   'preflight.dynamic.detail':      { en: ()  => `Static analysis is partial here. Caveat for blast/bundle results.`, ko: () => `정적 분석 불완전. blast/bundle 결과에 caveat 있음.` },
   'preflight.env_unused.info':     { en: (n) => `${n} declared env var(s) never used in code`,            ko: (n) => `사용 안 되는 env 변수 ${n}개` },
@@ -106,8 +106,8 @@ const SUGGEST_STRINGS = {
       advice: (id, m) => `Ask the AI: "Write a unit test for ${id} — ${m} files import it."`,
     },
     orphans: {
-      title:  (n) => `${n} orphan files (likely dead code)`,
-      why:    ()  => `Imported by nothing, importing nothing. Often abandoned experiments / unused components.`,
+      title:  (n) => `${n} orphan files (imported by nothing — verify, not necessarily dead)`,
+      why:    ()  => `Imported by nothing, importing nothing. Could be abandoned — but entry points, dynamically-loaded, plugin, and type files look identical. Verify before removing.`,
       advice: (id) => `Ask the AI: "Are ${id} and friends actually used anywhere? Remove them if not." (\`cs legacy\` for the full audit)`,
     },
     unused_env: {
@@ -138,8 +138,8 @@ const SUGGEST_STRINGS = {
       advice: (id, m) => `AI에게: "${id} 에 대한 unit test 작성해줘 — ${m}개 파일이 이걸 import함"`,
     },
     orphans: {
-      title:  (n) => `고립 파일 ${n}개 (의심 죽은 코드)`,
-      why:    ()  => `아무도 import하지 않고, 아무것도 import하지 않음. 보통 옛 실험/사용 안 되는 컴포넌트.`,
+      title:  (n) => `고립 파일 ${n}개 (import 0 — 검증 필요, 죽은 코드 단정 아님)`,
+      why:    ()  => `아무도 import 안 하고 아무것도 import 안 함. 단 entry·동적로드·플러그인·타입 파일도 똑같이 보임. 삭제 전 검증 필수.`,
       advice: (id) => `AI에게: "${id} 등 다음 파일들이 실제 쓰이는지 확인하고 죽은 코드면 제거해줘"  (\`cs legacy\` 로 자세히)`,
     },
     unused_env: {
@@ -437,6 +437,8 @@ function createControlServer(opts) {
       assetEdgeCount: assetEdges,
       extMix, topFolders, topHubs,
       orphanCount,
+      // honesty: import-count 0 is NOT proof of dead code — dynamic/entry/plugin/type files are invisible to static analysis
+      orphanNote: orphanCount > 0 ? 'orphanCount = files imported by nothing. NOT necessarily dead — entry points, dynamically-loaded, plugin, and type files look identical. Verify before removing.' : undefined,
       dynamicPatternFileCount: dynamicCount,
       confidence: conf,
       externalDomainCount: ext.domains.length,
@@ -1933,8 +1935,10 @@ function createControlServer(opts) {
         if (req.method === 'GET' && rest.length === 0) {
           const sinceRaw = url.searchParams.get('since')
           const toolFilter = url.searchParams.get('tool')
+          const sid = url.searchParams.get('sessionId') || null
           const limit = parseInt(url.searchParams.get('limit') || '0', 10)
           let evs = _trace.log
+          if (sid) evs = evs.filter((e) => !e.csSession || e.csSession === sid)  // session isolation — parity with /delta poll (L1648)
           if (sinceRaw) {
             const since = parseInt(sinceRaw, 10)
             evs = evs.filter((e) => e.ts > since)
