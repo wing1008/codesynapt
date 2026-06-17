@@ -35,6 +35,13 @@
 // All exports are lazy: until the first call, this module doesn't
 // even import @xenova/transformers — so the 45 MB dep cost only
 // hits processes that actually opt into embedding mode.
+//
+// @xenova/transformers is an OPTIONAL PEER dependency (not auto-installed):
+// it pulls onnxruntime-web → protobufjs, a chain with critical CVEs, so it is
+// kept out of the default install to keep `npm install codesynapt` audit-clean.
+// Embeddings are an opt-in enhancement — `await import(...)` below throws when
+// the peer is absent and the caller falls back to keyword scoring. To enable
+// semantic search, install it yourself: `npm install @xenova/transformers`.
 
 'use strict'
 
