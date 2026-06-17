@@ -234,8 +234,33 @@ async function loadLang(grammar) {
 // class) is tracked in BACKLOG; the fix path is upgrading the
 // web-tree-sitter + tree-sitter-wasms pair together (ABI-coupled).
 const _parserCache = new Map()
+
+// Grammars served by a NATIVE tree-sitter binding instead of the bundled wasm.
+// web-tree-sitter 0.20.x can't run these (ruby crashes mid-parse, dart needs
+// ABI 15) — the native bindings parse them cleanly and expose the same node API
+// walk() consumes. Kept to the grammars wasm can't handle so the 15 wasm
+// languages are completely untouched. Native deps are OPTIONAL: if absent (no
+// prebuild for the platform) tryNative returns null and parserFor falls through
+// to the wasm path (which then degrades that one language to L1, gracefully).
+const NATIVE_GRAMMARS = { ruby: 'tree-sitter-ruby' }
+let _nativeTS = undefined   // native `tree-sitter` Parser class, or null if unavailable
+function tryNativeParser(grammar) {
+  const mod = NATIVE_GRAMMARS[grammar]
+  if (!mod) return null
+  try {
+    if (_nativeTS === undefined) { try { _nativeTS = require('tree-sitter') } catch { _nativeTS = null } }
+    if (!_nativeTS) return null
+    const Lang = require(mod)
+    const p = new _nativeTS()
+    p.setLanguage(Lang)
+    return p
+  } catch { return null }
+}
+
 async function parserFor(grammar) {
   if (_parserCache.has(grammar)) return _parserCache.get(grammar)
+  const native = tryNativeParser(grammar)
+  if (native) { _parserCache.set(grammar, native); return native }
   const Parser = await getParser()
   const p = new Parser()
   p.setLanguage(await loadLang(grammar))
@@ -1170,7 +1195,7 @@ RECV_OF.c = RECV_OF.cpp
 // Languages where a bare `m()` inside a method means `this.m()` (implicit
 // receiver). Excludes Python/Rust/Go (explicit self/Self) and PHP/JS ($this/
 // this required).
-const IMPLICIT_THIS_LANGS = new Set(['java', 'c_sharp', 'kotlin', 'swift', 'scala', 'cpp', 'c'])
+const IMPLICIT_THIS_LANGS = new Set(['java', 'c_sharp', 'kotlin', 'swift', 'scala', 'cpp', 'c', 'ruby'])
 // Per-language: list of (name,type) bound by a declaration statement node.
 const BIND_OF = {
   java(n) { if (n.type !== 'local_variable_declaration') return []; const tn = typeNameOf(n.childForFieldName?.('type')); const out = []; for (let i = 0; i < n.namedChildCount; i++) { const d = n.namedChild(i); if (d.type === 'variable_declarator') { const nm = d.childForFieldName?.('name'); const ty = tn || ctorTypeName(d.childForFieldName?.('value')); if (nm && ty) out.push({ name: nm.text, type: ty }) } } return out },

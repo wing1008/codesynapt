@@ -27,7 +27,7 @@ const LANG_GROUPS = {
   js: ['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs'], py: ['py', 'pyw', 'pyi'],
   java: ['java'], cs: ['cs'], go: ['go'], rust: ['rs'], kotlin: ['kt', 'kts'],
   swift: ['swift'], php: ['php'], cpp: ['c', 'cc', 'cpp', 'h', 'hpp'],
-  bash: ['sh', 'bash'], scala: ['scala'], lua: ['lua'],
+  bash: ['sh', 'bash'], scala: ['scala'], lua: ['lua'], rb: ['rb'], ruby: ['rb'],
 }
 const langArg = (process.argv.find((a) => a.startsWith('--lang=')) || '').split('=')[1] || null
 const asJson = process.argv.includes('--json')

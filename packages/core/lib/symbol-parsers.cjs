@@ -38,7 +38,14 @@ function registerAll() {
   // kts (Kotlin script) parses identically to kt via the kotlin grammar —
   // verified (2026-06-08): a build.gradle.kts-style snippet yields clean
   // function/class/method symbols, no phantoms.
-  for (const ext of ['go', 'rs', 'java', 'kt', 'kts', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash', 'scala', 'lua']) {
+  // rb (Ruby): now served by the NATIVE tree-sitter binding (optional dep) —
+  // web-tree-sitter 0.20 crashed mid-parse on ruby, so it was L1-only before.
+  // The native parser feeds the same walk()/ctx extraction; if the native dep is
+  // absent it degrades back to L1 (parserFor falls through to wasm → fails →
+  // L2 off for ruby only). Ruby uses implicit-self method calls (IMPLICIT_THIS).
+  // (Dart still excluded — wasm needs ABI 15 / web-tree-sitter upgrade; the
+  // native dart grammar is a stale nan addon incompatible with tree-sitter 0.21.)
+  for (const ext of ['go', 'rs', 'java', 'kt', 'kts', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash', 'scala', 'lua', 'rb']) {
     const p = makeParser(ext)
     if (p) sg.registerParser([ext], p)
   }
@@ -48,7 +55,7 @@ function registerAll() {
 const SUPPORTED_EXTS = new Set([
   'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'pyw', 'pyi',
   'go', 'rs', 'java', 'kt', 'kts', 'swift', 'cs', 'php', 'c', 'cc', 'cpp', 'h', 'hpp', 'sh', 'bash',
-  'scala', 'lua',
+  'scala', 'lua', 'rb',
 ])
 
 module.exports = { registerAll, SUPPORTED_EXTS, SymbolGraph: sg.SymbolGraph }
