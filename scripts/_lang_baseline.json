@@ -1,0 +1,19 @@
+{
+  "note": "Regression baseline for the existing tree-sitter languages, captured BEFORE language-expansion / wasm-upgrade work (2026-06-17, commit 0edde30). Re-run `node scripts/_measure.mjs <corpus>/<repo> --lang=<lang> --json` after any change; a DROP in symbols/confident vs these numbers means the change regressed a working language. Tolerance: ±2% is parser noise; larger is a real regression to investigate.",
+  "corpus": "<os tmp>/corpus (scripts/fetch-corpus.mjs)",
+  "metric": "[symbols, confidentCalls, dead]",
+  "languages": {
+    "cpp  (cpp-fmt)":        [803, 392, 184],
+    "cs   (cs-newtonsoft)":  [9985, 10504, 281],
+    "go   (go-mux)":         [278, 469, 229],
+    "java (java-gson)":      [1425, 1527, 46],
+    "kotlin (kotlin-okhttp)":[7541, 5145, 978],
+    "lua  (lua-middleclass)":[80, 9, 63],
+    "php  (php-guzzle)":      [376, 129, 109],
+    "rust (rust-serdejson)": [1199, 495, 532],
+    "scala (scala-upickle)": [1757, 616, 999],
+    "js   (own repo)":       [3774, 4653, null]
+  },
+  "tests": "328 passing (npx vitest run)",
+  "restorePoint": "0edde30 (origin/session/caveat-coldstart-auth-hardening)"
+}
