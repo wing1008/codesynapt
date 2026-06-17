@@ -50,10 +50,20 @@ for (const f of files) {
       const callLine = p.node.loc?.start.line; if (!callLine) return
       const b = p.scope.getBinding(name)
       if (!b || !b.path?.node?.loc) return            // unresolved / global / import → not same-file-provable
-      // must bind to a callable def (function/class/var holding fn), in THIS file
-      const k = b.path.node.type
-      if (!/Function|Class|VariableDeclarator|ClassMethod|ObjectMethod/.test(k)) return
-      truth.push({ file: f.id, callLine, name, defLine: b.path.node.loc.start.line })
+      // must bind to a real same-file CALLABLE def, in THIS file.
+      const bn = b.path.node
+      const k = bn.type
+      // A `const x = require('..')` / `const x = factory()` declarator is an
+      // imported/aliased callable, NOT a same-file definition — babel binds the
+      // call to the alias, but the real target is cross-file. Counting it tanks
+      // recall on require-heavy code (express tests) with edges no same-file
+      // graph should draw. Only accept a VariableDeclarator whose init is an
+      // actual function/arrow literal.
+      if (k === 'VariableDeclarator') {
+        const it = bn.init?.type
+        if (it !== 'FunctionExpression' && it !== 'ArrowFunctionExpression') return
+      } else if (!/Function|Class|ClassMethod|ObjectMethod/.test(k)) return
+      truth.push({ file: f.id, callLine, name, defLine: bn.loc.start.line })
     },
   })
 }
