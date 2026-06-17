@@ -722,7 +722,14 @@ export class Scanner extends EventEmitter {
       }
     }
     const g = new SymbolGraph()
-    await g.build(entries, fileImports, { fileReexports })
+    // Cold-start feedback: the lazy first symbol build is the long silent wait.
+    // Re-emit the build's internal progress as a scanner event so the desktop
+    // (electron/main.cjs → renderer) can show it. Headless callers ignore it.
+    this.emit('symbol-progress', { phase: 'start', done: 0, total: entries.length })
+    await g.build(entries, fileImports, {
+      fileReexports,
+      onProgress: (p) => { try { this.emit('symbol-progress', p) } catch {} },
+    })
     // Re-apply persisted runtime observations (cs trace run --merge). The graph
     // was just rebuilt from source, so observed edges would otherwise vanish.
     // trace-store's mtime guard EXPIRES observations whose files changed —
@@ -753,6 +760,7 @@ export class Scanner extends EventEmitter {
     // control-server, in-process MCP). enrichSymbolGraph has its own try/catch;
     // we guard here too so a throw can never escape buildSymbolGraph.
     if (process.env.CS_SUBENGINE_OFF !== '1') {
+      this.emit('symbol-progress', { phase: 'enrich' })
       try {
         this.enrichSymbolGraph({
           external: process.env.CS_SUBENGINE === '1',
@@ -760,6 +768,7 @@ export class Scanner extends EventEmitter {
         })
       } catch (e) { if (process.env.CS_DBG) console.error('[cs] enrichSymbolGraph guard:', e && e.message) }
     }
+    this.emit('symbol-progress', { phase: 'done' })
     return g
   }
 

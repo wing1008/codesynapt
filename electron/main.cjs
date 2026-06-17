@@ -298,6 +298,11 @@ async function startScanner(root) {
   scanner.on('scan-progress', (p) => {
     mainWindow?.webContents.send('scan-progress', p)
   })
+  // L2 symbol/call-graph build progress — the lazy first build is a long silent
+  // wait on big repos; forward it so the renderer can show a phase + count.
+  scanner.on('symbol-progress', (p) => {
+    mainWindow?.webContents.send('symbol-progress', p)
+  })
   scanner.on('file-changed', ({ id, absPath }) => {
     invalidateSymbolGraph(id, 'changed')
     try {

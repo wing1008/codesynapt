@@ -354,6 +354,8 @@ const T = {
     'drop.overlay':        '스캔할 폴더를 놓으세요',
     'scan.scanning':       '스캔 중…',
     'scan.building':       '그래프 빌드 중…',
+    'scan.symbols':        '콜그래프 빌드 중…',
+    'scan.enrich':         '타입 분석 중…',
     'scan.files':          '파일',
     // Status bar units
     'status.files':        '파일',
@@ -619,6 +621,8 @@ const T = {
     'drop.overlay':        'drop folder to scan',
     'scan.scanning':       'Scanning…',
     'scan.building':       'Building graph…',
+    'scan.symbols':        'Building call graph…',
+    'scan.enrich':         'Analyzing types…',
     'scan.files':          'files',
     'status.files':        'files',
     'status.edges':        'edges',
@@ -6279,6 +6283,25 @@ function handleScanProgress({ count, done, phase }) {
   }
 }
 
+// L2 symbol/call-graph build progress. The lazy first build is the long silent
+// wait after opening a big repo — surface a phase + count in the same toast so
+// it never looks hung. phases: start | symbols | symbols-worker | refs | enrich | done.
+function handleSymbolProgress({ phase, done: pdone, total } = {}) {
+  if (!scanToast || !scanLabel) return
+  if (phase === 'done') {
+    if (scanHideTimer) clearTimeout(scanHideTimer)
+    scanHideTimer = setTimeout(() => scanToast.classList.add('hidden'), 600)
+    return
+  }
+  const label = phase === 'enrich' ? t('scan.enrich') : t('scan.symbols')
+  const counter = (total && phase !== 'enrich') ? ` ${(pdone || 0).toLocaleString()}/${total.toLocaleString()}` : ''
+  // textContent replaces the default composition (incl. #scanCount); a later
+  // scan-progress restores scanLabelDefault, so this is safe to overwrite.
+  scanLabel.textContent = label + counter
+  scanToast.classList.remove('hidden')
+  if (scanHideTimer) { clearTimeout(scanHideTimer); scanHideTimer = null }
+}
+
 function toast(message) {
   const el = document.createElement('div')
   el.className = 'toast'
@@ -6333,6 +6356,7 @@ if (isElectron) {
     })
   }
   if (window.codesynapt.onScanProgress) window.codesynapt.onScanProgress(handleScanProgress)
+  if (window.codesynapt.onSymbolProgress) window.codesynapt.onSymbolProgress(handleSymbolProgress)
   if (window.codesynapt.onControl) {
     window.codesynapt.onControl((msg) => {
       const node = state.nodes.get(msg.id)

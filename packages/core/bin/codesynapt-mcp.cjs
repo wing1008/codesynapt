@@ -383,8 +383,22 @@ const TOOLS = [
             limit: limit ?? 0, offset: offset ?? 0, ext, minMass, sort,
           })).data
         case 'node':  if (!id) bad('node requires id');  return (await apiReq('GET', '/node/' + encId(id))).data
-        case 'deps':  if (!id) bad('deps requires id');  return (await apiReq('GET', '/deps/' + encId(id))).data
-        case 'users': if (!id) bad('users requires id'); return (await apiReq('GET', '/users/' + encId(id))).data
+        case 'deps': {
+          if (!id) bad('deps requires id')
+          const dr = await apiReq('GET', '/deps/' + encId(id))
+          if (dr.status !== 200) return dr.data   // preserve 404 {error} passthrough
+          // Consistency with blast/users: a static import list is a FLOOR.
+          return { id, deps: dr.data, count: Array.isArray(dr.data) ? dr.data.length : 0,
+            note: 'Static import edges — a floor, not the whole set. Dynamic import(var), reflective, and DI-resolved dependencies are statically invisible and not listed here.' }
+        }
+        case 'users': {
+          if (!id) bad('users requires id')
+          const ur = await apiReq('GET', '/users/' + encId(id))
+          if (ur.status !== 200) return ur.data   // preserve 404 {error} passthrough
+          // users = blast surface. Mark it as a FLOOR for parity with cs_blast's caveat.
+          return { id, users: ur.data, count: Array.isArray(ur.data) ? ur.data.length : 0,
+            note: 'Static importers = blast surface, a FLOOR not a complete set. A file dynamically imported (import(var)), reflectively loaded, or DI-wired can import this without appearing here — the real user set may be larger.' }
+        }
         case 'find':  if (!q)  bad('find requires q');   return (await apiReq('GET', '/find', { q })).data
         case 'search': {
           // 503 (scan in progress) → retry up to 3 times, 2 s apart.

@@ -933,6 +933,18 @@ class SymbolGraph {
     const MAX_FILE_BYTES = options.maxFileBytes
       || parseInt(process.env.CS_MAX_FILE_BYTES || '524288', 10)  // 512KB
     let abortedAt = null
+    // Cold-start progress. The lazy first build is the ~tens-of-seconds wait a
+    // user feels after opening a big repo; without this it runs silently. The
+    // host (scanner) wires options.onProgress to a 'symbol-progress' event.
+    // Throttled so a 5k-file repo emits ~40 ticks, not 5k IPC messages.
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
+    const _entries = Array.from(fileEntries)
+    const _total = _entries.length
+    const _step = Math.max(1, Math.floor(_total / 40))
+    const tick = (phase, done, total) => {
+      if (!onProgress) return
+      try { onProgress({ phase, done, total }) } catch {}
+    }
     // Pass 1 — symbols. We need every symbol indexed before we can
     // resolve references in pass 2.
     let fileCount = 0
@@ -941,7 +953,8 @@ class SymbolGraph {
     // child process (see symbol-parse-worker.cjs). Opt-out with CS_NO_WORKER.
     const WORKER_EXTS = (process.env.CS_NO_WORKER || options.noWorker) ? new Set() : WORKER_GRAMMAR_EXTS
     const workerFiles = []            // heavy-grammar files deferred to the worker
-    for (const entry of fileEntries) {
+    tick('symbols', 0, _total)
+    for (const entry of _entries) {
       if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
       const parser = PARSERS[entry.ext]
       if (!parser) continue
@@ -1018,18 +1031,27 @@ class SymbolGraph {
         this.addNode(s)
       }
       fileCount++
+      if (fileCount % _step === 0) tick('symbols', fileCount, _total)
     }
-    // Worker pass 1 — heavy-grammar symbols, parsed in recycled child processes.
+    // Worker pass 1 — heavy-grammar symbols, parsed in recycled child processes
+    // (the slow Swift/etc. path). Coarse phase marker — per-batch progress lives
+    // inside the spawn loop and isn't surfaced here.
     if (workerFiles.length) {
+      tick('symbols-worker', fileCount, _total)
       for (const s of this._workerParse('symbols', workerFiles)) {
         if (this.nodes.size >= MAX_SYMBOLS) { abortedAt = 'symbols'; break }
         this.addNode(s)
       }
       fileCount += new Set(workerFiles.map((f) => f.id)).size
     }
+    tick('symbols', _total, _total)
     // Pass 2 — references. Per-file, ask the language parser to find
     // call/extends/implements edges. Parsers consult `this` (the
     // symbol index) to resolve names.
+    const _refTotal = fileContents.size
+    const _refStep = Math.max(1, Math.floor(_refTotal / 40))
+    let _refDone = 0
+    tick('refs', 0, _refTotal)
     for (const [fileId, content] of fileContents) {
       if (this.edges.length >= MAX_EDGES) { abortedAt = abortedAt || 'edges'; break }
       const ext = extFor(fileId)
@@ -1047,7 +1069,10 @@ class SymbolGraph {
           this.addEdge(r)
         }
       }
+      _refDone++
+      if (_refDone % _refStep === 0) tick('refs', _refDone, _refTotal)
     }
+    tick('refs', _refTotal, _refTotal)
     // Worker pass 2 — heavy-grammar references. The worker rebuilds a resolver
     // from the symbols we just indexed for those grammars (+ their structural
     // edges) so the normal extractReferences path runs unchanged in the child.

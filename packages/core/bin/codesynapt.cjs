@@ -984,12 +984,18 @@ async function main() {
       case 'deps': {
         if (!args[0]) return die('usage: cs deps <id>')
         const r = await req('GET', '/deps/' + encId(args[0]))
-        for (const e of r.json) process.stdout.write(`${e.k}\t${e.t}\n`); break
+        for (const e of r.json) process.stdout.write(`${e.k}\t${e.t}\n`)
+        // Floor caveat on stderr — stdout stays clean for piping (parity with cs blast).
+        process.stderr.write(`⚠  static import edges — a floor, not the whole set. dynamic import(var)/reflective/DI deps are invisible here.\n`)
+        break
       }
       case 'users': {
         if (!args[0]) return die('usage: cs users <id>')
         const r = await req('GET', '/users/' + encId(args[0]))
-        for (const e of r.json) process.stdout.write(`${e.k}\t${e.s}\n`); break
+        for (const e of r.json) process.stdout.write(`${e.k}\t${e.s}\n`)
+        // Floor caveat on stderr — this is the blast surface; the real importer set may be larger.
+        process.stderr.write(`⚠  static importers (blast surface) — a FLOOR not complete. a dynamically/reflectively/DI-imported file can use this without appearing here.\n`)
+        break
       }
       case 'find': {
         if (!args[0]) return die('usage: cs find <substring>')

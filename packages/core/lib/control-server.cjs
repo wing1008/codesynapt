@@ -18,6 +18,19 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { execFile } = require('child_process')
+
+// Constant-time Bearer-token comparison. A plain `received !== expected` returns
+// at the first differing byte, leaking a per-character timing signal a brute
+// forcer could exploit. Practical risk here is low (localhost-bound, single
+// user), but timingSafeEqual is ~free hardening. Length mismatch short-circuits
+// (timingSafeEqual throws on unequal lengths) — that leaks only the length, the
+// standard trade-off.
+function tokenEq(received, expected) {
+  if (typeof received !== 'string' || typeof expected !== 'string') return false
+  const a = Buffer.from(received), b = Buffer.from(expected)
+  if (a.length !== b.length) return false
+  return crypto.timingSafeEqual(a, b)
+}
 const { SUPPORTED_EXTS } = require('./symbol-parsers.cjs')
 const sv = require('./symbol-views.cjs')
 const traceStore = require('./trace-store.cjs')
@@ -1564,7 +1577,7 @@ function createControlServer(opts) {
     // Bearer token validation (only if authToken is configured)
     if (authToken) {
       const hdr = req.headers.authorization || ''
-      if (!hdr.startsWith('Bearer ') || hdr.slice(7) !== authToken) {
+      if (!hdr.startsWith('Bearer ') || !tokenEq(hdr.slice(7), authToken)) {
         req._principal = 'invalid'
         return writeJson(res, 401, { error: 'unauthorized — Authorization: Bearer <token> required' })
       }
@@ -2196,7 +2209,7 @@ function createControlServer(opts) {
         // is set, require it here too (independent of read-side policy).
         const auth = String(req.headers['authorization'] || '')
         if (!authToken) return writeJson(res, 403, { error: 'write disabled: start the server with CS_AUTH_TOKEN to enable edits' })
-        if (!auth.startsWith('Bearer ') || auth.slice(7) !== authToken) {
+        if (!auth.startsWith('Bearer ') || !tokenEq(auth.slice(7), authToken)) {
           return writeJson(res, 401, { error: 'write requires Authorization: Bearer <token>' })
         }
         const id = idFromRest()
@@ -2277,7 +2290,7 @@ function createControlServer(opts) {
         // so it doesn't, but a headless daemon must).
         const auth = String(req.headers['authorization'] || '')
         if (!authToken) return writeJson(res, 403, { error: 'restore disabled: start the server with CS_AUTH_TOKEN to enable writes' })
-        if (!auth.startsWith('Bearer ') || auth.slice(7) !== authToken) {
+        if (!auth.startsWith('Bearer ') || !tokenEq(auth.slice(7), authToken)) {
           return writeJson(res, 401, { error: 'restore requires Authorization: Bearer <token>' })
         }
         const id = idFromRest()

@@ -59,6 +59,28 @@ describe('Scanner — initial scan', () => {
   })
 })
 
+describe('Scanner — L2 cold-start progress (symbol-progress)', () => {
+  it('narrates the lazy symbol build: start → symbols → refs → done', async () => {
+    const s = new Scanner(tmpRoot)
+    const events = []
+    s.on('symbol-progress', (p) => events.push(p))
+    await new Promise((resolve) => { s.once('snapshot', resolve); s.start() })
+    await s.getSymbolGraph()
+    try { s.stop() } catch {}
+    const phases = events.map((e) => e.phase)
+    // The build used to run silently for tens of seconds on big repos — this
+    // is the phase contract the desktop renderer shows so it never looks hung.
+    expect(phases).toContain('start')
+    expect(phases).toContain('symbols')
+    expect(phases).toContain('refs')
+    expect(phases[phases.length - 1]).toBe('done')
+    // 'symbols' ticks must carry numeric done/total for the N/M counter.
+    const symTick = events.find((e) => e.phase === 'symbols' && typeof e.total === 'number')
+    expect(symTick).toBeDefined()
+    expect(symTick.total).toBeGreaterThan(0)
+  })
+})
+
 describe('Scanner — vendor detection (P1·2)', () => {
   let vendorRoot
 

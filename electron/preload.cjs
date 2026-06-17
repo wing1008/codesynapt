@@ -151,6 +151,12 @@ const csApi = {
     ipcRenderer.on('scan-progress', handler)
     return () => ipcRenderer.off('scan-progress', handler)
   },
+  // L2 symbol/call-graph build progress (lazy first build feedback).
+  onSymbolProgress: (cb) => {
+    const handler = (_e, data) => cb(data)
+    ipcRenderer.on('symbol-progress', handler)
+    return () => ipcRenderer.off('symbol-progress', handler)
+  },
   // Per-snapshot scanner stats (file count, edge count, scan timings).
   // main.cjs emits 'stats' on every scanner 'stats' event; previously
   // unbridged, so the renderer could never see it.
