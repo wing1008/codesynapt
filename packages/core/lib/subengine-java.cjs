@@ -27,7 +27,16 @@ function available() {
 let _classDir = null
 function ensureCompiled() {
   if (_classDir) return _classDir
-  const dir = path.join(os.tmpdir(), 'cs-subengine-java')
+  // PER-PROCESS class dir. A single shared `cs-subengine-java` dir let two
+  // concurrent sessions (multi-session is default-on) race: javac writes
+  // Sub.class + the anonymous-inner Sub$1.class straight into the shared dir, so
+  // a second process could `java -cp dir Sub` while Sub.class was half-written
+  // or Sub$1.class hadn't landed yet (→ NoClassDefFoundError), and on Windows a
+  // recompile can't replace a .class a running `java` holds open (EPERM). Owning
+  // a private dir per process removes the race entirely; cost is one javac per
+  // process lifetime (~1s for the 4 KB helper), memoized by _classDir, and only
+  // on the opt-in (CS_SUBENGINE) Java path.
+  const dir = path.join(os.tmpdir(), `cs-subengine-java-${process.pid}`)
   fs.mkdirSync(dir, { recursive: true })
   const cls = path.join(dir, 'Sub.class')
   const stale = !fs.existsSync(cls) || fs.statSync(HELPER_SRC).mtimeMs > fs.statSync(cls).mtimeMs
