@@ -230,9 +230,14 @@ async function _startInProcessBackend() {
       fs.mkdirSync(path.dirname(lp), { recursive: true })
       fs.writeFileSync(lp, String(bound))
       const clean = () => { try { if (fs.readFileSync(lp, 'utf8').trim() === String(bound)) fs.unlinkSync(lp) } catch {} }
+      // Graceful shutdown: stop the scanner (drops the file watcher + registry
+      // lease) before exiting, so a Ctrl-C doesn't leave the watcher orphaned.
+      // The bare 'exit' path can't run async work — OS reclaims the native
+      // watcher fd there — so scanner.stop() rides the signal handlers only.
+      const shutdown = () => { try { scanner.stop() } catch {} clean(); process.exit(0) }
       process.on('exit', clean)
-      process.on('SIGINT', () => { clean(); process.exit(0) })
-      process.on('SIGTERM', () => { clean(); process.exit(0) })
+      process.on('SIGINT', shutdown)
+      process.on('SIGTERM', shutdown)
     }
   } catch {}
   process.stderr.write(`[codesynapt-mcp] auto-started backend on 127.0.0.1:${bound} scanning ${root}\n`)
@@ -576,20 +581,32 @@ const TOOLS = [
     },
     handler: async ({ action, id, content, find, replace, replaceAll, ts }) => {
       if (!id) bad('id is required')
+      // Mutations must SURFACE backend failures, not return the error JSON as a
+      // success. /write etc. answer 403/401/404/409/413/500 — returning .data
+      // blind makes the AI treat "find string not found" / "write disabled" as
+      // done. Throw via bad() so tools/call wraps it as isError. (Reads like
+      // history keep the plain passthrough.)
+      const mut = async (method, p, query, body) => {
+        const r = await apiReq(method, p, query, body)
+        if (r.status < 200 || r.status >= 300) {
+          bad(`${method} ${p} failed (HTTP ${r.status}): ${r.data && r.data.error ? r.data.error : JSON.stringify(r.data)}`)
+        }
+        return r.data
+      }
       switch (action) {
         case 'write':
           if (typeof content !== 'string') bad('write requires content')
-          return (await apiReq('POST', '/write/' + encId(id), null, { content })).data
+          return mut('POST', '/write/' + encId(id), null, { content })
         case 'edit':
           if (typeof find !== 'string' || typeof replace !== 'string') bad('edit requires find and replace')
-          return (await apiReq('POST', '/edit/' + encId(id), null, { find, replace, replaceAll: replaceAll === true })).data
+          return mut('POST', '/edit/' + encId(id), null, { find, replace, replaceAll: replaceAll === true })
         case 'refresh':
-          return (await apiReq('POST', '/refresh/' + encId(id))).data
+          return mut('POST', '/refresh/' + encId(id))
         case 'history':
           return (await apiReq('GET', '/history/' + encId(id))).data
         case 'restore':
           if (!ts) bad('restore requires ts')
-          return (await apiReq('POST', '/restore/' + encId(id), { ts })).data
+          return mut('POST', '/restore/' + encId(id), { ts })
         default: bad('unknown action: ' + action)
       }
     },
