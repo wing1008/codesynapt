@@ -635,7 +635,13 @@ function extractReferences(content, fileId, index) {
         // visitor enter/exit — `return x.push(...)` (number) and
         // `return x.pop()` (element) both throw "Unexpected return
         // value". Use bare `return` instead.
-        if (!n.id?.name || !n.loc) { enclosing.push(null); return }
+        // Anonymous function declaration (`export default function () {…}`).
+        // Push the nearest NAMED enclosing (not null) so calls in its body
+        // attribute there instead of being dropped — same fix the ObjectMethod
+        // and callback visitors already apply. (zod locale `export default
+        // function(){ return { localeError: error() } }` was a measured recall
+        // miss: the `error()` call vanished because the caller was null.)
+        if (!n.id?.name || !n.loc) { enclosing.push(enclosing.top()); return }
         pushEnclosing(n.id.name, n.loc.start.line)
         pushTypes(); harvestTypesFrom(n)
       },
@@ -687,7 +693,7 @@ function extractReferences(content, fileId, index) {
     ClassMethod: {
       enter(path) {
         const n = path.node
-        if (!n.key || !n.loc) { enclosing.push(null); return }
+        if (!n.key || !n.loc) { enclosing.push(enclosing.top()); return }
         const name = n.key.name || n.key.value || '(method)'
         const qualified = currentClass ? `${currentClass}.${name}` : name
         pushEnclosing(qualified, n.loc.start.line)
