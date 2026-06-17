@@ -55,17 +55,31 @@ scope oracle(위치기반 + JS babel-exact)로 재측정한 진짜 틀린연결 
 - **속도**: 0.4~9.4 ms/file(C++ 헤더만 45). 양호. kotlin-wrappers 14641파일도 0.4ms/file.
 - **동적 처리**: candidates/dynamicSites 원장으로 동적 호출을 침묵0으로 정직 처리.
 
+## 5. ★ recall 측정됨 (런타임 oracle, `_recall_stdlib.mjs`)
+실행 stdlib 실코드(드라이버가 argparse/json/collections/configparser/csv/textwrap/
+string/difflib 사용, pytracer 정밀 관측) 31파일·관측 677edge. dead가 아닌 **실행 관측**
+기반 — 라이브러리 부풀림 없음(실행된 edge만 판정).
+- **결정가능분(free function 호출, 이상향 "정적 100%" 목표): recall 78%** (82/105, miss 23).
+  전회 59%(하한) → 78%. miss는 대부분 **cross-module**(`re.compile`)·**데코레이터 래퍼**
+  (typing `_tp_cache`, functools `decorating_function`) — 알려진 cross-module 한계와 일치.
+- **동적(member call obj.method(), 타입불명 = "후보 최대치" 영역): 커버 72%** (confident 92
+  + candidate 8, miss 39).
+- **적대 false edge 3**(static이 실행과 다른 line의 동명 정의로 confident: configparser
+  get→before_get, argparse add_argument→_add_action) = 런타임이 잡은 precision 위반 ~1.7%,
+  위치/babel oracle의 0~1.3%와 일관.
+
 ## 변치 않은 한계 (정직하게)
-1. **dead ≠ recall**: 3%(C#/Java) ~ 82%(Go)로 27배 변동. 라이브러리 부풀림 + 언어별
-   member-call resolve 차이 때문. recall은 **런타임 트레이싱 oracle**(`_recall_oracle.mjs`,
-   Python 전용)로만 측정 가능 — 이번 세션 미실행(앱+엔트리 필요). 전회 값(결정가능분 59%
-   하한·동적 72%) 유지.
+1. **dead ≠ recall**: dead% 3%(C#/Java)~82%(Go)로 27배 변동(라이브러리 부풀림+언어별 member
+   resolve 차이) → dead는 recall 지표로 못 씀. 진짜 recall은 위 §5 런타임 oracle로 측정
+   (결정가능분 78%·동적 72%). 단 Python 단일 언어 — 타 언어 recall은 각 런타임 tracer 필요.
 2. **다언어 측정 = 언어격리로 완화됐으나 swift crash·php flake 잔존** → 0.0.9 wasm ABI가
    완전 신뢰의 전제.
 3. **이름기반 #M1은 폐기**: 위치/scope oracle이 정본. _measure의 m1Pct 컬럼은 참고용(착시).
 
 ## 이상향 거리 (갱신)
-- **틀린연결 0**: ✅ 사실상 달성(≤1.3%, 잡힌 건 진짜 nested 충돌). 완전 0은 resolveCall에
-  scope 인지 추가 필요(중간 작업, precision/recall 트레이드오프).
-- **정적 100%(놓침 0)**: 미측정(런타임 recall oracle 필요). dead로는 결정 불가.
+- **틀린연결 0**: ✅ 사실상 달성(전 언어 ≤1.3%, 런타임 false edge ~1.7%, 잡힌 건 진짜 nested
+  충돌). 완전 0은 resolveCall에 scope 인지 추가 필요(중간 작업, precision/recall 트레이드오프).
+- **정적 100%(놓침 0)**: 결정가능분 **78%** (런타임 측정). 남은 22%는 대부분 cross-module
+  (resolveImportSource 상대경로만) + 데코레이터 래퍼 → **cross-module recall이 최대 거리**.
+- **동적 후보 최대치**: 72% 커버(후보 포함). table-OOP(lua)·타입불명 member가 미커버 잔여.
 - **다언어 9개 안정 측정**: 11/13 성공. swift·php(flake)·lua가 0.0.9/구조 게이트.
