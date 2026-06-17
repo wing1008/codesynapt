@@ -1929,7 +1929,12 @@ async function main() {
           // Don't silently destroy an existing CLAUDE.md/AGENTS.md — it may hold
           // hand-written agent instructions. Back it up before regenerating.
           if (fs.existsSync(outFile)) {
-            const bak = outFile + '.bak'
+            // Never clobber an existing backup. A blind `outFile + '.bak'` meant a
+            // SECOND `cs init` overwrote the first run's backup — destroying the
+            // original hand-written file it was meant to protect. Pick the first
+            // free `.bak`, `.bak.1`, `.bak.2`… so no backup is ever lost.
+            let bak = outFile + '.bak'
+            for (let n = 1; fs.existsSync(bak); n++) bak = `${outFile}.bak.${n}`
             try {
               fs.copyFileSync(outFile, bak)
               process.stderr.write(`ℹ existing ${outputName} backed up to ${path.basename(bak)}\n`)
