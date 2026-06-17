@@ -482,6 +482,14 @@ class SymbolGraph {
       // constructor `Transformer()` onto a function `transformer`, etc.
       // — phantom edges to same-spelled-different-case symbols (B-2).
       if (node.name !== name) continue
+      // A bare call `foo()` never targets an object-literal value-callback
+      // (`{ foo: () => … }`, parser-flagged valueCallback): those are passed as
+      // values and dispatched, never invoked by their property name in source.
+      // Resolving a bare call to one shadows the real same-named import/function
+      // (measured: hono `getPath(req)` mis-linked to a `new Hono({ getPath })`
+      // option arrow instead of the imported getPath). Member calls (obj.foo())
+      // are unaffected — they go through the typed/member path.
+      if (!memberCall && node.valueCallback) continue
       // A bare call `foo()` cannot target a METHOD (`Class.foo` needs a
       // receiver). Skipping same-file methods lets a method body's `dumps()`
       // (calling the IMPORTED free `dumps`) resolve to the import instead of
