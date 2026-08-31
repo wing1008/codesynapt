@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - uses: actions/labeler@v5
+      - uses: actions/labeler@v7
         with:
           configuration-path: .github/labeler.yml
           # Don't remove labels the maintainer added manually
